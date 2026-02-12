@@ -1,31 +1,25 @@
 <div align="center">
   <h1>nano-claw</h1>
   <p>
-    <strong>Ultra-Lightweight Personal AI Assistant</strong>
+    🦞 Claw is a Ultra-Lightweight Personal AI Assistant you run on your own devices.
   </p>
   <p>
     <img src="https://img.shields.io/badge/typescript-5.x-blue" alt="TypeScript">
     <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node.js">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/code-4952%20lines-brightgreen" alt="Lines of Code">
   </p>
 </div>
 
----
-
-## About
+## 📖 About
 
 **nano-claw** is a TypeScript + Node.js implementation of [nanobot](https://github.com/HKUDS/nanobot), an ultra-lightweight personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw).
 
-🪶 **Ultra-Lightweight**: Just ~2,500 lines of core TypeScript code
+- 🪶 **Ultra-Lightweight**: Just ~4,500 lines of core TypeScript code
+- 🔬 **Research-Ready**: Clean, readable code that's easy to understand and extend
+- ⚡️ **Lightning Fast**: Minimal footprint for faster startup and lower resource usage
+- 💎 **Easy-to-Use**: Simple configuration and intuitive CLI
 
-🔬 **Research-Ready**: Clean, readable code that's easy to understand and extend
-
-⚡️ **Lightning Fast**: Minimal footprint for faster startup and lower resource usage
-
-💎 **Easy-to-Use**: Simple configuration and intuitive CLI
-
-## Architecture
+## 🏗️ Architecture
 
 ```
 nano-claw/
@@ -49,9 +43,10 @@ nano-claw/
 └── package.json
 ```
 
-## Features
+## ✨ Features
 
 ### Core Agent
+
 - **Agent Loop**: LLM and tool execution loop
 - **Context Builder**: Construct prompt context
 - **Memory**: Persistent conversation memory
@@ -60,7 +55,9 @@ nano-claw/
 - **Tools**: Built-in tools (shell, file operations, etc.)
 
 ### LLM Providers
+
 Support for multiple LLM providers:
+
 - OpenRouter (recommended, access to all models)
 - Anthropic (Claude)
 - OpenAI (GPT)
@@ -75,7 +72,9 @@ Support for multiple LLM providers:
 - vLLM (local models)
 
 ### Chat Channels
+
 Support for multiple chat platforms:
+
 - **Telegram** ✅ Implemented
 - **Discord** ✅ Implemented
 - **DingTalk / 钉钉** ✅ Implemented
@@ -89,6 +88,7 @@ Support for multiple chat platforms:
 > **Note**: Telegram, Discord, and DingTalk channel adapters are fully implemented. Additional channel adapters can be added by extending the `BaseChannel` class.
 
 ### Other Features
+
 - **Gateway Server**: Central hub for channel management ✨ NEW
 - **Message Bus**: Event-driven message routing ✨ NEW
 - **Cron Tasks**: Schedule tasks with cron expressions
@@ -97,24 +97,17 @@ Support for multiple chat platforms:
 - **Subagent Tasks**: Background task execution ✨ NEW
 - **Configuration**: JSON configuration files with Zod validation
 
-## Installation
+## 📦 Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/hustcc/nano-claw.git
-cd nano-claw
+npm install -g nano-claw
 
-# Install dependencies
-npm install
+pnpm install @antv/ava
 
-# Build the project
-npm run build
-
-# Link for global usage (optional)
-npm link
+yarn add @antv/ava
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 **1. Initialize**
 
@@ -146,7 +139,7 @@ For OpenRouter (recommended):
 nano-claw agent -m "What is 2+2?"
 ```
 
-## CLI Commands
+## 🔧 CLI Commands
 
 - `nano-claw onboard` - Initialize configuration
 - `nano-claw agent -m "..."` - Chat with agent (single message)
@@ -156,7 +149,7 @@ nano-claw agent -m "What is 2+2?"
 - `nano-claw channels login` - Login to channels (e.g., WhatsApp)
 - `nano-claw cron add/list/remove` - Manage scheduled tasks
 
-## Development
+## 👨‍💻 Development
 
 ```bash
 # Watch mode (auto-rebuild on changes)
@@ -172,7 +165,7 @@ npm run format
 npm run test
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 Configuration file location: `~/.nano-claw/config.json`
 
@@ -183,10 +176,10 @@ See [CONFIGURATION.md](documentation/CONFIGURATION.md) for detailed configuratio
 - Chat channel integrations
 - Environment variables
 
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## License
+## 📄 License
 
 MIT License - see [LICENSE](LICENSE) file for details
