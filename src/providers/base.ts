@@ -153,7 +153,11 @@ export class AnthropicProvider extends BaseProvider {
       }
 
       if (tools && tools.length > 0) {
-        requestData.tools = tools.map((t) => t.function);
+        requestData.tools = tools.map((t) => ({
+          name: t.function.name,
+          description: t.function.description,
+          input_schema: t.function.parameters,
+        }));
       }
 
       const response = await this.client.post('/messages', requestData, {
