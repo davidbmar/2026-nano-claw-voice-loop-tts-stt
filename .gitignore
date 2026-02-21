@@ -42,5 +42,8 @@ temp/
 # Configuration (user data)
 .nano-claw/
 
+# Worktrees
+.worktrees/
+
 # OS files
 Thumbs.db
