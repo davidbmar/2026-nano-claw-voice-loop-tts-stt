@@ -24,6 +24,15 @@ import { logger } from '../utils/logger';
 
 // ── Types ────────────────────────────────────────────────────
 
+interface DebugInfo {
+  iteration: number;
+  messageCount: number;
+  model: string;
+  tokenUsage?: { prompt: number; completion: number; total: number };
+  durationMs: number;
+  finishReason?: string;
+}
+
 interface PendingToolState {
   memory: Memory;
   toolCalls: ToolCall[];
@@ -33,8 +42,8 @@ interface PendingToolState {
 }
 
 type ApiResponse =
-  | { type: 'final'; response: string }
-  | { type: 'tool_pending'; requestId: string; tools: { name: string; args: Record<string, unknown> }[] };
+  | { type: 'final'; response: string; debug: DebugInfo }
+  | { type: 'tool_pending'; requestId: string; tools: { name: string; args: Record<string, unknown> }[]; debug: DebugInfo };
 
 // ── Pending state store ──────────────────────────────────────
 
@@ -106,7 +115,8 @@ async function stepLoop(
 
   while (iteration < MAX_ITERATIONS) {
     iteration++;
-    logger.debug({ iteration }, 'Stepped loop iteration');
+    const messageCount = memory.getMessages().length;
+    const startTime = Date.now();
 
     const skills = skillsLoader.getSkills();
     const tools = toolRegistry.getDefinitions();
@@ -124,6 +134,29 @@ async function stepLoop(
       agentConfig.maxTokens,
       tools
     );
+
+    const durationMs = Date.now() - startTime;
+
+    const debug: DebugInfo = {
+      iteration,
+      messageCount,
+      model: agentConfig.model,
+      tokenUsage: response.usage
+        ? { prompt: response.usage.promptTokens, completion: response.usage.completionTokens, total: response.usage.totalTokens }
+        : undefined,
+      durationMs,
+      finishReason: response.finishReason,
+    };
+
+    logger.info({
+      iteration,
+      messageCount,
+      model: agentConfig.model,
+      tokenUsage: debug.tokenUsage,
+      durationMs,
+      finishReason: response.finishReason,
+      hasToolCalls: !!(response.toolCalls && response.toolCalls.length > 0),
+    }, 'Agent loop iteration complete');
 
     if (response.toolCalls && response.toolCalls.length > 0) {
       // Add assistant message with tool calls to memory
@@ -151,6 +184,7 @@ async function stepLoop(
           name: tc.function.name,
           args: safeParseToolArgs(tc.function.arguments),
         })),
+        debug,
       };
     }
 
@@ -160,10 +194,10 @@ async function stepLoop(
       content: response.content,
     });
 
-    return { type: 'final', response: response.content };
+    return { type: 'final', response: response.content, debug };
   }
 
-  return { type: 'final', response: 'Max iterations reached.' };
+  return { type: 'final', response: 'Max iterations reached.', debug: { iteration: MAX_ITERATIONS, messageCount: memory.getMessages().length, model: agentConfig.model, durationMs: 0, finishReason: 'max_iterations' } };
 }
 
 // ── Session memory cache ─────────────────────────────────────
@@ -268,8 +302,16 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
     const toolName = toolCall.function.name;
     const toolArgs = safeParseToolArgs(toolCall.function.arguments);
 
-    logger.info({ tool: toolName, args: toolArgs }, 'Executing approved tool');
+    const toolStart = Date.now();
     const toolResult = await toolRegistry.execute(toolName, toolArgs);
+    const toolDuration = Date.now() - toolStart;
+
+    logger.info({
+      tool: toolName,
+      success: toolResult.success,
+      durationMs: toolDuration,
+      ...(toolResult.error && { error: toolResult.error }),
+    }, 'Tool execution complete');
 
     pending.memory.addMessage({
       role: 'tool',

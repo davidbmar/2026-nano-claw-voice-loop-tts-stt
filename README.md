@@ -188,6 +188,22 @@ See [CONFIGURATION.md](documentation/CONFIGURATION.md) for detailed configuratio
 - Chat channel integrations
 - Environment variables
 
+## 🔍 Debug Panel — Loop Observability
+
+The voice interface includes a real-time debug panel showing what happens inside the agent loop on every iteration: model, token usage, timing, and finish reason.
+
+<p align="center">
+  <img src="docs/debug-panel-expanded.png" width="600" alt="Debug panel showing iteration logs">
+</p>
+
+Click any row for a detailed breakdown with explanations:
+
+<p align="center">
+  <img src="docs/debug-detail-modal.png" width="600" alt="Debug detail modal">
+</p>
+
+See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full guide to reading debug output, understanding multi-iteration loops, and server-side logging.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

@@ -162,6 +162,138 @@ body {
     border-color: #555;
 }
 
+/* ── Debug panel ─────────────────────────────── */
+#debug-panel {
+    flex-shrink: 0;
+    border-bottom: 1px solid #2a2a2a;
+    background: #111;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+}
+
+#debug-toggle {
+    width: 100%;
+    padding: 6px 16px;
+    background: #1a1a1a;
+    color: #666;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: left;
+}
+
+#debug-toggle:hover { color: #999; }
+
+#debug-content {
+    max-height: 40vh;
+    overflow-y: auto;
+    padding: 0 12px;
+}
+
+.debug-collapsed #debug-content { display: none; }
+.debug-expanded #debug-content { display: block; }
+
+.debug-row {
+    padding: 3px 0;
+    color: #888;
+    white-space: nowrap;
+    border-bottom: 1px solid #1a1a1a;
+    cursor: pointer;
+}
+
+.debug-row:hover { background: #1a1a1a; }
+
+.debug-label { color: #555; }
+.debug-tokens { color: #4ade80; }
+.debug-duration { color: #fbbf24; }
+
+#debug-content::-webkit-scrollbar { width: 3px; }
+#debug-content::-webkit-scrollbar-track { background: transparent; }
+#debug-content::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+/* ── Debug detail modal ─────────────────────── */
+#debug-modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+}
+
+#debug-modal-overlay.visible {
+    display: flex;
+}
+
+#debug-modal {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 20px 24px;
+    max-width: 480px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+#debug-modal-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.debug-detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.debug-detail-key {
+    color: #888;
+    flex-shrink: 0;
+    margin-right: 16px;
+}
+
+.debug-detail-value {
+    color: #e0e0e0;
+    text-align: right;
+}
+
+.debug-detail-value.tok { color: #4ade80; }
+.debug-detail-value.dur { color: #fbbf24; }
+
+.debug-detail-desc {
+    font-size: 11px;
+    color: #555;
+    margin-top: 3px;
+}
+
+#debug-modal-close {
+    display: block;
+    margin: 16px auto 0;
+    padding: 8px 24px;
+    background: #333;
+    color: #ccc;
+    border: 1px solid #555;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+#debug-modal-close:hover { background: #444; }
+
 /* ── Controls ────────────────────────────────── */
 #controls {
     padding: 16px;

@@ -5,6 +5,12 @@ const statusText = document.getElementById("status-text");
 const chatLog = document.getElementById("chat-log");
 const talkBtn = document.getElementById("talk-btn");
 const stopBtn = document.getElementById("stop-btn");
+const debugPanel = document.getElementById("debug-panel");
+const debugToggle = document.getElementById("debug-toggle");
+const debugContent = document.getElementById("debug-content");
+const debugModalOverlay = document.getElementById("debug-modal-overlay");
+const debugModalBody = document.getElementById("debug-modal-body");
+const debugModalClose = document.getElementById("debug-modal-close");
 
 // ── State ────────────────────────────────────────────────────
 let ws = null;
@@ -176,6 +182,144 @@ function showToolCard(requestId, tools) {
     chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+// ── Debug panel ──────────────────────────────────────────────
+debugToggle.addEventListener("click", function () {
+    debugPanel.classList.toggle("debug-collapsed");
+    debugPanel.classList.toggle("debug-expanded");
+});
+
+function addDebugEntry(info) {
+    var row = document.createElement("div");
+    row.className = "debug-row";
+
+    var tokens = info.tokenUsage
+        ? info.tokenUsage.prompt + "/" + info.tokenUsage.completion + "/" + info.tokenUsage.total
+        : "—";
+
+    var fields = [
+        ["iter", String(info.iteration)],
+        ["msgs", String(info.messageCount)],
+        ["model", info.model],
+        ["tok", tokens],
+        ["dur", info.durationMs + "ms"],
+        ["finish", info.finishReason || "—"],
+    ];
+
+    fields.forEach(function (pair, i) {
+        if (i > 0) row.appendChild(document.createTextNode("  "));
+        var label = document.createElement("span");
+        label.className = "debug-label";
+        label.textContent = pair[0];
+        row.appendChild(label);
+        var value = document.createElement("span");
+        value.className = pair[0] === "tok" ? "debug-tokens"
+            : pair[0] === "dur" ? "debug-duration"
+            : "";
+        value.textContent = " " + pair[1];
+        row.appendChild(value);
+    });
+
+    row.addEventListener("click", function () {
+        showDebugDetail(info);
+    });
+
+    debugContent.appendChild(row);
+    debugContent.scrollTop = debugContent.scrollHeight;
+}
+
+function showDebugDetail(info) {
+    // Clear previous content
+    while (debugModalBody.firstChild) debugModalBody.removeChild(debugModalBody.firstChild);
+
+    var details = [
+        {
+            key: "Iteration",
+            value: String(info.iteration),
+            cls: "",
+            desc: "Which pass through the agent loop. The agent may loop multiple times if it calls tools.",
+        },
+        {
+            key: "Messages",
+            value: String(info.messageCount),
+            cls: "",
+            desc: "Total messages in the conversation history sent to the LLM. Grows as tool calls and results are added.",
+        },
+        {
+            key: "Model",
+            value: info.model,
+            cls: "",
+            desc: "The LLM model used for this call.",
+        },
+        {
+            key: "Prompt tokens",
+            value: info.tokenUsage ? String(info.tokenUsage.prompt) : "—",
+            cls: "tok",
+            desc: "Tokens in the input sent to the LLM (system prompt + conversation history + tool definitions).",
+        },
+        {
+            key: "Completion tokens",
+            value: info.tokenUsage ? String(info.tokenUsage.completion) : "—",
+            cls: "tok",
+            desc: "Tokens the LLM generated in its response. More tokens = longer/more detailed response.",
+        },
+        {
+            key: "Total tokens",
+            value: info.tokenUsage ? String(info.tokenUsage.total) : "—",
+            cls: "tok",
+            desc: "Prompt + completion. This determines API cost.",
+        },
+        {
+            key: "Duration",
+            value: info.durationMs + " ms",
+            cls: "dur",
+            desc: "Wall-clock time for this LLM call (network + inference). Does not include tool execution time.",
+        },
+        {
+            key: "Finish reason",
+            value: info.finishReason || "—",
+            cls: "",
+            desc: "Why the LLM stopped generating. 'end_turn' = final answer. 'tool_use' = wants to call a tool. 'max_tokens' = hit token limit.",
+        },
+    ];
+
+    details.forEach(function (d) {
+        var row = document.createElement("div");
+        row.className = "debug-detail-row";
+
+        var left = document.createElement("div");
+
+        var keyEl = document.createElement("div");
+        keyEl.className = "debug-detail-key";
+        keyEl.textContent = d.key;
+        left.appendChild(keyEl);
+
+        var descEl = document.createElement("div");
+        descEl.className = "debug-detail-desc";
+        descEl.textContent = d.desc;
+        left.appendChild(descEl);
+
+        var valueEl = document.createElement("div");
+        valueEl.className = "debug-detail-value" + (d.cls ? " " + d.cls : "");
+        valueEl.textContent = d.value;
+
+        row.appendChild(left);
+        row.appendChild(valueEl);
+        debugModalBody.appendChild(row);
+    });
+
+    debugModalOverlay.classList.add("visible");
+}
+
+debugModalClose.addEventListener("click", function () {
+    debugModalOverlay.classList.remove("visible");
+});
+
+debugModalOverlay.addEventListener("click", function (e) {
+    if (e.target === debugModalOverlay) {
+        debugModalOverlay.classList.remove("visible");
+    }
+});
+
 // ── Agent speaking state ─────────────────────────────────────
 function setAgentSpeaking(speaking) {
     agentSpeaking = speaking;
@@ -238,6 +382,10 @@ function handleMessage(msg) {
 
         case "tool_pending":
             showToolCard(msg.requestId, msg.tools);
+            break;
+
+        case "debug":
+            addDebugEntry(msg);
             break;
 
         case "pong":

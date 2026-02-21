@@ -156,6 +156,20 @@ async def _process_api_response(
     data: dict,
 ) -> None:
     """Route an API response to the browser and optionally TTS."""
+    # Forward debug info if present
+    debug = data.get("debug")
+    if debug:
+        log.info(
+            "iter=%d msgs=%d model=%s tokens=%s duration=%dms finish=%s",
+            debug.get("iteration", 0),
+            debug.get("messageCount", 0),
+            debug.get("model", "?"),
+            debug.get("tokenUsage"),
+            debug.get("durationMs", 0),
+            debug.get("finishReason"),
+        )
+        await ws.send_json({"type": "debug", **debug})
+
     if data.get("type") == "final":
         reply = data.get("response", "")
         await ws.send_json({"type": "agent_reply", "text": reply})

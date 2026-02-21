@@ -12,12 +12,25 @@
       <span id="status-text">Connecting...</span>
     </header>
 
+    <div id="debug-panel" class="debug-collapsed">
+      <button id="debug-toggle">Debug</button>
+      <div id="debug-content"></div>
+    </div>
+
     <main id="chat-log"></main>
 
     <footer id="controls">
       <button id="stop-btn" class="hidden">Stop</button>
       <button id="talk-btn" disabled>Press &amp; Hold to Speak</button>
     </footer>
+  </div>
+
+  <div id="debug-modal-overlay">
+    <div id="debug-modal">
+      <div id="debug-modal-title">Iteration Detail</div>
+      <div id="debug-modal-body"></div>
+      <button id="debug-modal-close">Close</button>
+    </div>
   </div>
 
   <script src="app.js"></script>
