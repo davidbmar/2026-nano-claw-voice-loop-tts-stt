@@ -140,6 +140,63 @@ For OpenRouter (recommended):
 nano-claw agent -m "What is 2+2?"
 ```
 
+## 🎙️ Voice Interface (Docker)
+
+Talk to nano-claw with your voice through a browser UI. Requires Docker and an Anthropic API key.
+
+**1. Clone and enter the repo**
+
+```bash
+git clone https://github.com/davidbmar/nano-claw.git
+cd nano-claw
+```
+
+**2. Set your API key**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Or create a `.env` file in the project root:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**3. Build and run**
+
+```bash
+./run.sh
+```
+
+This single command will:
+- Build the Docker image (TypeScript API server + Python voice server)
+- Download the Whisper STT model on first run (~75 MB, cached in a Docker volume)
+- Start the container with the API and voice servers
+
+**4. Open the browser**
+
+Go to **http://localhost:9090** — hold the blue button to talk, release to send.
+
+The agent can call tools (shell commands, file operations) — you'll see approval cards in the chat. Click the **Debug** button to see real-time iteration logs.
+
+**5. Stop**
+
+Press `Ctrl-C` in the terminal. The container cleans up automatically (`--rm`).
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) installed and running
+- An [Anthropic API key](https://console.anthropic.com/)
+- A browser with microphone access (Chrome/Firefox/Safari)
+
+### What's inside the container
+
+| Component | Port | Role |
+|-----------|------|------|
+| nano-claw API | 3001 (internal) | Agent loop — LLM calls, tool execution, memory |
+| Voice server | 8080 → 9090 | WebSocket bridge, STT (Whisper), TTS (Kokoro), WebRTC audio |
+| Browser UI | served by voice server | Push-to-talk, chat bubbles, tool approval cards, debug panel |
+
 ## 🔧 CLI Commands
 
 - `nano-claw onboard` - Initialize configuration
