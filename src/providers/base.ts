@@ -126,6 +126,59 @@ export class AnthropicProvider extends BaseProvider {
     return model;
   }
 
+  /**
+   * Convert internal messages to Anthropic's expected format.
+   * Anthropic requires:
+   * - assistant tool calls as content blocks [{type:"tool_use",...}]
+   * - tool results as user messages with [{type:"tool_result",...}]
+   */
+  private formatAnthropicMessages(messages: Message[]): Record<string, unknown>[] {
+    const result: Record<string, unknown>[] = [];
+
+    for (const m of messages) {
+      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+        // Assistant message with tool calls → content blocks
+        const content: Record<string, unknown>[] = [];
+        if (m.content) {
+          content.push({ type: 'text', text: m.content });
+        }
+        for (const tc of m.tool_calls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.function.name,
+            input: JSON.parse(tc.function.arguments),
+          });
+        }
+        result.push({ role: 'assistant', content });
+      } else if (m.role === 'tool') {
+        // Tool result → user message with tool_result content block
+        // Anthropic groups consecutive tool results into one user message
+        const lastMsg = result[result.length - 1];
+        const toolResultBlock = {
+          type: 'tool_result',
+          tool_use_id: m.tool_call_id,
+          content: m.content,
+        };
+        if (lastMsg && lastMsg.role === 'user' && Array.isArray(lastMsg.content)
+            && (lastMsg.content as Record<string, unknown>[]).every(
+              (b: Record<string, unknown>) => b.type === 'tool_result')) {
+          // Merge into existing tool_result user message
+          (lastMsg.content as Record<string, unknown>[]).push(toolResultBlock);
+        } else {
+          result.push({ role: 'user', content: [toolResultBlock] });
+        }
+      } else if (m.role === 'assistant') {
+        result.push({ role: 'assistant', content: m.content });
+      } else {
+        // user messages
+        result.push({ role: 'user', content: m.content });
+      }
+    }
+
+    return result;
+  }
+
   async complete(
     messages: Message[],
     model: string,
@@ -138,12 +191,12 @@ export class AnthropicProvider extends BaseProvider {
       const systemMessage = messages.find((m) => m.role === 'system')?.content || '';
       const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
+      // Format messages for Anthropic's API
+      const anthropicMessages = this.formatAnthropicMessages(nonSystemMessages);
+
       const requestData: Record<string, unknown> = {
         model: this.formatModelName(model),
-        messages: nonSystemMessages.map((m) => ({
-          role: m.role === 'assistant' ? 'assistant' : 'user',
-          content: m.content,
-        })),
+        messages: anthropicMessages,
         temperature,
         max_tokens: maxTokens,
       };
@@ -167,11 +220,30 @@ export class AnthropicProvider extends BaseProvider {
         },
       });
 
-      const content = response.data.content[0];
+      // Extract text and tool_use blocks from response content
+      const contentBlocks = response.data.content as Array<Record<string, unknown>>;
+      const textParts: string[] = [];
+      const toolUseBlocks: ToolCall[] = [];
+
+      for (const block of contentBlocks) {
+        if (block.type === 'text') {
+          textParts.push(block.text as string);
+        } else if (block.type === 'tool_use') {
+          // Convert Anthropic tool_use to OpenAI-compatible ToolCall format
+          toolUseBlocks.push({
+            id: block.id as string,
+            type: 'function',
+            function: {
+              name: block.name as string,
+              arguments: JSON.stringify(block.input),
+            },
+          });
+        }
+      }
 
       return {
-        content: content.type === 'text' ? content.text : '',
-        toolCalls: content.type === 'tool_use' ? [content] : undefined,
+        content: textParts.join('\n'),
+        toolCalls: toolUseBlocks.length > 0 ? toolUseBlocks : undefined,
         finishReason: response.data.stop_reason,
         usage: response.data.usage
           ? {
