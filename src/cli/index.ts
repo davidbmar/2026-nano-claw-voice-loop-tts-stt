@@ -6,6 +6,7 @@ import { onboardCommand } from './commands/onboard';
 import { agentCommand } from './commands/agent';
 import { statusCommand } from './commands/status';
 import { gatewayCommand } from './commands/gateway';
+import { serveCommand } from './commands/serve';
 import {
   cronAddCommand,
   cronListCommand,
@@ -72,6 +73,21 @@ program
       await gatewayCommand();
     } catch (error) {
       logger.error({ error }, 'Gateway command failed');
+      console.error(chalk.red(`Error: ${(error as Error).message}`));
+      process.exit(1);
+    }
+  });
+
+// Serve command (HTTP API for voice pipeline)
+program
+  .command('serve')
+  .description('Start HTTP API server for voice pipeline')
+  .option('-p, --port <port>', 'Port to listen on', '3001')
+  .action(async (options: { port?: string }) => {
+    try {
+      await serveCommand(options);
+    } catch (error) {
+      logger.error({ error }, 'Serve command failed');
       console.error(chalk.red(`Error: ${(error as Error).message}`));
       process.exit(1);
     }
