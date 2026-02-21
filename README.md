@@ -1,157 +1,41 @@
 <div align="center">
-  <h1>nano-claw</h1>
+  <h1>nano-claw voice loop</h1>
   <p>
-    🦞 Claw is a Ultra-Lightweight Personal AI Assistant you run on your own devices.
+    A voice-powered AI agent you talk to in your browser. Ask questions, approve tool calls, hear responses — all by voice.
   </p>
   <p>
-    <a href="https://www.npmjs.com/package/nano-claw"><img src="https://img.shields.io/npm/v/nano-claw" alt="npm version"></a>
+    <img src="https://img.shields.io/badge/docker-ready-blue" alt="Docker">
     <img src="https://img.shields.io/badge/typescript-5.x-blue" alt="TypeScript">
-    <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node.js">
+    <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
 </div>
 
-## 📖 About
+<p align="center">
+  <img src="docs/voice-full-flow.png" width="600" alt="Voice loop in action — speech, tool approval, agent reply, debug panel">
+</p>
 
-**nano-claw** is a TypeScript + Node.js implementation of [nanobot](https://github.com/HKUDS/nanobot), an ultra-lightweight personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw).
+## What is this?
 
-- 🪶 **Ultra-Lightweight**: Just ~4,500 lines of core TypeScript code
-- 🔬 **Research-Ready**: Clean, readable code that's easy to understand and extend
-- ⚡️ **Lightning Fast**: Minimal footprint for faster startup and lower resource usage
-- 💎 **Easy-to-Use**: Simple configuration and intuitive CLI
+You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Kokoro TTS), and can run tools on your machine with your approval. Everything runs in a single Docker container.
 
-## 🏗️ Architecture
+**The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Kokoro speaks the answer back.
 
-```
-nano-claw/
-├── src/
-│   ├── agent/          # 🧠 Core agent logic
-│   │   ├── loop.ts     #    Agent loop (LLM ↔ tool execution)
-│   │   ├── context.ts  #    Prompt builder
-│   │   ├── memory.ts   #    Persistent memory
-│   │   ├── skills.ts   #    Skills loader
-│   │   ├── subagent.ts #    Background task execution
-│   │   └── tools/      #    Built-in tools
-│   ├── skills/         # 🎯 Bundled skills (github, weather, etc.)
-│   ├── channels/       # 📱 Chat channel integrations
-│   ├── bus/            # 🚌 Message routing
-│   ├── cron/           # ⏰ Scheduled tasks
-│   ├── heartbeat/      # 💓 Proactive wake-up
-│   ├── providers/      # 🤖 LLM providers (OpenRouter, etc.)
-│   ├── session/        # 💬 Session management
-│   ├── config/         # ⚙️ Configuration
-│   └── cli/            # 🖥️ Command-line interface
-└── package.json
-```
+## Quick Start
 
-## ✨ Features
+### Prerequisites
 
-### Core Agent
+- [Docker](https://docs.docker.com/get-docker/) installed and running
+- An [Anthropic API key](https://console.anthropic.com/)
 
-- **Agent Loop**: LLM and tool execution loop
-- **Context Builder**: Construct prompt context
-- **Memory**: Persistent conversation memory
-- **Skills Loader**: Dynamic skill loading from Markdown files
-- **Subagent**: Background task management
-- **Tools**: Built-in tools (shell, file operations, etc.)
-
-### LLM Providers
-
-Support for multiple LLM providers:
-
-- OpenRouter (recommended, access to all models)
-- Anthropic (Claude)
-- OpenAI (GPT)
-- DeepSeek
-- Groq
-- Gemini
-- MiniMax
-- **AiHubMix** (API gateway, all models) ✨ NEW
-- Dashscope (Qwen)
-- Moonshot (Kimi)
-- Zhipu (GLM)
-- vLLM (local models)
-
-### Chat Channels
-
-Support for multiple chat platforms:
-
-- **Telegram** ✅ Implemented
-- **Discord** ✅ Implemented
-- **DingTalk / 钉钉** ✅ Implemented
-- WhatsApp (config ready)
-- Feishu / 飞书 (config ready)
-- Slack (config ready)
-- Email (config ready)
-- QQ (config ready)
-- Mochat (config ready)
-
-> **Note**: Telegram, Discord, and DingTalk channel adapters are fully implemented. Additional channel adapters can be added by extending the `BaseChannel` class.
-
-### Other Features
-
-- **Gateway Server**: Central hub for channel management ✨ NEW
-- **Message Bus**: Event-driven message routing ✨ NEW
-- **Cron Tasks**: Schedule tasks with cron expressions
-- **Heartbeat**: Proactive wake-up mechanism ✨ NEW
-- **Session Management**: Multi-user, multi-channel session support ✨ ENHANCED
-- **Subagent Tasks**: Background task execution ✨ NEW
-- **Configuration**: JSON configuration files with Zod validation
-
-## 📦 Installation
+### 1. Clone
 
 ```bash
-npm install -g nano-claw
-
-pnpm install -g nano-claw
-
-yarn global add nano-claw
+git clone https://github.com/davidbmar/2026-nano-claw-voice-loop-tts-stt.git
+cd 2026-nano-claw-voice-loop-tts-stt
 ```
 
-## 🚀 Quick Start
-
-**1. Initialize**
-
-```bash
-nano-claw onboard
-```
-
-**2. Configure** (`~/.nano-claw/config.json`)
-
-For OpenRouter (recommended):
-```json
-{
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-v1-xxx"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4-5"
-    }
-  }
-}
-```
-
-**3. Chat**
-
-```bash
-nano-claw agent -m "What is 2+2?"
-```
-
-## 🎙️ Voice Interface (Docker)
-
-Talk to nano-claw with your voice through a browser UI. Requires Docker and an Anthropic API key.
-
-**1. Clone and enter the repo**
-
-```bash
-git clone https://github.com/davidbmar/nano-claw.git
-cd nano-claw
-```
-
-**2. Set your API key**
+### 2. Set your API key
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -162,109 +46,222 @@ Or create a `.env` file in the project root:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**3. Build and run**
+### 3. Build and run
 
 ```bash
 ./run.sh
 ```
 
-This single command will:
-- Build the Docker image (TypeScript API server + Python voice server)
-- Download the Whisper STT model on first run (~75 MB, cached in a Docker volume)
-- Start the container with the API and voice servers
+This single command:
+- Builds the Docker image (TypeScript API server + Python voice server)
+- Downloads the Whisper STT model on first run (~75 MB, cached in a Docker volume)
+- Starts the container
 
-**4. Open the browser**
+### 4. Open your browser
 
-Go to **http://localhost:9090** — hold the blue button to talk, release to send.
+Go to **http://localhost:9090**
 
-The agent can call tools (shell commands, file operations) — you'll see approval cards in the chat. Click the **Debug** button to see real-time iteration logs.
+Allow microphone access when prompted. Once it says "Connected", you're ready.
 
-**5. Stop**
+### 5. Talk
 
-Press `Ctrl-C` in the terminal. The container cleans up automatically (`--rm`).
+**Hold** the blue button and speak. **Release** to send. The agent will think, optionally request tool approval, and speak its answer back.
 
-### Prerequisites
+### 6. Stop
 
-- [Docker](https://docs.docker.com/get-docker/) installed and running
-- An [Anthropic API key](https://console.anthropic.com/)
-- A browser with microphone access (Chrome/Firefox/Safari)
+Press `Ctrl-C` in the terminal. The container cleans itself up (`--rm`).
 
-### What's inside the container
+## How It Works
 
-| Component | Port | Role |
-|-----------|------|------|
-| nano-claw API | 3001 (internal) | Agent loop — LLM calls, tool execution, memory |
-| Voice server | 8080 → 9090 | WebSocket bridge, STT (Whisper), TTS (Kokoro), WebRTC audio |
-| Browser UI | served by voice server | Push-to-talk, chat bubbles, tool approval cards, debug panel |
+<p align="center">
+  <img src="docs/voice-ui-connected.png" width="500" alt="Connected and ready to talk">
+</p>
 
-## 🔧 CLI Commands
+### Voice conversation
 
-- `nano-claw onboard` - Initialize configuration
-- `nano-claw agent -m "..."` - Chat with agent (single message)
-- `nano-claw agent` - Interactive mode
-- `nano-claw gateway` - Start gateway server for channels ✨ NEW
-- `nano-claw status` - Show system status
-- `nano-claw channels login` - Login to channels (e.g., WhatsApp)
-- `nano-claw cron add/list/remove` - Manage scheduled tasks
+Hold the button, ask a question, release. Your speech is transcribed and shown as a blue bubble. The agent's reply appears as a gray bubble and is spoken aloud through your browser.
 
-## 👨‍💻 Development
+### Tool approval
 
-```bash
-# Watch mode (auto-rebuild on changes)
-npm run dev
+When the agent wants to run a command (shell, read/write files), it pauses and shows you exactly what it wants to do. You approve or reject.
 
-# Lint code
-npm run lint
+<p align="center">
+  <img src="docs/voice-tool-approval.png" width="500" alt="Tool approval card showing shell command">
+</p>
 
-# Format code
-npm run format
+### Full conversation flow
 
-# Run tests
-npm run test
-```
+A typical interaction: you ask a question → the agent calls a tool → you approve → the agent gives you the answer.
 
-## 📚 Examples & Guides
+<p align="center">
+  <img src="docs/voice-conversation.png" width="500" alt="Complete conversation with tool call and response">
+</p>
 
-Comprehensive examples to help you get started and master nano-claw:
+## Debug Panel
 
-- **[Examples Directory](examples/)** - Complete guide to all examples
-- **[Basic Usage](examples/basic-usage.md)** - Getting started for beginners
-- **[Integration Examples](examples/integration-examples.md)** - Telegram, Discord, local models
-- **[Advanced Features](examples/advanced-features.md)** - Custom skills, cron, subagents
-- **[Use Case Scenarios](examples/use-case-scenarios.md)** - Real-world examples
-- **[Code Recipes](examples/code-recipes.md)** - Configuration patterns and troubleshooting
-
-## ⚙️ Configuration
-
-Configuration file location: `~/.nano-claw/config.json`
-
-See [CONFIGURATION.md](documentation/CONFIGURATION.md) for detailed configuration options including:
-- All 11 LLM providers setup
-- Agent behavior customization
-- Tool execution security
-- Chat channel integrations
-- Environment variables
-
-## 🔍 Debug Panel — Loop Observability
-
-The voice interface includes a real-time debug panel showing what happens inside the agent loop on every iteration: model, token usage, timing, and finish reason.
+Click the **DEBUG** button to see real-time observability into the agent loop. Every LLM call shows iteration, message count, model, token usage, timing, and finish reason.
 
 <p align="center">
   <img src="docs/debug-panel-expanded.png" width="600" alt="Debug panel showing iteration logs">
 </p>
 
-Click any row for a detailed breakdown with explanations:
+Click any row for a detailed breakdown explaining what each field means:
 
 <p align="center">
-  <img src="docs/debug-detail-modal.png" width="600" alt="Debug detail modal">
+  <img src="docs/debug-detail-modal.png" width="500" alt="Debug detail modal with explanations">
 </p>
 
-See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full guide to reading debug output, understanding multi-iteration loops, and server-side logging.
+### Reading a debug row
 
-## 🤝 Contributing
+```
+iter 1  msgs 2  model anthropic/claude-sonnet-4-5  tok 897/68/965  dur 2131ms  finish tool_use
+```
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+| Field | What it means |
+|-------|---------------|
+| **iter** | Which pass through the agent loop (1 = first call, 2 = after tool result, etc.) |
+| **msgs** | Messages in conversation history — grows as tool calls and results are added |
+| **model** | The LLM model used |
+| **tok** | Tokens: prompt / completion / total — this determines API cost |
+| **dur** | Wall-clock time for the LLM call (network + inference) |
+| **finish** | Why the LLM stopped: `end_turn` = final answer, `tool_use` = wants a tool, `max_tokens` = hit limit |
 
-## 📄 License
+See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full observability guide.
 
-MIT License - see [LICENSE](LICENSE) file for details
+## Architecture
+
+Everything runs inside one Docker container:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Docker container                                       │
+│                                                         │
+│  ┌──────────────────┐    ┌───────────────────────────┐  │
+│  │  nano-claw API   │    │  Voice Server (Python)    │  │
+│  │  (TypeScript)    │    │                           │  │
+│  │                  │    │  WebSocket ←→ Browser     │  │
+│  │  Agent loop      │◄──►│  Whisper STT (speech→text)│  │
+│  │  Tool execution  │    │  Kokoro TTS (text→speech) │  │
+│  │  Memory          │    │  WebRTC audio streaming   │  │
+│  │                  │    │                           │  │
+│  │  port 3001       │    │  port 8080 → 9090        │  │
+│  │  (internal)      │    │  (exposed)               │  │
+│  └──────────────────┘    └───────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+| Component | Role |
+|-----------|------|
+| **nano-claw API** | Agent loop — LLM calls (Claude), tool execution, conversation memory |
+| **Voice server** | WebSocket bridge between browser and API, plus STT/TTS processing |
+| **Whisper** | Speech-to-text — runs locally in the container, no external API |
+| **Kokoro** | Text-to-speech — runs locally, streams audio back via WebRTC |
+| **Browser UI** | Push-to-talk, chat bubbles, tool approval cards, debug panel |
+
+### Data flow
+
+```
+You speak into mic
+    → WebRTC audio stream to container
+    → Whisper transcribes to text
+    → POST /api/chat to nano-claw API
+    → Claude generates response (may request tools)
+    → If tool_pending: browser shows approval card, waits
+    → If approved: POST /api/chat/approve, tools execute, loop continues
+    → Final text response sent back via WebSocket
+    → Kokoro converts to speech
+    → WebRTC audio stream back to your browser
+You hear the answer
+```
+
+## Docker Details
+
+### What `run.sh` does
+
+1. Loads `.env` if present
+2. Stops and removes any old `nano-claw-voice` container
+3. Prunes dangling Docker images
+4. `docker build -t nano-claw-voice .` — multi-stage build (Node.js builder + Python runtime)
+5. `docker run -it --rm -p 9090:8080 -e ANTHROPIC_API_KEY=... nano-claw-voice`
+
+### Manual Docker commands
+
+If you prefer to run the steps yourself:
+
+```bash
+# Build
+docker build -t nano-claw-voice .
+
+# Run
+docker run -it --rm \
+  -p 9090:8080 \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -v nano-claw-models:/app/voice/models \
+  nano-claw-voice
+```
+
+The `-v nano-claw-models:/app/voice/models` volume caches the Whisper model so it doesn't re-download on each run.
+
+### Inside the container
+
+The entrypoint starts two processes:
+1. `node dist/cli/index.js serve --port 3001` — the TypeScript API server
+2. `python -m voice` — the Python voice server on port 8080
+
+The voice server waits for the API to be healthy before starting.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| "Mic access denied" | Allow microphone in browser permissions, use Chrome/Firefox/Safari |
+| Stuck on "Connecting..." | Check that the Docker container is running (`docker ps`) |
+| No sound from agent | Click somewhere on the page first (browsers require user interaction before playing audio) |
+| Slow first response | The Whisper model downloads on first run (~75 MB). Subsequent runs use the cached volume. |
+| "nano-claw API did not become ready" | Check your `ANTHROPIC_API_KEY` is valid. Check Docker logs: `docker logs $(docker ps -q)` |
+| Container won't start | Make sure Docker is running and port 9090 isn't in use |
+
+## Server Logs
+
+The Docker terminal shows structured logs from both servers. Look for:
+
+```
+voice-server INFO  iter=1 msgs=2 model=anthropic/claude-sonnet-4-5
+    tokens={'prompt': 897, 'completion': 68, 'total': 965} duration=2131ms finish=tool_use
+
+(nano-claw): Agent loop iteration complete
+    iteration: 1  durationMs: 2131  finishReason: "tool_use"
+
+(nano-claw): Tool execution complete
+    tool: "shell"  success: true  durationMs: 342
+```
+
+## Project Structure
+
+```
+├── src/
+│   ├── api/server.ts        # HTTP API — agent loop with tool confirmation
+│   ├── agent/               # Core agent: loop, memory, context, tools
+│   ├── providers/           # LLM providers (Anthropic, OpenRouter, OpenAI, etc.)
+│   ├── cli/                 # CLI commands including `serve`
+│   └── config/              # Configuration with Zod validation
+├── voice/
+│   ├── server.py            # aiohttp WebSocket server — bridges browser ↔ API
+│   ├── stt.py               # Speech-to-text (faster-whisper)
+│   ├── tts.py               # Text-to-speech (Kokoro)
+│   ├── webrtc.py            # WebRTC session management
+│   └── web/                 # Browser UI
+│       ├── index.html
+│       ├── app.js           # WebSocket client, WebRTC, push-to-talk, debug panel
+│       └── styles.css
+├── Dockerfile               # Multi-stage build (Node.js + Python)
+├── docker/
+│   ├── entrypoint.sh        # Starts both servers
+│   └── default-config.json  # Default agent config for Docker
+├── run.sh                   # One-command build + run
+└── docs/                    # Screenshots and debug panel guide
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE)
