@@ -143,11 +143,24 @@ export class AnthropicProvider extends BaseProvider {
           content.push({ type: 'text', text: m.content });
         }
         for (const tc of m.tool_calls) {
+          // Handle both OpenAI-compatible format ({function:{name,arguments}})
+          // and Anthropic-raw format ({name,input}) that may exist in persisted memory
+          const tcAny = tc as unknown as Record<string, unknown>;
+          const fn = tc.function || tcAny as { name: string; arguments: string };
+          const toolName = fn.name || (tcAny.name as string) || 'unknown';
+          let toolInput: unknown;
+          if (fn.arguments) {
+            try { toolInput = JSON.parse(fn.arguments); } catch { toolInput = {}; }
+          } else if (tcAny.input) {
+            toolInput = tcAny.input;
+          } else {
+            toolInput = {};
+          }
           content.push({
             type: 'tool_use',
             id: tc.id,
-            name: tc.function.name,
-            input: JSON.parse(tc.function.arguments),
+            name: toolName,
+            input: toolInput,
           });
         }
         result.push({ role: 'assistant', content });
