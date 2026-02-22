@@ -103,43 +103,31 @@ Or create a `.env` file in the project root:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 3. Start the STT service (Terminal 1)
-
-```bash
-cd stt-service
-pip install -r requirements.txt
-python server.py
-```
-
-You'll see:
-```
-INFO:     Uvicorn running on http://0.0.0.0:8200
-```
-
-The Whisper model downloads (~75 MB) on the first transcription request and is cached after that.
-
-### 4. Start the Docker container (Terminal 2)
+### 3. Run
 
 ```bash
 ./run.sh
 ```
 
-This builds the Docker image and starts the container. The voice server inside Docker calls your local STT service for transcription.
+This single command:
+- Starts the STT service natively on your Mac (for Metal GPU acceleration)
+- Builds the Docker image (TypeScript API server + Python voice server + TTS)
+- Starts the Docker container, which calls the local STT service for transcription
+- The Whisper model downloads (~75 MB) on the first transcription and is cached after that
 
-### 5. Open your browser
+### 4. Open your browser
 
 Go to **http://localhost:9090**
 
 Allow microphone access when prompted. Once it says "Connected", you're ready.
 
-### 6. Talk
+### 5. Talk
 
 **Hold** the blue button and speak. **Release** to send. The agent will think, optionally request tool approval, and speak its answer back.
 
-### 7. Stop
+### 6. Stop
 
-- `Ctrl-C` in Terminal 2 stops the Docker container
-- `Ctrl-C` in Terminal 1 stops the STT service
+Press `Ctrl-C` — this stops both the Docker container and the STT service.
 
 ## How It Works
 

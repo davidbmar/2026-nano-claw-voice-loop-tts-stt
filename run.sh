@@ -47,14 +47,41 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
   exit 1
 fi
 
-# Check if STT service is running
+# Start STT service if not already running
 STT_SERVICE_URL="${STT_SERVICE_URL:-http://host.docker.internal:8200}"
 STT_CHECK_URL="${STT_SERVICE_URL/host.docker.internal/localhost}"
-if ! curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
-  echo "WARNING: STT service not reachable at $STT_CHECK_URL"
-  echo "  Start it first:  cd stt-service && python server.py"
+STT_PID=""
+
+if curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
+  echo "STT service already running at $STT_CHECK_URL"
+else
+  echo "=== Starting STT service ==="
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  pip install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
+  python "$SCRIPT_DIR/stt-service/server.py" &
+  STT_PID=$!
+
+  # Wait for STT service to be ready
+  for i in $(seq 1 15); do
+    if curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
+      echo "STT service ready"
+      break
+    fi
+    sleep 1
+  done
   echo ""
 fi
+
+# Clean up STT service on exit
+cleanup() {
+  if [ -n "$STT_PID" ]; then
+    echo ""
+    echo "Stopping STT service (pid $STT_PID)..."
+    kill $STT_PID 2>/dev/null
+    wait $STT_PID 2>/dev/null
+  fi
+}
+trap cleanup EXIT
 
 echo "=== Starting container ==="
 echo "Open http://localhost:9090 in your browser"
