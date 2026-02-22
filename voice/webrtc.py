@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 
+import httpx
 import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration
 
@@ -97,11 +99,22 @@ class Session:
 
         log.info("Mic recording stopped: %d bytes, %.2fs", len(pcm_data), audio_duration_s)
 
-        from voice.stt import transcribe
-        loop = asyncio.get_running_loop()
-        text, _no_speech, _avg_logprob, _timing = await loop.run_in_executor(
-            None, transcribe, pcm_data, SAMPLE_RATE
-        )
+        stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{stt_url}/transcribe",
+                    content=pcm_data,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Sample-Rate": str(SAMPLE_RATE),
+                    },
+                )
+                result = resp.json()
+                text = result.get("text", "")
+        except Exception:
+            log.exception("STT service call failed (is stt-service running on %s?)", stt_url)
+            text = ""
         return text, audio_duration_s
 
     def stop_speaking(self):

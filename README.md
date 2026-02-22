@@ -17,15 +17,72 @@
 
 ## What is this?
 
-You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Kokoro TTS), and can run tools on your machine with your approval. Everything runs in a single Docker container.
+You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Kokoro TTS), and can run tools on your machine with your approval.
 
 **The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Kokoro speaks the answer back.
+
+## Architecture
+
+The system runs as **two processes** — the STT service runs natively on your Mac for speed, and everything else runs in Docker:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Your Mac (native)                                              │
+│                                                                 │
+│  ┌──────────────────────────┐                                   │
+│  │  STT Service              │  ← Runs natively for Metal GPU   │
+│  │  faster-whisper           │  ← 3-5x faster than Docker CPU   │
+│  │  POST /transcribe         │                                   │
+│  │  port 8200                │                                   │
+│  └────────────▲─────────────┘                                   │
+│               │ HTTP                                             │
+│  ┌────────────┴──────────────────────────────────────────────┐  │
+│  │  Docker container                                          │  │
+│  │                                                            │  │
+│  │  ┌──────────────────┐    ┌─────────────────────────────┐  │  │
+│  │  │  nano-claw API   │    │  Voice Server (Python)      │  │  │
+│  │  │  (TypeScript)    │    │                             │  │  │
+│  │  │                  │    │  WebSocket ←→ Browser       │  │  │
+│  │  │  Agent loop      │◄──►│  Kokoro TTS (text→speech)  │  │  │
+│  │  │  Tool execution  │    │  WebRTC audio streaming    │  │  │
+│  │  │  Memory          │    │                             │  │  │
+│  │  │  port 3001       │    │  port 8080 → 9090          │  │  │
+│  │  └──────────────────┘    └─────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Why is STT a separate service?
+
+**Docker Desktop on Mac cannot access the GPU.** Docker runs a Linux VM under the hood, and Apple's Metal GPU is not passed through. This is a hard limitation — there is no workaround.
+
+Whisper running on Docker CPU takes 1-2 seconds for a short clip and 30 seconds to load the model the first time. Running natively on your Mac with Metal acceleration is **3-5x faster**.
+
+By extracting STT into a standalone HTTP service, the voice server in Docker simply POSTs audio bytes to `http://host.docker.internal:8200/transcribe` and gets text back. Clean, fast, and the Docker container gets simpler (no Whisper model to download).
+
+### Data flow
+
+```
+You speak into mic
+    → WebRTC audio stream to Docker container
+    → Voice server sends audio bytes to STT service (native Mac, port 8200)
+    → Whisper transcribes to text (Metal-accelerated)
+    → Voice server POSTs text to nano-claw API
+    → Claude generates response (may request tools)
+    → If tool_pending: browser shows approval card, you approve/reject
+    → If approved: tools execute, loop continues
+    → Final text sent back via WebSocket
+    → Kokoro converts to speech (in Docker)
+    → WebRTC audio stream back to your browser
+You hear the answer
+```
 
 ## Quick Start
 
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
+- [Python 3.10+](https://www.python.org/) on your Mac (for the STT service)
 - An [Anthropic API key](https://console.anthropic.com/)
 
 ### 1. Clone
@@ -46,30 +103,43 @@ Or create a `.env` file in the project root:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 3. Build and run
+### 3. Start the STT service (Terminal 1)
+
+```bash
+cd stt-service
+pip install -r requirements.txt
+python server.py
+```
+
+You'll see:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8200
+```
+
+The Whisper model downloads (~75 MB) on the first transcription request and is cached after that.
+
+### 4. Start the Docker container (Terminal 2)
 
 ```bash
 ./run.sh
 ```
 
-This single command:
-- Builds the Docker image (TypeScript API server + Python voice server)
-- Downloads the Whisper STT model on first run (~75 MB, cached in a Docker volume)
-- Starts the container
+This builds the Docker image and starts the container. The voice server inside Docker calls your local STT service for transcription.
 
-### 4. Open your browser
+### 5. Open your browser
 
 Go to **http://localhost:9090**
 
 Allow microphone access when prompted. Once it says "Connected", you're ready.
 
-### 5. Talk
+### 6. Talk
 
 **Hold** the blue button and speak. **Release** to send. The agent will think, optionally request tool approval, and speak its answer back.
 
-### 6. Stop
+### 7. Stop
 
-Press `Ctrl-C` in the terminal. The container cleans itself up (`--rm`).
+- `Ctrl-C` in Terminal 2 stops the Docker container
+- `Ctrl-C` in Terminal 1 stops the STT service
 
 ## How It Works
 
@@ -128,51 +198,15 @@ iter 1  msgs 2  model anthropic/claude-sonnet-4-5  tok 897/68/965  dur 2131ms  f
 
 See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full observability guide.
 
-## Architecture
+## Component Details
 
-Everything runs inside one Docker container:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Docker container                                       │
-│                                                         │
-│  ┌──────────────────┐    ┌───────────────────────────┐  │
-│  │  nano-claw API   │    │  Voice Server (Python)    │  │
-│  │  (TypeScript)    │    │                           │  │
-│  │                  │    │  WebSocket ←→ Browser     │  │
-│  │  Agent loop      │◄──►│  Whisper STT (speech→text)│  │
-│  │  Tool execution  │    │  Kokoro TTS (text→speech) │  │
-│  │  Memory          │    │  WebRTC audio streaming   │  │
-│  │                  │    │                           │  │
-│  │  port 3001       │    │  port 8080 → 9090        │  │
-│  │  (internal)      │    │  (exposed)               │  │
-│  └──────────────────┘    └───────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
-
-| Component | Role |
-|-----------|------|
-| **nano-claw API** | Agent loop — LLM calls (Claude), tool execution, conversation memory |
-| **Voice server** | WebSocket bridge between browser and API, plus STT/TTS processing |
-| **Whisper** | Speech-to-text — runs locally in the container, no external API |
-| **Kokoro** | Text-to-speech — runs locally, streams audio back via WebRTC |
-| **Browser UI** | Push-to-talk, chat bubbles, tool approval cards, debug panel |
-
-### Data flow
-
-```
-You speak into mic
-    → WebRTC audio stream to container
-    → Whisper transcribes to text
-    → POST /api/chat to nano-claw API
-    → Claude generates response (may request tools)
-    → If tool_pending: browser shows approval card, waits
-    → If approved: POST /api/chat/approve, tools execute, loop continues
-    → Final text response sent back via WebSocket
-    → Kokoro converts to speech
-    → WebRTC audio stream back to your browser
-You hear the answer
-```
+| Component | Where it runs | Role |
+|-----------|--------------|------|
+| **STT Service** | Mac native (port 8200) | Speech-to-text via faster-whisper, Metal GPU accelerated |
+| **nano-claw API** | Docker (port 3001, internal) | Agent loop — LLM calls (Claude), tool execution, conversation memory |
+| **Voice server** | Docker (port 8080 → 9090) | WebSocket bridge, TTS, WebRTC audio |
+| **Kokoro TTS** | Docker | Text-to-speech — runs locally, streams audio via WebRTC |
+| **Browser UI** | Your browser | Push-to-talk, chat bubbles, tool approval cards, debug panel |
 
 ## Docker Details
 
@@ -181,26 +215,23 @@ You hear the answer
 1. Loads `.env` if present
 2. Stops and removes any old `nano-claw-voice` container
 3. Prunes dangling Docker images
-4. `docker build -t nano-claw-voice .` — multi-stage build (Node.js builder + Python runtime)
-5. `docker run -it --rm -p 9090:8080 -e ANTHROPIC_API_KEY=... nano-claw-voice`
+4. `docker build -t nano-claw-voice .`
+5. `docker run -it --rm -p 9090:8080` with API key and STT service URL
 
 ### Manual Docker commands
-
-If you prefer to run the steps yourself:
 
 ```bash
 # Build
 docker build -t nano-claw-voice .
 
-# Run
+# Run (make sure STT service is running on port 8200 first)
 docker run -it --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e STT_SERVICE_URL="http://host.docker.internal:8200" \
   -v nano-claw-models:/app/voice/models \
   nano-claw-voice
 ```
-
-The `-v nano-claw-models:/app/voice/models` volume caches the Whisper model so it doesn't re-download on each run.
 
 ### Inside the container
 
@@ -216,21 +247,23 @@ The voice server waits for the API to be healthy before starting.
 |---------|-----|
 | "Mic access denied" | Allow microphone in browser permissions, use Chrome/Firefox/Safari |
 | Stuck on "Connecting..." | Check that the Docker container is running (`docker ps`) |
+| Transcription fails | Make sure the STT service is running: `curl http://localhost:8200/health` |
 | No sound from agent | Click somewhere on the page first (browsers require user interaction before playing audio) |
-| Slow first response | The Whisper model downloads on first run (~75 MB). Subsequent runs use the cached volume. |
 | "nano-claw API did not become ready" | Check your `ANTHROPIC_API_KEY` is valid. Check Docker logs: `docker logs $(docker ps -q)` |
 | Container won't start | Make sure Docker is running and port 9090 isn't in use |
+| STT service won't start | Check Python 3.10+ is installed: `python3 --version` |
 
 ## Server Logs
 
-The Docker terminal shows structured logs from both servers. Look for:
+**STT service terminal** shows transcription requests:
+```
+INFO:     POST /transcribe — 4.56s audio, 0.8s inference → "How much disk space do I have?"
+```
 
+**Docker terminal** shows agent loop iterations:
 ```
 voice-server INFO  iter=1 msgs=2 model=anthropic/claude-sonnet-4-5
     tokens={'prompt': 897, 'completion': 68, 'total': 965} duration=2131ms finish=tool_use
-
-(nano-claw): Agent loop iteration complete
-    iteration: 1  durationMs: 2131  finishReason: "tool_use"
 
 (nano-claw): Tool execution complete
     tool: "shell"  success: true  durationMs: 342
@@ -239,27 +272,31 @@ voice-server INFO  iter=1 msgs=2 model=anthropic/claude-sonnet-4-5
 ## Project Structure
 
 ```
+├── stt-service/
+│   ├── server.py              # Standalone STT service (FastAPI + faster-whisper)
+│   ├── requirements.txt       # Python deps for STT service
+│   └── run.sh                 # Convenience launcher
 ├── src/
-│   ├── api/server.ts        # HTTP API — agent loop with tool confirmation
-│   ├── agent/               # Core agent: loop, memory, context, tools
-│   ├── providers/           # LLM providers (Anthropic, OpenRouter, OpenAI, etc.)
-│   ├── cli/                 # CLI commands including `serve`
-│   └── config/              # Configuration with Zod validation
+│   ├── api/server.ts          # HTTP API — agent loop with tool confirmation
+│   ├── agent/                 # Core agent: loop, memory, context, tools
+│   ├── providers/             # LLM providers (Anthropic, OpenRouter, OpenAI, etc.)
+│   ├── cli/                   # CLI commands including `serve`
+│   └── config/                # Configuration with Zod validation
 ├── voice/
-│   ├── server.py            # aiohttp WebSocket server — bridges browser ↔ API
-│   ├── stt.py               # Speech-to-text (faster-whisper)
-│   ├── tts.py               # Text-to-speech (Kokoro)
-│   ├── webrtc.py            # WebRTC session management
-│   └── web/                 # Browser UI
+│   ├── server.py              # aiohttp WebSocket server — bridges browser ↔ API
+│   ├── stt.py                 # STT module (used by stt-service, not Docker)
+│   ├── tts.py                 # Text-to-speech (Kokoro)
+│   ├── webrtc.py              # WebRTC session + STT service client
+│   └── web/                   # Browser UI
 │       ├── index.html
-│       ├── app.js           # WebSocket client, WebRTC, push-to-talk, debug panel
+│       ├── app.js             # WebSocket client, WebRTC, push-to-talk, debug panel
 │       └── styles.css
-├── Dockerfile               # Multi-stage build (Node.js + Python)
+├── Dockerfile                 # Multi-stage build (Node.js + Python)
 ├── docker/
-│   ├── entrypoint.sh        # Starts both servers
-│   └── default-config.json  # Default agent config for Docker
-├── run.sh                   # One-command build + run
-└── docs/                    # Screenshots and debug panel guide
+│   ├── entrypoint.sh          # Starts both servers
+│   └── default-config.json    # Default agent config for Docker
+├── run.sh                     # One-command Docker build + run
+└── docs/                      # Screenshots and debug panel guide
 ```
 
 ## License

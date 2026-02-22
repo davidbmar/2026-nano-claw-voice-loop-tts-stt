@@ -47,11 +47,21 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
   exit 1
 fi
 
+# Check if STT service is running
+STT_SERVICE_URL="${STT_SERVICE_URL:-http://host.docker.internal:8200}"
+STT_CHECK_URL="${STT_SERVICE_URL/host.docker.internal/localhost}"
+if ! curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
+  echo "WARNING: STT service not reachable at $STT_CHECK_URL"
+  echo "  Start it first:  cd stt-service && python server.py"
+  echo ""
+fi
+
 echo "=== Starting container ==="
 echo "Open http://localhost:9090 in your browser"
 echo ""
 docker run -it --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
   nano-claw-voice
