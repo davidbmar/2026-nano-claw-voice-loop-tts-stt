@@ -5,6 +5,8 @@ const statusText = document.getElementById("status-text");
 const chatLog = document.getElementById("chat-log");
 const talkBtn = document.getElementById("talk-btn");
 const stopBtn = document.getElementById("stop-btn");
+const textInput = document.getElementById("text-input");
+const sendBtn = document.getElementById("send-btn");
 const debugPanel = document.getElementById("debug-panel");
 const debugToggle = document.getElementById("debug-toggle");
 const debugContent = document.getElementById("debug-content");
@@ -418,6 +420,8 @@ async function startWebRTC() {
         if (state === "connected" || state === "completed") {
             statusText.textContent = "Connected";
             talkBtn.disabled = false;
+            textInput.disabled = false;
+            sendBtn.disabled = false;
             if (audioEl) audioEl.play().catch(function () {});
         } else if (state === "failed") {
             statusText.textContent = "Audio failed";
@@ -469,6 +473,8 @@ function cleanupWebRTC() {
     talkBtn.textContent = "Press & Hold to Speak";
     talkBtn.classList.remove("recording");
     talkBtn.disabled = true;
+    textInput.disabled = true;
+    sendBtn.disabled = true;
     setAgentSpeaking(false);
 }
 
@@ -522,6 +528,22 @@ talkBtn.addEventListener("mousedown", function (e) {
 talkBtn.addEventListener("mouseup", function () { stopTalking(); });
 talkBtn.addEventListener("mouseleave", function () {
     if (isRecording) stopTalking();
+});
+
+// ── Text input ───────────────────────────────────────────────
+function sendTextMessage() {
+    var text = textInput.value.trim();
+    if (!text) return;
+    textInput.value = "";
+    sendMsg("text_message", { text: text });
+}
+
+sendBtn.addEventListener("click", sendTextMessage);
+textInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        sendTextMessage();
+    }
 });
 
 // Stop agent audio

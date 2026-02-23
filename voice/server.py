@@ -78,6 +78,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # Send to nano-claw API
                 await _handle_agent_request(ws, session, http_client, text)
 
+            elif msg_type == "text_message":
+                text = msg.get("text", "").strip()
+                if not text or not session:
+                    continue
+                await ws.send_json({"type": "transcription", "text": text})
+                await _handle_agent_request(ws, session, http_client, text)
+
             elif msg_type == "tool_approve":
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:

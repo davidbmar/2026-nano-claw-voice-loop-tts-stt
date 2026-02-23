@@ -10,7 +10,12 @@ fi
 
 # Show free disk space
 echo "=== Disk Space ==="
-df -h / | tail -1 | awk '{print "Free: " $4 " / " $2 " (" $5 " used)"}'
+df -h / | tail -1 | awk '{
+  total = $2; free = $4
+  t = total + 0; f = free + 0
+  used_pct = int((1 - f/t) * 100)
+  print "Free: " free " / " total " (" used_pct "% used)"
+}'
 echo ""
 
 # Remove old container if running
@@ -33,11 +38,16 @@ echo ""
 
 # Build
 echo "=== Building ==="
-docker build -t nano-claw-voice .
+docker build --no-cache -t nano-claw-voice .
 
 echo ""
 echo "=== Disk Space After Build ==="
-df -h / | tail -1 | awk '{print "Free: " $4 " / " $2 " (" $5 " used)"}'
+df -h / | tail -1 | awk '{
+  total = $2; free = $4
+  t = total + 0; f = free + 0
+  used_pct = int((1 - f/t) * 100)
+  print "Free: " free " / " total " (" used_pct "% used)"
+}'
 echo ""
 
 # Run — pass ANTHROPIC_API_KEY from env
@@ -57,8 +67,13 @@ if curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
 else
   echo "=== Starting STT service ==="
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  pip install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
-  python "$SCRIPT_DIR/stt-service/server.py" &
+  STT_VENV="$SCRIPT_DIR/stt-service/.venv"
+  if [ ! -d "$STT_VENV" ]; then
+    echo "Creating STT virtual environment..."
+    python3 -m venv "$STT_VENV"
+  fi
+  "$STT_VENV/bin/pip" install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
+  "$STT_VENV/bin/python" "$SCRIPT_DIR/stt-service/server.py" &
   STT_PID=$!
 
   # Wait for STT service to be ready

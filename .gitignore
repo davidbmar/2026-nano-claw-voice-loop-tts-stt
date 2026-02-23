@@ -34,6 +34,9 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
+# Python virtual environments
+.venv/
+
 # Temporary files
 tmp/
 temp/
