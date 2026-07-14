@@ -21,6 +21,20 @@ let audioEl = null;
 let micStream = null;
 let isRecording = false;
 let agentSpeaking = false;
+let phoneModeEnabled = false;
+let autoTurnPending = false;
+let audioConnected = false;
+let vadAudioContext = null;
+let vadAnalyser = null;
+let vadSamples = null;
+let vadGate = null;
+let vadFrameRequest = null;
+let vadCalibration = [];
+let vadCalibrationUntil = 0;
+let vadRearmAt = 0;
+
+const PHONE_CALIBRATION_MS = 700;
+const PHONE_REARM_MS = 650;
 
 // ── Markdown rendering (safe DOM, no innerHTML) ──────────────
 function renderMarkdown(container, text) {
@@ -328,6 +342,10 @@ function setAgentSpeaking(speaking) {
     stopBtn.classList.toggle("hidden", !speaking);
 }
 
+function setPhoneStatus(text) {
+    if (phoneModeEnabled) statusText.textContent = text;
+}
+
 // ── WebSocket ────────────────────────────────────────────────
 function sendMsg(type, payload) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -372,18 +390,37 @@ function handleMessage(msg) {
             break;
 
         case "transcription":
-            if (msg.text) addBubble(msg.text, "user");
-            showThinking();
+            if (msg.text) {
+                addBubble(msg.text, "user");
+                showThinking();
+                setPhoneStatus("Claude is thinking...");
+            } else {
+                clearThinking();
+                rearmPhoneMode("No speech detected; listening again...");
+            }
             break;
 
         case "agent_reply":
             clearThinking();
             addBubble(msg.text, "agent");
             setAgentSpeaking(true);
+            setPhoneStatus("Claude is speaking to the phone...");
+            break;
+
+        case "agent_audio_start":
+            setAgentSpeaking(true);
+            setPhoneStatus("Claude is speaking to the phone...");
+            break;
+
+        case "agent_audio_end":
+            setAgentSpeaking(false);
+            rearmPhoneMode("Waiting for the phone side...");
             break;
 
         case "tool_pending":
             showToolCard(msg.requestId, msg.tools);
+            setAgentSpeaking(false);
+            setPhoneStatus("Tool approval required before the call can continue");
             break;
 
         case "debug":
@@ -395,6 +432,7 @@ function handleMessage(msg) {
 
         case "error":
             console.error("Server error:", msg.message);
+            rearmPhoneMode("Voice error; listening again...");
             break;
     }
 }
@@ -404,7 +442,13 @@ async function startWebRTC() {
     statusText.textContent = "Requesting mic...";
 
     try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+        });
     } catch (_e) {
         statusText.textContent = "Mic access denied";
         return;
@@ -418,12 +462,14 @@ async function startWebRTC() {
     pc.oniceconnectionstatechange = function () {
         var state = pc.iceConnectionState;
         if (state === "connected" || state === "completed") {
+            audioConnected = true;
             statusText.textContent = "Connected";
             talkBtn.disabled = false;
             textInput.disabled = false;
             sendBtn.disabled = false;
             if (audioEl) audioEl.play().catch(function () {});
         } else if (state === "failed") {
+            audioConnected = false;
             statusText.textContent = "Audio failed";
             cleanupWebRTC();
         }
@@ -463,71 +509,141 @@ async function handleWebRTCAnswer(sdp) {
 }
 
 function cleanupWebRTC() {
+    stopPhoneMode({sendCancel: false, status: false});
     if (pc) { pc.close(); pc = null; }
     if (audioEl) { audioEl.srcObject = null; audioEl.remove(); audioEl = null; }
     if (micStream) {
         micStream.getTracks().forEach(function (t) { t.stop(); });
         micStream = null;
     }
+    audioConnected = false;
     isRecording = false;
-    talkBtn.textContent = "Press & Hold to Speak";
-    talkBtn.classList.remove("recording");
+    talkBtn.textContent = "Start Hands-Free Phone Mode";
+    talkBtn.classList.remove("recording", "phone-active");
+    talkBtn.setAttribute("aria-pressed", "false");
     talkBtn.disabled = true;
     textInput.disabled = true;
     sendBtn.disabled = true;
     setAgentSpeaking(false);
 }
 
-// ── Hold to talk ─────────────────────────────────────────────
-function startTalking() {
-    if (!micStream || isRecording) return;
+// ── Hands-free phone mode ────────────────────────────────────
+async function ensureVadAnalyser() {
+    if (!micStream || typeof PhoneVadGate === "undefined") return false;
+    if (!vadAudioContext) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return false;
+        vadAudioContext = new AudioContextClass();
+        vadAnalyser = vadAudioContext.createAnalyser();
+        vadAnalyser.fftSize = 1024;
+        vadAnalyser.smoothingTimeConstant = 0.15;
+        vadSamples = new Float32Array(vadAnalyser.fftSize);
+        const source = vadAudioContext.createMediaStreamSource(micStream);
+        source.connect(vadAnalyser);
+    }
+    if (vadAudioContext.state === "suspended") await vadAudioContext.resume();
+    return true;
+}
+
+function currentMicRms() {
+    if (!vadAnalyser || !vadSamples) return 0;
+    vadAnalyser.getFloatTimeDomainData(vadSamples);
+    let sumSquares = 0;
+    for (let i = 0; i < vadSamples.length; i += 1) {
+        sumSquares += vadSamples[i] * vadSamples[i];
+    }
+    return Math.sqrt(sumSquares / vadSamples.length);
+}
+
+function beginAutomaticTurn() {
+    if (!phoneModeEnabled || isRecording || autoTurnPending || agentSpeaking) return;
     isRecording = true;
     talkBtn.classList.add("recording");
-    talkBtn.textContent = "Listening...";
-
-    if (agentSpeaking) {
-        sendMsg("stop_speaking");
-        setAgentSpeaking(false);
-    }
+    setPhoneStatus("Hearing the phone side...");
     sendMsg("mic_start");
 }
 
-function stopTalking() {
+function finishAutomaticTurn(reason) {
     if (!isRecording) return;
     isRecording = false;
     talkBtn.classList.remove("recording");
-    talkBtn.textContent = "Press & Hold to Speak";
+    autoTurnPending = true;
+    setPhoneStatus(reason === "maximum_duration" ? "Maximum turn reached; transcribing..." : "Transcribing phone audio...");
     sendMsg("mic_stop");
 }
 
-// Touch events (mobile)
-talkBtn.addEventListener("touchstart", function (e) {
-    e.preventDefault();
-    startTalking();
-});
-talkBtn.addEventListener("touchend", function (e) {
-    e.preventDefault();
-    stopTalking();
-});
-talkBtn.addEventListener("touchcancel", function (e) {
-    e.preventDefault();
-    stopTalking();
-});
+function monitorPhoneAudio(timestamp) {
+    if (!phoneModeEnabled) return;
 
-// Safety net: finger slides off button
-document.addEventListener("touchend", function () {
-    if (isRecording) stopTalking();
-});
+    const rms = currentMicRms();
+    if (timestamp < vadCalibrationUntil) {
+        vadCalibration.push(rms);
+    } else if (vadCalibration.length) {
+        const thresholds = vadGate.configureFromNoise(vadCalibration);
+        vadCalibration = [];
+        console.info("Phone VAD calibrated", thresholds);
+        setPhoneStatus("Waiting for the phone side...");
+    } else if (agentSpeaking || autoTurnPending || timestamp < vadRearmAt) {
+        vadGate.reset();
+    } else {
+        const event = vadGate.sample(rms, timestamp);
+        if (event?.type === "speech_start") beginAutomaticTurn();
+        if (event?.type === "speech_stop") finishAutomaticTurn(event.reason);
+    }
 
-// Mouse events (desktop)
-talkBtn.addEventListener("mousedown", function (e) {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    startTalking();
-});
-talkBtn.addEventListener("mouseup", function () { stopTalking(); });
-talkBtn.addEventListener("mouseleave", function () {
-    if (isRecording) stopTalking();
+    vadFrameRequest = window.requestAnimationFrame(monitorPhoneAudio);
+}
+
+function rearmPhoneMode(message) {
+    autoTurnPending = false;
+    if (!phoneModeEnabled || !vadGate) return;
+    vadGate.reset();
+    vadRearmAt = performance.now() + PHONE_REARM_MS;
+    setPhoneStatus(message || "Waiting for the phone side...");
+}
+
+async function startPhoneMode() {
+    if (!audioConnected || !micStream || phoneModeEnabled) return;
+    if (!await ensureVadAnalyser()) {
+        statusText.textContent = "Automatic voice detection is unavailable";
+        return;
+    }
+
+    phoneModeEnabled = true;
+    autoTurnPending = false;
+    vadGate = new PhoneVadGate();
+    vadCalibration = [];
+    vadCalibrationUntil = performance.now() + PHONE_CALIBRATION_MS;
+    vadRearmAt = vadCalibrationUntil;
+    talkBtn.classList.add("phone-active");
+    talkBtn.setAttribute("aria-pressed", "true");
+    talkBtn.textContent = "Stop Hands-Free Phone Mode";
+    statusText.textContent = "Calibrating room noise...";
+    if (vadFrameRequest !== null) window.cancelAnimationFrame(vadFrameRequest);
+    vadFrameRequest = window.requestAnimationFrame(monitorPhoneAudio);
+}
+
+function stopPhoneMode(options) {
+    const config = options || {};
+    if (!phoneModeEnabled && vadFrameRequest === null) return;
+    phoneModeEnabled = false;
+    if (vadFrameRequest !== null) {
+        window.cancelAnimationFrame(vadFrameRequest);
+        vadFrameRequest = null;
+    }
+    if (isRecording && config.sendCancel !== false) sendMsg("mic_cancel");
+    isRecording = false;
+    autoTurnPending = false;
+    if (vadGate) vadGate.reset();
+    talkBtn.classList.remove("recording", "phone-active");
+    talkBtn.setAttribute("aria-pressed", "false");
+    talkBtn.textContent = "Start Hands-Free Phone Mode";
+    if (config.status !== false && audioConnected) statusText.textContent = "Phone mode stopped";
+}
+
+talkBtn.addEventListener("click", function () {
+    if (phoneModeEnabled) stopPhoneMode();
+    else startPhoneMode();
 });
 
 // ── Text input ───────────────────────────────────────────────
@@ -535,6 +651,10 @@ function sendTextMessage() {
     var text = textInput.value.trim();
     if (!text) return;
     textInput.value = "";
+    if (phoneModeEnabled) {
+        autoTurnPending = true;
+        setPhoneStatus("Claude is thinking...");
+    }
     sendMsg("text_message", { text: text });
 }
 
@@ -549,7 +669,7 @@ textInput.addEventListener("keydown", function (e) {
 // Stop agent audio
 stopBtn.addEventListener("click", function () {
     sendMsg("stop_speaking");
-    setAgentSpeaking(false);
+    setPhoneStatus("Stopping Claude audio...");
 });
 
 // Keepalive

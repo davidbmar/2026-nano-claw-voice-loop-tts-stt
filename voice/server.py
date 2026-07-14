@@ -78,6 +78,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # Send to nano-claw API
                 await _handle_agent_request(ws, session, http_client, text)
 
+            elif msg_type == "mic_cancel":
+                if session:
+                    session.cancel_recording()
+
             elif msg_type == "text_message":
                 text = msg.get("text", "").strip()
                 if not text or not session:
@@ -132,7 +136,7 @@ async def _handle_agent_request(
         log.exception("nano-claw API call failed")
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
-        await session.speak_text(error_text)
+        await _speak_with_events(ws, session, error_text)
 
 
 async def _handle_tool_decision(
@@ -154,7 +158,21 @@ async def _handle_tool_decision(
         log.exception("nano-claw API %s call failed", action)
         error_text = "Sorry, tool execution failed."
         await ws.send_json({"type": "agent_reply", "text": error_text})
-        await session.speak_text(error_text)
+        await _speak_with_events(ws, session, error_text)
+
+
+async def _speak_with_events(
+    ws: web.WebSocketResponse,
+    session: Session,
+    text: str,
+) -> None:
+    """Keep browser VAD muted until synthesized audio actually finishes."""
+    await ws.send_json({"type": "agent_audio_start"})
+    try:
+        await session.speak_text(text)
+    finally:
+        if not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
 
 
 async def _process_api_response(
@@ -181,7 +199,9 @@ async def _process_api_response(
         reply = data.get("response", "")
         await ws.send_json({"type": "agent_reply", "text": reply})
         if reply:
-            await session.speak_text(reply)
+            await _speak_with_events(ws, session, reply)
+        else:
+            await ws.send_json({"type": "agent_audio_end"})
     elif data.get("type") == "tool_pending":
         await ws.send_json({
             "type": "tool_pending",
@@ -191,7 +211,7 @@ async def _process_api_response(
     elif data.get("error"):
         error_text = f"Error: {data['error']}"
         await ws.send_json({"type": "agent_reply", "text": error_text})
-        await session.speak_text(error_text)
+        await _speak_with_events(ws, session, error_text)
 
 
 def create_app() -> web.Application:

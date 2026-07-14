@@ -17,9 +17,9 @@
 
 ## What is this?
 
-You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Kokoro TTS), and can run tools on your machine with your approval.
+You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Piper TTS), and can run tools on your machine with your approval.
 
-**The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Kokoro speaks the answer back.
+**The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Piper speaks the answer back.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ The system runs as **two processes** — the STT service runs natively on your M
 │  │  │  nano-claw API   │    │  Voice Server (Python)      │  │  │
 │  │  │  (TypeScript)    │    │                             │  │  │
 │  │  │                  │    │  WebSocket ←→ Browser       │  │  │
-│  │  │  Agent loop      │◄──►│  Kokoro TTS (text→speech)  │  │  │
+│  │  │  Agent loop      │◄──►│  Piper TTS (text→speech)   │  │  │
 │  │  │  Tool execution  │    │  WebRTC audio streaming    │  │  │
 │  │  │  Memory          │    │                             │  │  │
 │  │  │  port 3001       │    │  port 8080 → 9090          │  │  │
@@ -72,7 +72,7 @@ You speak into mic
     → If tool_pending: browser shows approval card, you approve/reject
     → If approved: tools execute, loop continues
     → Final text sent back via WebSocket
-    → Kokoro converts to speech (in Docker)
+    → Piper converts to speech (in Docker)
     → WebRTC audio stream back to your browser
 You hear the answer
 ```
@@ -123,7 +123,14 @@ Allow microphone access when prompted. Once it says "Connected", you're ready.
 
 ### 5. Talk
 
-**Hold** the blue button and speak. **Release** to send. The agent will think, optionally request tool approval, and speak its answer back.
+Click **Start Hands-Free Phone Mode** once. The browser calibrates the room,
+detects each spoken turn automatically, waits for silence, sends the turn to
+Claude, speaks the answer, and resumes listening. Click the same button again
+to stop.
+
+For a phone test, place a separate phone on speaker beside the Mac. Start phone
+mode before dialing so the initial room-noise calibration runs before the
+greeting begins.
 
 ### 6. Stop
 
@@ -137,7 +144,10 @@ Press `Ctrl-C` — this stops both the Docker container and the STT service.
 
 ### Voice conversation
 
-Hold the button, ask a question, release. Your speech is transcribed and shown as a blue bubble. The agent's reply appears as a gray bubble and is spoken aloud through your browser.
+Start phone mode and speak naturally. Your completed turn is transcribed and
+shown as a blue bubble. The agent's reply appears as a gray bubble and is
+spoken aloud through your browser. The microphone stays gated during playback
+so the agent does not answer its own voice.
 
 ### Tool approval
 
@@ -193,8 +203,8 @@ See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full observability gu
 | **STT Service** | Mac native (port 8200) | Speech-to-text via faster-whisper, Metal GPU accelerated |
 | **nano-claw API** | Docker (port 3001, internal) | Agent loop — LLM calls (Claude), tool execution, conversation memory |
 | **Voice server** | Docker (port 8080 → 9090) | WebSocket bridge, TTS, WebRTC audio |
-| **Kokoro TTS** | Docker | Text-to-speech — runs locally, streams audio via WebRTC |
-| **Browser UI** | Your browser | Push-to-talk, chat bubbles, tool approval cards, debug panel |
+| **Piper TTS** | Docker | Text-to-speech — runs locally, streams audio via WebRTC |
+| **Browser UI** | Your browser | Hands-free phone VAD, chat bubbles, tool approval cards, debug panel |
 
 ## Docker Details
 
@@ -273,11 +283,11 @@ voice-server INFO  iter=1 msgs=2 model=anthropic/claude-sonnet-4-5
 ├── voice/
 │   ├── server.py              # aiohttp WebSocket server — bridges browser ↔ API
 │   ├── stt.py                 # STT module (used by stt-service, not Docker)
-│   ├── tts.py                 # Text-to-speech (Kokoro)
+│   ├── tts.py                 # Text-to-speech (Piper)
 │   ├── webrtc.py              # WebRTC session + STT service client
 │   └── web/                   # Browser UI
 │       ├── index.html
-│       ├── app.js             # WebSocket client, WebRTC, push-to-talk, debug panel
+│       ├── app.js             # WebSocket client, WebRTC, hands-free phone mode, debug panel
 │       └── styles.css
 ├── Dockerfile                 # Multi-stage build (Node.js + Python)
 ├── docker/

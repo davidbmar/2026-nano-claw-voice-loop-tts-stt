@@ -25,7 +25,8 @@
         <button id="send-btn" disabled>Send</button>
       </div>
       <button id="stop-btn" class="hidden">Stop</button>
-      <button id="talk-btn" disabled>Press &amp; Hold to Speak</button>
+      <button id="talk-btn" type="button" aria-pressed="false" disabled>Start Hands-Free Phone Mode</button>
+      <p id="phone-mode-help">Click once before dialing. Claude will listen, answer, and resume listening automatically.</p>
     </footer>
   </div>
 
@@ -37,6 +38,7 @@
     </div>
   </div>
 
+  <script src="phone-vad.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

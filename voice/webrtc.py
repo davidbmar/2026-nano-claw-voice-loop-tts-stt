@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ from voice.audio.webrtc_audio_source import WebRTCAudioSource
 
 FRAME_SAMPLES = 960  # 20ms at 48kHz
 SAMPLE_RATE = 48000
+MIC_PREROLL_FRAMES = 30  # 600ms: preserves the first word while VAD opens
 
 log = logging.getLogger("webrtc")
 
@@ -45,6 +47,7 @@ class Session:
         # Mic recording state
         self._recording = False
         self._mic_frames: list[bytes] = []
+        self._mic_preroll: deque[bytes] = deque(maxlen=MIC_PREROLL_FRAMES)
         self._mic_track = None
         self._mic_recv_task: asyncio.Task | None = None
         self._closed = False
@@ -75,11 +78,21 @@ class Session:
         return self._pc.localDescription.sdp
 
     def start_recording(self):
-        """Start buffering incoming mic audio frames."""
-        self._mic_frames.clear()
+        """Start buffering mic audio, including the VAD trigger pre-roll."""
+        self._mic_frames = list(self._mic_preroll)
+        self._mic_preroll.clear()
         self._recording = True
-        log.info("Mic recording started (mic_track=%s)",
-                 "attached" if self._mic_track else "MISSING")
+        log.info(
+            "Mic recording started (mic_track=%s, preroll_frames=%d)",
+            "attached" if self._mic_track else "MISSING",
+            len(self._mic_frames),
+        )
+
+    def cancel_recording(self):
+        """Discard a partial hands-free turn without invoking STT or Claude."""
+        self._recording = False
+        self._mic_frames.clear()
+        log.info("Mic recording cancelled")
 
     async def stop_recording(self) -> tuple[str, float]:
         """Stop recording and transcribe all captured audio.
@@ -147,7 +160,7 @@ class Session:
         return [p for p in parts if p.strip()]
 
     async def speak_text(self, text: str, voice_id: str = ""):
-        """Run TTS sentence-by-sentence and enqueue audio."""
+        """Run TTS sentence-by-sentence and return after playback drains."""
         from voice.tts import synthesize
 
         self._audio_source.set_generator(self._tts_generator)
@@ -157,12 +170,26 @@ class Session:
         log.info("TTS: %d sentences to synthesize", len(sentences))
 
         loop = asyncio.get_running_loop()
+        total_bytes = 0
         for i, sentence in enumerate(sentences):
             pcm_48k = await loop.run_in_executor(None, synthesize, sentence, voice_id)
             if pcm_48k:
                 self._audio_queue.enqueue(pcm_48k)
+                total_bytes += len(pcm_48k)
                 log.debug("TTS sentence %d/%d enqueued: %d bytes",
                           i + 1, len(sentences), len(pcm_48k))
+
+        playback_seconds = total_bytes / (SAMPLE_RATE * 2)
+        deadline = loop.time() + max(5.0, min(120.0, playback_seconds + 5.0))
+        while self._audio_queue.available and loop.time() < deadline and not self._closed:
+            await asyncio.sleep(0.02)
+        if self._audio_queue.available:
+            log.warning("TTS playback drain timed out with %d bytes queued", self._audio_queue.available)
+            self._audio_queue.clear()
+        # The last WebRTC frame has left the queue but can still be in the
+        # browser audio buffer. Keep the mic gate closed through that tail.
+        await asyncio.sleep(0.15)
+        self._audio_source.clear_generator()
 
     async def _recv_mic_audio(self, track):
         """Background task: continuously receive audio frames from browser mic."""
@@ -180,16 +207,18 @@ class Session:
                          frame.format.name, frame.sample_rate, frame.samples, arr.shape)
                 logged_format = True
 
+            arr = frame.to_ndarray()
+            if arr.dtype in (np.float32, np.float64):
+                arr = (arr * 32767).clip(-32768, 32767).astype(np.int16)
+            flat = arr.flatten()
+            channels = flat.shape[0] // frame.samples
+            if channels > 1:
+                flat = flat[::channels]
+            pcm = flat.astype(np.int16).tobytes()
             if self._recording:
-                arr = frame.to_ndarray()
-                if arr.dtype in (np.float32, np.float64):
-                    arr = (arr * 32767).clip(-32768, 32767).astype(np.int16)
-                flat = arr.flatten()
-                channels = flat.shape[0] // frame.samples
-                if channels > 1:
-                    flat = flat[::channels]
-                pcm = flat.astype(np.int16).tobytes()
                 self._mic_frames.append(pcm)
+            else:
+                self._mic_preroll.append(pcm)
 
     async def close(self):
         """Tear down the peer connection."""

@@ -373,6 +373,23 @@ body {
     animation: recordPulse 1s infinite;
 }
 
+#talk-btn.phone-active {
+    background: #15803d;
+}
+
+#talk-btn.phone-active.recording {
+    background: #dc2626;
+}
+
+#phone-mode-help {
+    width: 100%;
+    max-width: 400px;
+    color: #777;
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: center;
+}
+
 @keyframes recordPulse {
     0%, 100% { transform: scale(1); }
     50% { transform: scale(1.03); }
