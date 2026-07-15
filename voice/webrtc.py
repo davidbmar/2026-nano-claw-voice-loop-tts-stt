@@ -56,6 +56,9 @@ class Session:
         self.voice_id = "af_heart"
         self.speed = 1.0
 
+        self._paused = False
+        self._stream_task: asyncio.Task | None = None
+
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
             log.info("Connection state: %s", self._pc.connectionState)
@@ -140,6 +143,35 @@ class Session:
         self._audio_source.clear_generator()
         log.info("TTS playback stopped")
 
+    def set_stream_task(self, task) -> None:
+        """Remember the task running the current streamed reply (for cancel)."""
+        self._stream_task = task
+
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def pause_speaking(self) -> None:
+        """Barge-in pause: go silent but KEEP the queued audio for resume."""
+        self._paused = True
+        self._audio_source.clear_generator()
+        log.info("Barge-in: paused (%d bytes retained)", self._audio_queue.available)
+
+    def resume_speaking(self) -> None:
+        """Resume a paused reply from where it stopped."""
+        self._paused = False
+        self._audio_source.set_generator(self._tts_generator)
+        log.info("Barge-in: resumed (%d bytes queued)", self._audio_queue.available)
+
+    def cancel_stream(self) -> None:
+        """Committed barge-in: discard the reply audio + abort its stream task."""
+        self._paused = False
+        self._audio_queue.clear()
+        self._audio_source.clear_generator()
+        if self._stream_task and not self._stream_task.done():
+            self._stream_task.cancel()
+        self._stream_task = None
+        log.info("Barge-in: committed — reply cancelled")
+
     def set_voice(self, voice_id: str, speed: float):
         """Update the voice + speed used for subsequent replies."""
         if voice_id:
@@ -189,16 +221,24 @@ class Session:
         """Wait for the queue to drain, then detach the generator (mirrors speak_text tail)."""
         loop = asyncio.get_running_loop()
         playback_seconds = total_bytes / (SAMPLE_RATE * 2)
-        deadline = loop.time() + max(5.0, min(120.0, playback_seconds + 5.0))
-        while self._audio_queue.available and loop.time() < deadline and not self._closed:
+        budget = max(5.0, min(120.0, playback_seconds + 5.0))
+        deadline = loop.time() + budget
+        while self._audio_queue.available and not self._closed:
             await asyncio.sleep(0.02)
-        if self._audio_queue.available:
+            if self._paused:
+                # Freeze the countdown while paused (extend the deadline).
+                deadline += 0.02
+                continue
+            if loop.time() >= deadline:
+                break
+        if self._audio_queue.available and not self._paused:
             log.warning("TTS playback drain timed out with %d bytes queued", self._audio_queue.available)
             self._audio_queue.clear()
         # The last WebRTC frame has left the queue but can still be in the
         # browser audio buffer. Keep the mic gate closed through that tail.
         await asyncio.sleep(0.15)
-        self._audio_source.clear_generator()
+        if not self._paused:
+            self._audio_source.clear_generator()
 
     async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
         """Whole-text path (non-streaming fallback): clean, split, enqueue, drain."""
