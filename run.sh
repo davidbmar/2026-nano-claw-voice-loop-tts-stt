@@ -142,4 +142,5 @@ docker run -it --rm \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
+  -v nano-claw-data:/app/data \
   nano-claw-voice
