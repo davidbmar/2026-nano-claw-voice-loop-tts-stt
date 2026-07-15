@@ -519,6 +519,7 @@ function handleMessage(msg) {
             break;
 
         case "agent_audio_end":
+            finalizeAgentBubble();
             setAgentSpeaking(false);
             rearmPhoneMode("Waiting for the phone side...");
             break;
@@ -542,6 +543,7 @@ function handleMessage(msg) {
 
         case "error":
             console.error("Server error:", msg.message);
+            finalizeAgentBubble();
             rearmPhoneMode("Voice error; listening again...");
             break;
     }
