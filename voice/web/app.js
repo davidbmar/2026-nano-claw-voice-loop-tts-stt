@@ -13,6 +13,10 @@ const debugContent = document.getElementById("debug-content");
 const debugModalOverlay = document.getElementById("debug-modal-overlay");
 const debugModalBody = document.getElementById("debug-modal-body");
 const debugModalClose = document.getElementById("debug-modal-close");
+const voiceSelect = document.getElementById("voice-select");
+const voicePreviewBtn = document.getElementById("voice-preview-btn");
+const speedSlider = document.getElementById("speed-slider");
+const speedValue = document.getElementById("speed-value");
 
 // ── State ────────────────────────────────────────────────────
 let ws = null;
@@ -352,6 +356,80 @@ function sendMsg(type, payload) {
     ws.send(JSON.stringify(Object.assign({ type: type }, payload || {})));
 }
 
+// ── Voice picker ─────────────────────────────────────────────
+var LS_VOICE = "nanoclaw.voiceId";
+var LS_SPEED = "nanoclaw.speed";
+var currentVoiceId = localStorage.getItem(LS_VOICE) || "af_heart";
+var currentSpeed = parseFloat(localStorage.getItem(LS_SPEED) || "1") || 1;
+var previewAudio = new Audio();
+
+function renderVoiceOptions(uiCatalog) {
+    voiceSelect.innerHTML = "";
+    VoiceUI.groupVoices(uiCatalog).forEach(function (group) {
+        var og = document.createElement("optgroup");
+        og.label = group.label;
+        group.options.forEach(function (opt) {
+            var o = document.createElement("option");
+            o.value = opt.id;
+            o.textContent = opt.label;
+            og.appendChild(o);
+        });
+        voiceSelect.appendChild(og);
+    });
+    voiceSelect.value = currentVoiceId;
+    if (!voiceSelect.value) {
+        currentVoiceId = uiCatalog.default;
+        voiceSelect.value = currentVoiceId;
+    }
+    voiceSelect.disabled = false;
+    voicePreviewBtn.disabled = false;
+}
+
+function pushVoice() {
+    sendMsg("set_voice", { voiceId: currentVoiceId, speed: currentSpeed });
+}
+
+function loadVoices() {
+    fetch("/api/voices")
+        .then(function (r) { return r.json(); })
+        .then(function (uiCatalog) {
+            renderVoiceOptions(uiCatalog);
+            speedSlider.value = String(currentSpeed);
+            speedValue.textContent = currentSpeed.toFixed(1) + "×";
+            pushVoice();
+        })
+        .catch(function () { statusText.textContent = "Could not load voices"; });
+}
+
+voiceSelect.addEventListener("change", function () {
+    currentVoiceId = voiceSelect.value;
+    localStorage.setItem(LS_VOICE, currentVoiceId);
+    pushVoice();
+});
+
+speedSlider.addEventListener("input", function () {
+    currentSpeed = parseFloat(speedSlider.value);
+    speedValue.textContent = currentSpeed.toFixed(1) + "×";
+    localStorage.setItem(LS_SPEED, String(currentSpeed));
+});
+speedSlider.addEventListener("change", pushVoice);
+
+voicePreviewBtn.addEventListener("click", function () {
+    voicePreviewBtn.disabled = true;
+    fetch("/api/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voiceId: currentVoiceId }),
+    })
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+            previewAudio.src = URL.createObjectURL(blob);
+            return previewAudio.play();
+        })
+        .catch(function () { /* ignore preview errors */ })
+        .finally(function () { voicePreviewBtn.disabled = false; });
+});
+
 function connect() {
     statusText.textContent = "Connecting...";
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -360,6 +438,7 @@ function connect() {
     ws.onopen = function () {
         statusText.textContent = "Authenticating...";
         sendMsg("hello");
+        loadVoices();
     };
 
     ws.onmessage = function (ev) {
@@ -425,6 +504,10 @@ function handleMessage(msg) {
 
         case "debug":
             addDebugEntry(msg);
+            break;
+
+        case "voice_notice":
+            statusText.textContent = msg.text;
             break;
 
         case "pong":
