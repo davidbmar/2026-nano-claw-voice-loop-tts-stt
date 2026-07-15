@@ -67,7 +67,7 @@ async def transcribe(request: Request):
         size = DEFAULT_SIZE
 
     if not audio_bytes:
-        return {"text": "", "duration_s": 0.0}
+        return {"text": "", "duration_s": 0.0, "processing_ms": 0}
 
     start = time.time()
     model = _get_model(size)
@@ -90,7 +90,7 @@ async def transcribe(request: Request):
 
     log.info("Transcribed in %.2fs → %r", elapsed, text[:100])
 
-    return {"text": text, "duration_s": round(duration_s, 2)}
+    return {"text": text, "duration_s": round(duration_s, 2), "processing_ms": int(elapsed * 1000)}
 
 
 if __name__ == "__main__":
