@@ -42,6 +42,7 @@ interrupt path are.
 | Echo handling | Assume **speakers**; browser AEC (`echoCancellation`/`noiseSuppression`/`autoGainControl`) + VAD threshold above the residual-echo floor; backoff absorbs the occasional false trip |
 | On-screen text | **Streams into the chat log** sentence-by-sentence, matching the audio |
 | Provider without streaming | Graceful fallback to today's single-response path (never breaks) |
+| Barge-in feature flag | `NANO_CLAW_BARGE_IN` env, **default off** (opt-in). When off, the mic stays gated during playback exactly as today — zero behavior change. The server surfaces the flag to the browser in `hello_ack` so the browser only keeps the mic live + runs barge-in logic when enabled. |
 
 Build in **two phases**: Phase 1 (streaming) first — barge-in's "resume" is
 cleaner to define once audio is a managed stream.
