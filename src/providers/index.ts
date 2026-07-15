@@ -173,11 +173,14 @@ export class ProviderManager {
     maxTokens?: number,
     tools?: ToolDefinition[]
   ): AsyncGenerator<StreamEvent> {
-    const providerSpec = findProviderByModel(model);
-    if (!providerSpec) {
-      throw new ProviderError(`No provider found for model: ${model}`);
-    }
-    const provider = this.getProviderInstance(providerSpec.name);
+    const providerName = this.detectProvider(model);
+    const provider = this.getProviderInstance(providerName);
+
+    logger.info(
+      { provider: providerName, model, messageCount: messages.length },
+      'Completing chat (stream)'
+    );
+
     yield* provider.completeStream(messages, model, temperature, maxTokens, tools);
   }
 }
