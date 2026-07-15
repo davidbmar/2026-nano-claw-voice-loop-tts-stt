@@ -7,7 +7,8 @@ export interface CatalogModel { id: string; label: string; provider: string; }
 export const MODEL_CATALOG: CatalogModel[] = [
   { id: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'anthropic' },
   { id: 'anthropic/claude-sonnet-4-5', label: 'Claude Sonnet 4.5', provider: 'anthropic' },
-  { id: 'gemini/gemini-2.0-flash', label: 'Gemini 2.0 Flash', provider: 'gemini' },
+  { id: 'gemini/gemini-flash-lite-latest', label: 'Gemini Flash-Lite (fast/cheap)', provider: 'gemini' },
+  { id: 'gemini/gemini-flash-latest', label: 'Gemini Flash', provider: 'gemini' },
   { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek' },
   { id: 'groq/llama-3.3-70b-versatile', label: 'Groq Llama 3.3 70B', provider: 'groq' },
   { id: 'dashscope/qwen-plus', label: 'Qwen Plus (Alibaba)', provider: 'dashscope' },
