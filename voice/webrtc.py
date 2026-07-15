@@ -56,6 +56,10 @@ class Session:
         self.voice_id = "af_heart"
         self.speed = 1.0
 
+        # Pipeline settings: model + STT (Whisper) size for this session.
+        self.model = ""       # "" → server uses its default
+        self.stt_size = "base"
+
         self._paused = False
         self._stream_task: asyncio.Task | None = None
 
@@ -128,6 +132,7 @@ class Session:
                     headers={
                         "Content-Type": "application/octet-stream",
                         "X-Sample-Rate": str(SAMPLE_RATE),
+                        "X-Model-Size": self.stt_size,
                     },
                 )
                 result = resp.json()
