@@ -60,6 +60,20 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     session: Session | None = None
     http_client = httpx.AsyncClient(timeout=120.0)
 
+    def _spawn_agent(coro):
+        # One active agent reply at a time. If a reply is still in flight,
+        # drop the duplicate (the browser also gates new turns behind
+        # agentSpeaking) so two tasks can't race on the audio queue / WS
+        # and orphan each other past barge-in's reach.
+        existing = session._stream_task if session else None
+        if existing is not None and not existing.done():
+            log.info("Agent reply already in flight; ignoring duplicate request")
+            coro.close()  # avoid 'coroutine was never awaited' warning
+            return
+        task = asyncio.create_task(coro)
+        session.set_stream_task(task)
+        task.add_done_callback(_on_agent_task_done)
+
     try:
         async for raw_msg in ws:
             if raw_msg.type != web.WSMsgType.TEXT:
@@ -101,11 +115,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
                 # Send to nano-claw API — spawn so the receive loop stays free
                 # to dispatch barge_in* messages while the reply streams/plays.
-                agent_task = asyncio.create_task(
-                    _handle_agent_request(ws, session, http_client, text)
-                )
-                session.set_stream_task(agent_task)
-                agent_task.add_done_callback(_on_agent_task_done)
+                _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
             elif msg_type == "mic_cancel":
                 if session:
@@ -116,11 +126,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text or not session:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
-                agent_task = asyncio.create_task(
-                    _handle_agent_request(ws, session, http_client, text)
-                )
-                session.set_stream_task(agent_task)
-                agent_task.add_done_callback(_on_agent_task_done)
+                _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
             elif msg_type == "set_voice":
                 if not session:
@@ -143,21 +149,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                agent_task = asyncio.create_task(
-                    _handle_tool_decision(ws, session, http_client, "approve", request_id)
-                )
-                session.set_stream_task(agent_task)
-                agent_task.add_done_callback(_on_agent_task_done)
+                _spawn_agent(_handle_tool_decision(ws, session, http_client, "approve", request_id))
 
             elif msg_type == "tool_reject":
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                agent_task = asyncio.create_task(
-                    _handle_tool_decision(ws, session, http_client, "reject", request_id)
-                )
-                session.set_stream_task(agent_task)
-                agent_task.add_done_callback(_on_agent_task_done)
+                _spawn_agent(_handle_tool_decision(ws, session, http_client, "reject", request_id))
 
             elif msg_type == "stop_speaking":
                 if session:
@@ -201,6 +199,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     except Exception:
         log.exception("WebSocket error")
     finally:
+        if session and session._stream_task and not session._stream_task.done():
+            session._stream_task.cancel()
+            try:
+                await session._stream_task
+            except BaseException:
+                pass  # CancelledError (expected) or the task's own error — we're tearing down
         await http_client.aclose()
         if session:
             await session.close()
