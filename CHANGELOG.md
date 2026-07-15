@@ -55,7 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Barge-in (opt-in, `NANO_CLAW_BARGE_IN=1`): interrupt Claude mid-reply — playback
   pauses on your voice, your speech becomes the next turn, and a false alarm
-  resumes the reply after a randomized exponential backoff.
+  resumes the reply after a randomized exponential backoff. Regardless of the
+  flag, a second text message sent while a reply is still streaming is
+  dropped rather than queued (one reply at a time).
 - Kokoro-82M TTS as a native Mac service (port 8300) with a browser voice picker
   (American/British English + Spanish), quality-grade labels, per-voice preview,
   and a speed slider. Piper remains as the fast, low-latency option. Selecting a

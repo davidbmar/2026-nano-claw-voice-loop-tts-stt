@@ -33,3 +33,12 @@ def test_reset_returns_to_base():
     assert b.attempts == 3
     b.reset()
     assert b.attempts == 0
+
+
+def test_no_overflow_over_many_false_alarms():
+    b = Backoff(base=0.5, factor=2.0, cap=8.0)
+    for _ in range(5000):
+        d = b.next()
+        assert 0.0 <= d <= 8.0
+    # n stops growing once the ceiling hits the cap — never overflows.
+    assert b.attempts < 100

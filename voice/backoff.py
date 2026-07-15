@@ -24,8 +24,10 @@ class Backoff:
 
     def next(self) -> float:
         """Return a full-jitter delay in [0, ceiling] and advance the counter."""
-        ceiling = min(self._cap, self._base * (self._factor ** self._n))
-        self._n += 1
+        uncapped = self._base * (self._factor ** self._n)
+        ceiling = min(self._cap, uncapped)
+        if uncapped < self._cap:
+            self._n += 1
         return random.uniform(0.0, ceiling)
 
     def reset(self) -> None:

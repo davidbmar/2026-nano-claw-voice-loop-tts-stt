@@ -141,6 +141,7 @@ class Session:
         """Stop TTS playback — clear the audio queue."""
         self._audio_queue.clear()
         self._audio_source.clear_generator()
+        self._paused = False
         log.info("TTS playback stopped")
 
     def set_stream_task(self, task) -> None:
@@ -207,7 +208,9 @@ class Session:
         return [p for p in parts if p.strip()]
 
     def begin_stream(self) -> None:
-        """Attach the TTS generator so enqueued chunks start playing immediately."""
+        """Start a fresh reply: discard any leftover audio, then attach the generator."""
+        self._audio_queue.clear()
+        self._paused = False
         self._audio_source.set_generator(self._tts_generator)
 
     def enqueue_chunk(self, text: str, voice_id: str = "", speed: float = 1.0) -> int:

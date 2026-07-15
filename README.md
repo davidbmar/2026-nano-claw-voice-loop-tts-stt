@@ -115,6 +115,10 @@ echo cancellation (AEC) plus the backoff absorb most false trips caused by
 the agent's own voice bleeding into the mic; a headset avoids the issue
 entirely.
 
+Regardless of the flag, replies don't queue: with the agent-reply spawn model,
+a second text message sent while a reply is still streaming is dropped
+("one reply at a time") rather than queued for later.
+
 ## Quick Start
 
 ### Prerequisites
