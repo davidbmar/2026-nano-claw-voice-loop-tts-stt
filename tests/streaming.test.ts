@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { BaseProvider } from '../src/providers/base';
+import { BaseProvider, parseAnthropicEvents } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
+import { Readable } from 'node:stream';
 
 class FakeProvider extends BaseProvider {
   protected getDefaultApiBase(): string { return 'http://example.invalid'; }
@@ -23,5 +24,47 @@ describe('BaseProvider.completeStream fallback', () => {
       { type: 'text', delta: 'Hello world.' },
       { type: 'done', finishReason: 'stop', usage: undefined },
     ]);
+  });
+});
+
+function sse(lines: string): Readable {
+  return Readable.from([Buffer.from(lines)]);
+}
+
+describe('parseAnthropicEvents', () => {
+  it('maps text_delta events to text StreamEvents and ends with done', async () => {
+    const body =
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi "}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there."}}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    const out: any[] = [];
+    for await (const e of parseAnthropicEvents(sse(body))) out.push(e);
+    expect(out[0]).toEqual({ type: 'text', delta: 'Hi ' });
+    expect(out[1]).toEqual({ type: 'text', delta: 'there.' });
+    const done = out[out.length - 1];
+    expect(done.type).toBe('done');
+    expect(done.finishReason).toBe('end_turn');
+    expect(done.usage).toEqual({ promptTokens: 5, completionTokens: 3, totalTokens: 8 });
+  });
+
+  it('assembles a tool_use block into a tool_calls event', async () => {
+    const body =
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"shell","input":{}}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\":"}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\\"ls\\"}"}}\n\n' +
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    const out: any[] = [];
+    for await (const e of parseAnthropicEvents(sse(body))) out.push(e);
+    const toolEvt = out.find((e) => e.type === 'tool_calls');
+    expect(toolEvt).toBeTruthy();
+    expect(toolEvt.toolCalls[0]).toEqual({
+      id: 't1',
+      type: 'function',
+      function: { name: 'shell', arguments: '{"cmd":"ls"}' },
+    });
   });
 });
