@@ -56,3 +56,15 @@ def test_flush_returns_remainder():
     c.push("Trailing without terminator")
     assert c.flush().strip() == "Trailing without terminator"
     assert c.flush() == ""  # nothing left after flush
+
+
+def test_numbered_list_marker_not_spoken():
+    c = TextChunker()
+    out = []
+    out += c.push("1. First item. 2. Second item here now. ")
+    out.append(c.flush())
+    joined = " ".join(x for x in out if x)
+    # The bare list numbers "1." / "2." must not survive as standalone chunks.
+    assert "First item." in joined
+    assert "Second item here now." in joined
+    assert not any(chunk.strip() in ("1.", "2.") for chunk in out)

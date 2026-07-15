@@ -202,6 +202,9 @@ async def _consume_sse(
                     for chunk in chunker.push(obj.get("text", "")):
                         await speak_chunk(chunk)
                 elif ev == "tool_pending":
+                    tail = chunker.flush()
+                    if tail:
+                        await speak_chunk(tail)
                     await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
                     await ws.send_json({"type": "agent_audio_end"})
                     return
@@ -240,11 +243,18 @@ async def _handle_tool_decision(
     """POST approve/reject to nano-claw API and handle response."""
     try:
         endpoint = f"{NANO_CLAW_URL}/api/chat/{action}"
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             endpoint,
             json={"requestId": request_id, "sessionId": SESSION_ID},
-        )
-        await _process_api_response(ws, session, resp.json())
+            headers={"Accept": "text/event-stream"},
+        ) as resp:
+            ctype = resp.headers.get("content-type", "")
+            if "text/event-stream" not in ctype:
+                data = json.loads(await resp.aread())
+                await _process_api_response(ws, session, data)
+                return
+            await _consume_sse(ws, session, resp)
     except Exception:
         log.exception("nano-claw API %s call failed", action)
         error_text = "Sorry, tool execution failed."
