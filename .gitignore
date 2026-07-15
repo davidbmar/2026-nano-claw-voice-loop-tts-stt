@@ -53,3 +53,6 @@ temp/
 
 # OS files
 Thumbs.db
+
+# Site crawl artifacts (rebuildable via scripts/crawl_site.py)
+data/
