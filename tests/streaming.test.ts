@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { BaseProvider, parseAnthropicEvents, parseOpenAIEvents, OpenAIProvider } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
-import { __setProviderManagerForTest, stepLoopStream } from '../src/api/server';
+import { __setProviderManagerForTest, stepLoopStream, getAgentConfig } from '../src/api/server';
 import { Memory } from '../src/agent/memory';
 
 class FakeProvider extends BaseProvider {
@@ -164,5 +164,12 @@ describe('stepLoopStream', () => {
     expect(texts).toBe('Part one. Part two.');
     const final = events.find((e) => e.type === 'final');
     expect(final.response).toBe('Part one. Part two.');
+  });
+});
+
+describe('getAgentConfig model override', () => {
+  it('uses a valid catalog model override, else the default', () => {
+    expect(getAgentConfig('groq/llama-3.3-70b-versatile').model).toBe('groq/llama-3.3-70b-versatile');
+    expect(getAgentConfig('totally-unknown-model').model).toBe(getAgentConfig().model); // falls back
   });
 });
