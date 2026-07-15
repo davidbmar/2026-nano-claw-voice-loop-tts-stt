@@ -141,7 +141,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _handle_agent_request(ws, session, client, text):
+async def _handle_agent_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    client: httpx.AsyncClient,
+    text: str,
+) -> None:
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     try:
         async with client.stream(
@@ -163,12 +168,15 @@ async def _handle_agent_request(ws, session, client, text):
         await _speak_with_events(ws, session, error_text)
 
 
-async def _consume_sse(ws, session, resp):
+async def _consume_sse(
+    ws: web.WebSocketResponse,
+    session: Session,
+    resp: httpx.Response,
+) -> None:
     """Parse SSE frames, speaking each chunk and forwarding text to the browser."""
     chunker = TextChunker()
     loop = asyncio.get_running_loop()
     total_bytes = 0
-    spoke_any = False
     event = ""
     data_lines: list[str] = []
 
@@ -181,42 +189,45 @@ async def _consume_sse(ws, session, resp):
 
     session.begin_stream()
     await ws.send_json({"type": "agent_audio_start"})
-
-    async for raw in resp.aiter_lines():
-        if raw == "":  # frame boundary
-            payload = "\n".join(data_lines)
-            data_lines = []
-            ev, event = event, ""
-            if not payload:
+    try:
+        async for raw in resp.aiter_lines():
+            if raw == "":  # frame boundary
+                payload = "\n".join(data_lines)
+                data_lines = []
+                ev, event = event, ""
+                if not payload:
+                    continue
+                obj = json.loads(payload)
+                if ev == "delta":
+                    for chunk in chunker.push(obj.get("text", "")):
+                        await speak_chunk(chunk)
+                elif ev == "tool_pending":
+                    await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
+                    await ws.send_json({"type": "agent_audio_end"})
+                    return
+                elif ev == "final":
+                    tail = chunker.flush()
+                    if tail:
+                        await speak_chunk(tail)
+                    if obj.get("debug"):
+                        await ws.send_json({"type": "debug", **obj["debug"]})
+                    await ws.send_json({"type": "agent_reply_done"})
+                elif ev == "error":
+                    await ws.send_json({"type": "agent_reply", "text": f"Error: {obj.get('error', 'agent error')}"})
                 continue
-            obj = json.loads(payload)
-            if ev == "delta":
-                for chunk in chunker.push(obj.get("text", "")):
-                    spoke_any = True
-                    await speak_chunk(chunk)
-            elif ev == "tool_pending":
-                await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
-                await ws.send_json({"type": "agent_audio_end"})
-                return
-            elif ev == "final":
-                tail = chunker.flush()
-                if tail:
-                    spoke_any = True
-                    await speak_chunk(tail)
-                if obj.get("debug"):
-                    await ws.send_json({"type": "debug", **obj["debug"]})
-                await ws.send_json({"type": "agent_reply_done"})
-            elif ev == "error":
-                await ws.send_json({"type": "agent_reply", "text": "Error from agent."})
-            continue
-        if raw.startswith("event:"):
-            event = raw[6:].strip()
-        elif raw.startswith("data:"):
-            data_lines.append(raw[5:].strip())
+            if raw.startswith("event:"):
+                event = raw[6:].strip()
+            elif raw.startswith("data:"):
+                data_lines.append(raw[5:].strip())
 
-    await session.end_stream(total_bytes)
-    if not session._closed:
-        await ws.send_json({"type": "agent_audio_end"})
+        await session.end_stream(total_bytes)
+        if not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
+    except Exception:
+        session.stop_speaking()
+        if not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
+        raise
 
 
 async def _handle_tool_decision(
