@@ -13,7 +13,7 @@ import re
 
 FIRST_CHUNK_WORDS = 6
 
-_SENTENCE_END = re.compile(r".*?[.!?](?:\s|$)", re.DOTALL)
+_SENTENCE_END = re.compile(r".*?[.!?]\s", re.DOTALL)
 
 
 def _clean(text: str) -> str:

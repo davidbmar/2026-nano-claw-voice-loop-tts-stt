@@ -4,24 +4,41 @@ from voice.text_chunker import TextChunker
 def test_first_chunk_flushes_after_six_words_without_a_boundary():
     c = TextChunker()
     out = []
-    for word in "one two three four five six seven".split():
+    for word in "one two three four five six".split():
         out += c.push(word + " ")
-    # First chunk emitted once >=6 words accumulate, even mid-sentence.
-    assert out, "expected an early first chunk"
+    # First chunk emitted exactly once >=6 words accumulate, even mid-sentence.
+    assert len(out) == 1, f"expected exactly one early first chunk, got {out}"
     assert len(out[0].split()) >= 6
 
 
 def test_later_chunks_only_on_sentence_boundary():
     c = TextChunker()
-    c.push("This is the first sentence that is quite long already. ")
-    # consume whatever the first-chunk rule emitted
-    c2 = TextChunker()
-    got = c2.push("Short one. And another one! Third?")
+    got = c.push("Short one. And another one! Third sentence here.")
     joined = " ".join(got)
+    # Confirmed boundaries (punctuation + trailing space) flush via push().
     assert "Short one." in joined
     assert "And another one!" in joined
-    # "Third?" has no trailing space/flush yet unless boundary seen; it ends with ?
-    assert "Third?" in joined
+    # The final sentence has no trailing space, so push() must NOT emit it —
+    # only flush() reveals it, since more text could still arrive mid-stream.
+    assert "Third sentence here." not in joined
+    assert c.flush() == "Third sentence here."
+
+
+def test_decimal_not_split_across_deltas():
+    c = TextChunker()
+    # No confirmed sentence boundary yet and under FIRST_CHUNK_WORDS words,
+    # so nothing should flush — even though the buffer ends in ".".
+    out = c.push("The value is 3.")
+    assert out == []
+    out = c.push("5 percent. Done here now.")
+    assert out, "expected a chunk once a confirmed boundary arrives"
+    assert "3.5 percent." in out[0]
+    assert out[0] != "The value is 3."
+
+
+def test_under_six_words_no_boundary_returns_empty():
+    c = TextChunker()
+    assert c.push("just four words here") == []
 
 
 def test_markdown_is_stripped():
