@@ -52,6 +52,10 @@ class Session:
         self._mic_recv_task: asyncio.Task | None = None
         self._closed = False
 
+        # Selected voice for this session (browser default: Kokoro af_heart).
+        self.voice_id = "af_heart"
+        self.speed = 1.0
+
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
             log.info("Connection state: %s", self._pc.connectionState)
@@ -136,6 +140,16 @@ class Session:
         self._audio_source.clear_generator()
         log.info("TTS playback stopped")
 
+    def set_voice(self, voice_id: str, speed: float):
+        """Update the voice + speed used for subsequent replies."""
+        if voice_id:
+            self.voice_id = voice_id
+        try:
+            self.speed = max(0.5, min(2.0, float(speed)))
+        except (TypeError, ValueError):
+            pass
+        log.info("Voice set: %s (speed=%.2f)", self.voice_id, self.speed)
+
     @staticmethod
     def _clean_for_speech(text: str) -> str:
         """Strip markdown formatting so TTS reads clean prose."""
@@ -159,7 +173,7 @@ class Session:
         parts = re.split(r'(?<=[.!?])\s+', text.strip())
         return [p for p in parts if p.strip()]
 
-    async def speak_text(self, text: str, voice_id: str = ""):
+    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
         """Run TTS sentence-by-sentence and return after playback drains."""
         from voice.tts import synthesize
 
@@ -172,7 +186,9 @@ class Session:
         loop = asyncio.get_running_loop()
         total_bytes = 0
         for i, sentence in enumerate(sentences):
-            pcm_48k = await loop.run_in_executor(None, synthesize, sentence, voice_id)
+            pcm_48k = await loop.run_in_executor(
+                None, synthesize, sentence, voice_id, speed
+            )
             if pcm_48k:
                 self._audio_queue.enqueue(pcm_48k)
                 total_bytes += len(pcm_48k)

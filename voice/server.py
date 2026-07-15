@@ -10,6 +10,10 @@ import httpx
 from aiohttp import web
 
 from voice.webrtc import Session
+from voice import voice_catalog
+from voice.tts import synthesize as tts_synthesize
+from voice.wav import pcm_to_wav
+from voice import kokoro_client
 
 log = logging.getLogger("voice-server")
 
@@ -88,6 +92,23 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
                 await _handle_agent_request(ws, session, http_client, text)
+
+            elif msg_type == "set_voice":
+                if not session:
+                    continue
+                voice_id = msg.get("voiceId", "")
+                session.set_voice(voice_id, msg.get("speed", 1.0))
+                # Proactively warn if a Kokoro voice was picked but the service
+                # is down — the reply will still work (Piper fallback).
+                entry = voice_catalog.lookup(voice_id)
+                if entry and entry["engine"] == "kokoro":
+                    loop = asyncio.get_running_loop()
+                    healthy = await loop.run_in_executor(None, kokoro_client.is_healthy)
+                    if not healthy:
+                        await ws.send_json({
+                            "type": "voice_notice",
+                            "text": "Kokoro voice unavailable — using the fast voice.",
+                        })
 
             elif msg_type == "tool_approve":
                 request_id = msg.get("requestId", "")
@@ -169,7 +190,7 @@ async def _speak_with_events(
     """Keep browser VAD muted until synthesized audio actually finishes."""
     await ws.send_json({"type": "agent_audio_start"})
     try:
-        await session.speak_text(text)
+        await session.speak_text(text, session.voice_id, session.speed)
     finally:
         if not ws.closed:
             await ws.send_json({"type": "agent_audio_end"})
@@ -214,10 +235,36 @@ async def _process_api_response(
         await _speak_with_events(ws, session, error_text)
 
 
+_PREVIEW_SAMPLES = {
+    "a": "Hi, this is how I sound.",
+    "b": "Hi, this is how I sound.",
+    "e": "Hola, así es como sueno.",
+}
+
+
+async def voices_handler(request: web.Request) -> web.Response:
+    return web.json_response(voice_catalog.grouped_for_ui())
+
+
+async def preview_handler(request: web.Request) -> web.Response:
+    body = await request.json()
+    voice_id = body.get("voiceId", "")
+    entry = voice_catalog.lookup(voice_id)
+    if not entry:
+        raise web.HTTPBadRequest(text="unknown voice")
+    sample = _PREVIEW_SAMPLES.get(entry.get("lang", "a"), _PREVIEW_SAMPLES["a"])
+    loop = asyncio.get_running_loop()
+    pcm_48k = await loop.run_in_executor(None, tts_synthesize, sample, voice_id, 1.0)
+    wav = pcm_to_wav(pcm_48k, 48000)
+    return web.Response(body=wav, content_type="audio/wav")
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/ws", websocket_handler)
+    app.router.add_get("/api/voices", voices_handler)
+    app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/{filename}", static_handler)
     return app
 
