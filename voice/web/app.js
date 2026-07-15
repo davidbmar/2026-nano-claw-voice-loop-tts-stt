@@ -36,6 +36,8 @@ let vadFrameRequest = null;
 let vadCalibration = [];
 let vadCalibrationUntil = 0;
 let vadRearmAt = 0;
+let bargeInEnabled = false;
+let bargeDetector = null;
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
@@ -477,6 +479,10 @@ function connect() {
 function handleMessage(msg) {
     switch (msg.type) {
         case "hello_ack":
+            bargeInEnabled = !!msg.bargeIn;
+            if (bargeInEnabled && typeof BargeInDetector !== "undefined") {
+                bargeDetector = new BargeInDetector({});
+            }
             startWebRTC();
             break;
 
@@ -521,6 +527,7 @@ function handleMessage(msg) {
         case "agent_audio_end":
             finalizeAgentBubble();
             setAgentSpeaking(false);
+            if (bargeDetector) bargeDetector.reset();
             rearmPhoneMode("Waiting for the phone side...");
             break;
 
@@ -695,7 +702,23 @@ function monitorPhoneAudio(timestamp) {
         vadCalibration = [];
         console.info("Phone VAD calibrated", thresholds);
         setPhoneStatus("Waiting for the phone side...");
-    } else if (agentSpeaking || autoTurnPending || timestamp < vadRearmAt) {
+    } else if (agentSpeaking) {
+        if (bargeInEnabled && bargeDetector) {
+            const evt = bargeDetector.sample(rms, timestamp);
+            if (evt && evt.type === "barge_in") {
+                sendMsg("barge_in");
+                setPhoneStatus("Heard you — pausing...");
+            } else if (evt && evt.type === "barge_in_commit") {
+                sendMsg("barge_in_commit");
+                // The server re-arms the mic (agent_audio_end); the user's
+                // speech is captured by the normal VAD turn on the next frames.
+            } else if (evt && evt.type === "barge_in_false") {
+                sendMsg("barge_in_false");
+                setPhoneStatus("False alarm — resuming...");
+            }
+        }
+        vadGate.reset();  // don't let the normal turn-VAD fire while agent speaks
+    } else if (autoTurnPending || timestamp < vadRearmAt) {
         vadGate.reset();
     } else {
         const event = vadGate.sample(rms, timestamp);
@@ -708,6 +731,7 @@ function monitorPhoneAudio(timestamp) {
 
 function rearmPhoneMode(message) {
     autoTurnPending = false;
+    if (bargeDetector) bargeDetector.reset();
     if (!phoneModeEnabled || !vadGate) return;
     vadGate.reset();
     vadRearmAt = performance.now() + PHONE_REARM_MS;
