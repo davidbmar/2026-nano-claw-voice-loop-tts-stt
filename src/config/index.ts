@@ -99,6 +99,18 @@ export function mergeEnvConfig(config: Config): Config {
   if (process.env.GEMINI_API_KEY) {
     envProviders.gemini = { apiKey: process.env.GEMINI_API_KEY };
   }
+  if (process.env.DASHSCOPE_API_KEY) {
+    envProviders.dashscope = { apiKey: process.env.DASHSCOPE_API_KEY };
+  }
+  if (process.env.MOONSHOT_API_KEY) {
+    envProviders.moonshot = { apiKey: process.env.MOONSHOT_API_KEY };
+  }
+  if (process.env.ZHIPUAI_API_KEY) {
+    envProviders.zhipu = { apiKey: process.env.ZHIPUAI_API_KEY };
+  }
+  if (process.env.MINIMAX_API_KEY) {
+    envProviders.minimax = { apiKey: process.env.MINIMAX_API_KEY };
+  }
 
   // Merge with existing config (env vars take precedence)
   const mergedProviders = { ...config.providers };
