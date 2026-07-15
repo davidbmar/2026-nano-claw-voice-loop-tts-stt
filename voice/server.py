@@ -4,12 +4,15 @@ import asyncio
 import json
 import logging
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 
 import httpx
 from aiohttp import web
 
 from voice.webrtc import Session
+from voice import metrics_db
 from voice import voice_catalog
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
@@ -38,6 +41,7 @@ NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 SESSION_ID = "voice-default"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
+METRICS = metrics_db.init_db()
 
 
 async def index_handler(request: web.Request) -> web.FileResponse:
@@ -104,17 +108,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not session:
                     continue
 
-                # Transcribe
-                text, duration = await session.stop_recording()
+                t0 = time.monotonic()
+                text, duration, stt_ms = await session.stop_recording()
                 if not text:
                     await ws.send_json({"type": "transcription", "text": ""})
                     continue
-
-                # Show user's speech
+                session._turn = {"t0": t0, "asked": text, "stt_ms": stt_ms,
+                                 "stt_size": session.stt_size, "voice_id": session.voice_id,
+                                 "model": session.model}
                 await ws.send_json({"type": "transcription", "text": text})
-
-                # Send to nano-claw API — spawn so the receive loop stays free
-                # to dispatch barge_in* messages while the reply streams/plays.
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
             elif msg_type == "mic_cancel":
@@ -126,6 +128,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text or not session:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
+                session._turn = {"t0": time.monotonic(), "asked": text, "stt_ms": None,
+                                 "stt_size": session.stt_size, "voice_id": session.voice_id,
+                                 "model": session.model}
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
             elif msg_type == "set_model":
@@ -262,6 +267,10 @@ async def _consume_sse(
     # current_task() here IS the task already registered on the session.
     # Left in place as a harmless no-op / safety net.
     session.set_stream_task(asyncio.current_task())
+    req_start = time.monotonic()
+    first_delta = None
+    first_audio = None
+    said_parts = []
     chunker = TextChunker()
     loop = asyncio.get_running_loop()
     total_bytes = 0
@@ -269,7 +278,10 @@ async def _consume_sse(
     data_lines: list[str] = []
 
     async def speak_chunk(chunk: str):
-        nonlocal total_bytes
+        nonlocal total_bytes, first_audio
+        if first_audio is None:
+            first_audio = time.monotonic()
+        said_parts.append(chunk)
         await ws.send_json({"type": "agent_reply_delta", "text": chunk})
         total_bytes += await loop.run_in_executor(
             None, session.enqueue_chunk, chunk, session.voice_id, session.speed
@@ -287,6 +299,8 @@ async def _consume_sse(
                     continue
                 obj = json.loads(payload)
                 if ev == "delta":
+                    if first_delta is None:
+                        first_delta = time.monotonic()
                     for chunk in chunker.push(obj.get("text", "")):
                         await speak_chunk(chunk)
                 elif ev == "tool_pending":
@@ -299,9 +313,12 @@ async def _consume_sse(
                 elif ev == "final":
                     tail = chunker.flush()
                     if tail:
+                        said_parts.append(tail)
                         await speak_chunk(tail)
-                    if obj.get("debug"):
-                        await ws.send_json({"type": "debug", **obj["debug"]})
+                    debug = obj.get("debug") or {}
+                    if debug:
+                        await ws.send_json({"type": "debug", **debug})
+                    _write_turn_metrics(session, req_start, first_delta, first_audio, said_parts, debug)
                     await ws.send_json({"type": "agent_reply_done"})
                 elif ev == "error":
                     await ws.send_json({"type": "agent_reply", "text": f"Error: {obj.get('error', 'agent error')}"})
@@ -320,6 +337,42 @@ async def _consume_sse(
         if not ws.closed:
             await ws.send_json({"type": "agent_audio_end"})
         raise
+
+
+def _ms(a, b):
+    return int((b - a) * 1000) if (a is not None and b is not None) else None
+
+
+def _write_turn_metrics(session, req_start, first_delta, first_audio, said_parts, debug):
+    try:
+        turn = getattr(session, "_turn", {}) or {}
+        t0 = turn.get("t0", req_start)
+        tokens_in = (debug.get("tokenUsage") or {}).get("prompt")
+        tokens_out = (debug.get("tokenUsage") or {}).get("completion")
+        total_ms = debug.get("durationMs")
+        gen_ms = None
+        if total_ms is not None and debug.get("firstTokenMs") is not None:
+            gen_ms = max(1, total_ms - debug["firstTokenMs"])
+        tok_per_sec = round(tokens_out / (gen_ms / 1000), 2) if (tokens_out and gen_ms) else None
+        model = turn.get("model") or debug.get("model") or ""
+        provider = model.split("/")[0] if "/" in model else None
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "session_id": SESSION_ID, "provider": provider, "model": model,
+            "model_version": debug.get("model"),
+            "stt_size": turn.get("stt_size"), "voice_id": turn.get("voice_id"),
+            "asked_text": turn.get("asked"), "said_text": " ".join(said_parts).strip() or None,
+            "stt_ms": turn.get("stt_ms"),
+            "llm_ttft_ms": _ms(req_start, first_delta),
+            "llm_total_ms": total_ms,
+            "tokens_in": tokens_in, "tokens_out": tokens_out, "tok_per_sec": tok_per_sec,
+            "tts_ms": _ms(first_delta, first_audio),
+            "e2e_ms": _ms(t0, first_audio),
+            "est_cost_usd": metrics_db.estimate_cost(METRICS, model, tokens_in, tokens_out) if METRICS else None,
+        }
+        metrics_db.record_turn(METRICS, rec)
+    except Exception:
+        log.exception("metrics: failed to assemble turn record")
 
 
 async def _handle_tool_decision(

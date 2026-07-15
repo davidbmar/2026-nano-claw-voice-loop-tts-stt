@@ -62,6 +62,7 @@ class Session:
 
         self._paused = False
         self._stream_task: asyncio.Task | None = None
+        self._turn: dict = {}
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
@@ -105,17 +106,17 @@ class Session:
         self._mic_frames.clear()
         log.info("Mic recording cancelled")
 
-    async def stop_recording(self) -> tuple[str, float]:
+    async def stop_recording(self) -> tuple[str, float, int | None]:
         """Stop recording and transcribe all captured audio.
 
         Returns:
-            Tuple of (transcribed_text, audio_duration_seconds).
+            Tuple of (transcribed_text, audio_duration_seconds, stt_ms).
         """
         self._recording = False
 
         if not self._mic_frames:
             log.warning("No mic frames captured")
-            return "", 0.0
+            return "", 0.0, None
 
         pcm_data = b"".join(self._mic_frames)
         self._mic_frames.clear()
@@ -137,10 +138,11 @@ class Session:
                 )
                 result = resp.json()
                 text = result.get("text", "")
+                stt_ms = result.get("processing_ms")
         except Exception:
             log.exception("STT service call failed (is stt-service running on %s?)", stt_url)
-            text = ""
-        return text, audio_duration_s
+            return "", 0.0, None
+        return text, audio_duration_s, stt_ms
 
     def stop_speaking(self):
         """Stop TTS playback — clear the audio queue."""
