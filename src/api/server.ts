@@ -69,29 +69,39 @@ let config: Config;
 let providerManager: ProviderManager;
 let skillsLoader: SkillsLoader;
 
+let sharedInitialized = false;
+
 function initShared(): void {
+  if (sharedInitialized) return;
+
   try {
     config = getConfig();
   } catch (error) {
-    // No config file on disk (e.g. `nano-claw onboard` never run, or running
-    // under test). Degrade to defaults instead of crashing at import time —
-    // any env-supplied provider keys still get picked up. Real HTTP requests
-    // that need a provider will fail with a clear "No provider configured"
-    // error from ProviderManager at call time.
-    logger.warn(
-      { error: (error as Error).message },
-      'No nano-claw config found; falling back to defaults'
-    );
-    config = mergeEnvConfig(createDefaultConfig());
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/i.test(message)) {
+      // No config file on disk (e.g. `nano-claw onboard` never run, or
+      // running under test). Degrade to defaults instead of crashing —
+      // any env-supplied provider keys still get picked up. Real HTTP
+      // requests that need a provider will fail with a clear "No provider
+      // configured" error from ProviderManager at call time.
+      logger.warn('No nano-claw config file found; using defaults');
+      config = mergeEnvConfig(createDefaultConfig());
+    } else {
+      // Config file exists but is corrupted (invalid JSON) or fails schema
+      // validation — this must fail loud, not silently degrade to a looser
+      // default config (e.g. restrictToWorkspace: false). Leave
+      // `sharedInitialized` false so a retry (e.g. after the caller fixes
+      // the file) re-attempts init instead of silently no-op'ing.
+      throw error;
+    }
   }
-  providerManager = new ProviderManager(config);
-  skillsLoader = new SkillsLoader();
-}
 
-// Initialize shared state eagerly on import so module-level exports like
-// `stepLoopStream` are usable without first calling `createServer()` (e.g.
-// from unit tests that only need `Memory` + a stubbed provider manager).
-initShared();
+  // Preserve a test-injected provider manager (see
+  // __setProviderManagerForTest) instead of clobbering it.
+  if (!providerManager) providerManager = new ProviderManager(config);
+  skillsLoader = new SkillsLoader();
+  sharedInitialized = true;
+}
 
 /** Test-only: inject a stub provider manager. */
 export function __setProviderManagerForTest(pm: unknown): void {
@@ -134,6 +144,7 @@ async function stepLoop(
   agentConfig: AgentConfig,
   iteration: number
 ): Promise<ApiResponse> {
+  initShared();
   const toolRegistry = createToolRegistry();
 
   while (iteration < MAX_ITERATIONS) {
@@ -232,6 +243,7 @@ export async function* stepLoopStream(
   agentConfig: AgentConfig,
   iteration: number
 ): AsyncGenerator<StreamEvent | ApiResponse> {
+  initShared();
   const toolRegistry = createToolRegistry();
 
   while (iteration < MAX_ITERATIONS) {
