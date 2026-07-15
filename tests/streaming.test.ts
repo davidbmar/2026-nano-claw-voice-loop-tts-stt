@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BaseProvider, parseAnthropicEvents } from '../src/providers/base';
+import { BaseProvider, parseAnthropicEvents, parseOpenAIEvents, OpenAIProvider } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
 import { __setProviderManagerForTest, stepLoopStream } from '../src/api/server';
@@ -100,6 +100,47 @@ describe('parseAnthropicEvents', () => {
     const textEvt = out.find((e) => e.type === 'text');
     expect(textEvt).toBeTruthy();
     expect(textEvt.delta).toBe('canción');
+  });
+});
+
+describe('parseOpenAIEvents', () => {
+  function sse(s: string) { return require('node:stream').Readable.from([Buffer.from(s)]); }
+
+  it('assembles content deltas and ends on [DONE]', async () => {
+    const body =
+      'data: {"choices":[{"delta":{"content":"Hi "}}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"there."},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n' +
+      'data: [DONE]\n\n';
+    const out: any[] = [];
+    for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
+    expect(out.filter(e => e.type === 'text').map(e => e.delta).join('')).toBe('Hi there.');
+    const done = out.find(e => e.type === 'done');
+    expect(done.finishReason).toBe('stop');
+    expect(done.usage).toEqual({ promptTokens: 5, completionTokens: 3, totalTokens: 8 });
+  });
+
+  it('assembles a streamed tool_call by index', async () => {
+    const body =
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":""}}]}}]}\n\n' +
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"cmd\\":"}}]}}]}\n\n' +
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"ls\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n' +
+      'data: [DONE]\n\n';
+    const out: any[] = [];
+    for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
+    const t = out.find(e => e.type === 'tool_calls');
+    expect(t.toolCalls[0]).toEqual({ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{"cmd":"ls"}' } });
+  });
+});
+
+describe('OpenAIProvider.formatModelName', () => {
+  it('strips any leading provider/ prefix', () => {
+    const p = new OpenAIProvider('k');
+    // formatModelName is protected; exercise via a tiny subclass
+    const f = (m: string) => (p as any).formatModelName(m);
+    expect(f('groq/llama-3.3-70b-versatile')).toBe('llama-3.3-70b-versatile');
+    expect(f('gemini/gemini-2.0-flash')).toBe('gemini-2.0-flash');
+    expect(f('gpt-4o-mini')).toBe('gpt-4o-mini');
   });
 });
 
