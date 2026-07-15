@@ -21,6 +21,7 @@ import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
 import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
+import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -405,6 +406,11 @@ function safeParseToolArgs(argsJson: string): Record<string, unknown> {
 
 // ── Route handlers ───────────────────────────────────────────
 
+function handleModels(res: http.ServerResponse): void {
+  initShared();
+  sendJson(res, 200, { models: modelsWithAvailability(config), default: DEFAULT_MODEL });
+}
+
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const body = parseJsonBody(await readBody(req)) as { message?: string; sessionId?: string } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
@@ -532,6 +538,9 @@ export function createServer(): http.Server {
     try {
       if (method === 'GET' && url === '/api/health') {
         sendJson(res, 200, { status: 'ok' });
+      } else if (method === 'GET' && url === '/api/models') {
+        setCorsHeaders(res);
+        handleModels(res);
       } else if (method === 'POST' && (url === '/api/chat' || url === '/api/chat/approve' || url === '/api/chat/reject')) {
         const ct = req.headers['content-type'] || '';
         if (!ct.includes('application/json')) {
