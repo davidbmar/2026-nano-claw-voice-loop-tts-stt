@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Kokoro-82M TTS as a native Mac service (port 8300) with a browser voice picker
+  (American/British English + Spanish), quality-grade labels, per-voice preview,
+  and a speed slider. Piper remains as the fast, low-latency option. Selecting a
+  Kokoro voice while the service is down falls back to Piper automatically.
+
 ### Planned Features
 
 - Gateway server for channel integrations

@@ -17,33 +17,33 @@
 
 ## What is this?
 
-You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Piper TTS), and can run tools on your machine with your approval.
+You talk to an AI agent through your browser. It listens (Whisper STT), thinks (Claude), speaks back (Kokoro or Piper TTS), and can run tools on your machine with your approval.
 
-**The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Piper speaks the answer back.
+**The loop:** You speak → Whisper transcribes → Claude responds → if it needs a tool, you approve/reject → Claude continues → Kokoro or Piper speaks the answer back.
 
 ## Architecture
 
-The system runs as **two processes** — the STT service runs natively on your Mac for speed, and everything else runs in Docker:
+The system runs as **three processes** — the STT and TTS services run natively on your Mac for speed, and everything else runs in Docker:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Your Mac (native)                                              │
 │                                                                 │
-│  ┌──────────────────────────┐                                   │
-│  │  STT Service              │  ← Runs natively for Metal GPU   │
-│  │  faster-whisper           │  ← 3-5x faster than Docker CPU   │
-│  │  POST /transcribe         │                                   │
-│  │  port 8200                │                                   │
-│  └────────────▲─────────────┘                                   │
-│               │ HTTP                                             │
-│  ┌────────────┴──────────────────────────────────────────────┐  │
+│  ┌──────────────────────────┐  ┌──────────────────────────┐     │
+│  │  STT Service              │  │  TTS Service              │     │
+│  │  faster-whisper           │  │  Kokoro-82M                │     │
+│  │  POST /transcribe         │  │  POST /synthesize          │     │
+│  │  port 8200                │  │  port 8300                 │     │
+│  └────────────▲─────────────┘  └────────────▲─────────────┘     │
+│               │ HTTP                          │ HTTP              │
+│  ┌────────────┴──────────────────────────────┴────────────────┐  │
 │  │  Docker container                                          │  │
 │  │                                                            │  │
 │  │  ┌──────────────────┐    ┌─────────────────────────────┐  │  │
 │  │  │  nano-claw API   │    │  Voice Server (Python)      │  │  │
 │  │  │  (TypeScript)    │    │                             │  │  │
 │  │  │                  │    │  WebSocket ←→ Browser       │  │  │
-│  │  │  Agent loop      │◄──►│  Piper TTS (text→speech)   │  │  │
+│  │  │  Agent loop      │◄──►│  Piper TTS (fast, local)    │  │  │
 │  │  │  Tool execution  │    │  WebRTC audio streaming    │  │  │
 │  │  │  Memory          │    │                             │  │  │
 │  │  │  port 3001       │    │  port 8080 → 9090          │  │  │
@@ -52,13 +52,13 @@ The system runs as **two processes** — the STT service runs natively on your M
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Why is STT a separate service?
+### Why are STT and TTS separate services?
 
 **Docker Desktop on Mac cannot access the GPU.** Docker runs a Linux VM under the hood, and Apple's Metal GPU is not passed through. This is a hard limitation — there is no workaround.
 
-Whisper running on Docker CPU takes 1-2 seconds for a short clip and 30 seconds to load the model the first time. Running natively on your Mac with Metal acceleration is **3-5x faster**.
+Whisper running on Docker CPU takes 1-2 seconds for a short clip and 30 seconds to load the model the first time. Running natively on your Mac with Metal acceleration is **3-5x faster**. The same applies to Kokoro — running it natively lets it use Metal via PyTorch's MPS backend instead of falling back to slow Docker CPU inference.
 
-By extracting STT into a standalone HTTP service, the voice server in Docker simply POSTs audio bytes to `http://host.docker.internal:8200/transcribe` and gets text back. Clean, fast, and the Docker container gets simpler (no Whisper model to download).
+By extracting STT and Kokoro TTS into standalone HTTP services, the voice server in Docker simply POSTs to `http://host.docker.internal:8200/transcribe` and `http://host.docker.internal:8300/synthesize` and gets bytes back. Clean, fast, and the Docker container itself stays simple (no Whisper or Kokoro model to download inside it). Piper stays bundled in the Docker container as the always-available, low-latency fast path.
 
 ### Data flow
 
@@ -72,10 +72,22 @@ You speak into mic
     → If tool_pending: browser shows approval card, you approve/reject
     → If approved: tools execute, loop continues
     → Final text sent back via WebSocket
-    → Piper converts to speech (in Docker)
+    → Voice server routes the selected voice: Kokoro voices go to the native
+      TTS service (native Mac, port 8300), Piper voices are synthesized locally
+      in the container. If Kokoro is unavailable, it falls back to Piper.
     → WebRTC audio stream back to your browser
 You hear the answer
 ```
+
+### Voices
+
+The picker defaults to `af_heart` (Kokoro, American English, grade A). It's
+grouped by language — American English, British English, and Spanish — and
+each voice shows a quality grade. Click preview (▶) to hear a sample before
+picking, or drag the speed slider to change Kokoro's tempo (Piper ignores
+speed — it doesn't support it). Piper ("Lessac") stays available as the
+fast, low-latency option, and it's what plays automatically if the Kokoro
+service is down or unreachable.
 
 ## Quick Start
 
