@@ -167,7 +167,8 @@ class Session:
         self._paused = False
         self._audio_queue.clear()
         self._audio_source.clear_generator()
-        if self._stream_task and not self._stream_task.done():
+        if (self._stream_task and self._stream_task is not asyncio.current_task()
+                and not self._stream_task.done()):
             self._stream_task.cancel()
         self._stream_task = None
         log.info("Barge-in: committed — reply cancelled")

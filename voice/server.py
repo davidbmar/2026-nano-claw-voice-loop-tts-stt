@@ -19,6 +19,21 @@ from voice.backoff import Backoff
 
 log = logging.getLogger("voice-server")
 
+
+def _on_agent_task_done(task: asyncio.Task) -> None:
+    """Log unexpected failures from a spawned agent-handler task.
+
+    A cancellation is the expected outcome of a committed barge-in
+    (`Session.cancel_stream` cancels this exact task), so it's silently
+    swallowed here rather than logged as an error.
+    """
+    if task.cancelled():
+        return  # committed barge-in cancels the task on purpose
+    exc = task.exception()
+    if exc is not None:
+        log.error("Agent task failed", exc_info=exc)
+
+
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 SESSION_ID = "voice-default"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
@@ -84,8 +99,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # Show user's speech
                 await ws.send_json({"type": "transcription", "text": text})
 
-                # Send to nano-claw API
-                await _handle_agent_request(ws, session, http_client, text)
+                # Send to nano-claw API — spawn so the receive loop stays free
+                # to dispatch barge_in* messages while the reply streams/plays.
+                agent_task = asyncio.create_task(
+                    _handle_agent_request(ws, session, http_client, text)
+                )
+                session.set_stream_task(agent_task)
+                agent_task.add_done_callback(_on_agent_task_done)
 
             elif msg_type == "mic_cancel":
                 if session:
@@ -96,7 +116,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text or not session:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
-                await _handle_agent_request(ws, session, http_client, text)
+                agent_task = asyncio.create_task(
+                    _handle_agent_request(ws, session, http_client, text)
+                )
+                session.set_stream_task(agent_task)
+                agent_task.add_done_callback(_on_agent_task_done)
 
             elif msg_type == "set_voice":
                 if not session:
@@ -119,13 +143,21 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                await _handle_tool_decision(ws, session, http_client, "approve", request_id)
+                agent_task = asyncio.create_task(
+                    _handle_tool_decision(ws, session, http_client, "approve", request_id)
+                )
+                session.set_stream_task(agent_task)
+                agent_task.add_done_callback(_on_agent_task_done)
 
             elif msg_type == "tool_reject":
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                await _handle_tool_decision(ws, session, http_client, "reject", request_id)
+                agent_task = asyncio.create_task(
+                    _handle_tool_decision(ws, session, http_client, "reject", request_id)
+                )
+                session.set_stream_task(agent_task)
+                agent_task.add_done_callback(_on_agent_task_done)
 
             elif msg_type == "stop_speaking":
                 if session:
@@ -153,11 +185,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     delay = session._backoff.next()
                     log.info("Barge-in false alarm; resuming in %.2fs", delay)
 
-                    async def _resume_after(d):
+                    async def _resume_after(d, sess=session, w=ws):
                         try:
                             await asyncio.sleep(d)
-                            if session.is_paused() and not ws.closed:
-                                session.resume_speaking()
+                            if sess.is_paused() and not w.closed:
+                                sess.resume_speaking()
                         except asyncio.CancelledError:
                             pass
 
@@ -210,6 +242,10 @@ async def _consume_sse(
     resp: httpx.Response,
 ) -> None:
     """Parse SSE frames, speaking each chunk and forwarding text to the browser."""
+    # Redundant with the spawn-time set_stream_task() in websocket_handler:
+    # this coroutine now always runs inside that same spawned task, so
+    # current_task() here IS the task already registered on the session.
+    # Left in place as a harmless no-op / safety net.
     session.set_stream_task(asyncio.current_task())
     chunker = TextChunker()
     loop = asyncio.get_running_loop()
