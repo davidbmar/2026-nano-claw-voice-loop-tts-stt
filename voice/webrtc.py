@@ -173,28 +173,21 @@ class Session:
         parts = re.split(r'(?<=[.!?])\s+', text.strip())
         return [p for p in parts if p.strip()]
 
-    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
-        """Run TTS sentence-by-sentence and return after playback drains."""
-        from voice.tts import synthesize
-
+    def begin_stream(self) -> None:
+        """Attach the TTS generator so enqueued chunks start playing immediately."""
         self._audio_source.set_generator(self._tts_generator)
 
-        text = self._clean_for_speech(text)
-        sentences = self._split_sentences(text)
-        log.info("TTS: %d sentences to synthesize", len(sentences))
+    def enqueue_chunk(self, text: str, voice_id: str = "", speed: float = 1.0) -> int:
+        """Synthesize one already-clean chunk and enqueue it. Returns bytes queued."""
+        from voice.tts import synthesize
+        pcm_48k = synthesize(text, voice_id, speed)
+        if pcm_48k:
+            self._audio_queue.enqueue(pcm_48k)
+        return len(pcm_48k)
 
+    async def end_stream(self, total_bytes: int) -> None:
+        """Wait for the queue to drain, then detach the generator (mirrors speak_text tail)."""
         loop = asyncio.get_running_loop()
-        total_bytes = 0
-        for i, sentence in enumerate(sentences):
-            pcm_48k = await loop.run_in_executor(
-                None, synthesize, sentence, voice_id, speed
-            )
-            if pcm_48k:
-                self._audio_queue.enqueue(pcm_48k)
-                total_bytes += len(pcm_48k)
-                log.debug("TTS sentence %d/%d enqueued: %d bytes",
-                          i + 1, len(sentences), len(pcm_48k))
-
         playback_seconds = total_bytes / (SAMPLE_RATE * 2)
         deadline = loop.time() + max(5.0, min(120.0, playback_seconds + 5.0))
         while self._audio_queue.available and loop.time() < deadline and not self._closed:
@@ -206,6 +199,17 @@ class Session:
         # browser audio buffer. Keep the mic gate closed through that tail.
         await asyncio.sleep(0.15)
         self._audio_source.clear_generator()
+
+    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
+        """Whole-text path (non-streaming fallback): clean, split, enqueue, drain."""
+        self.begin_stream()
+        text = self._clean_for_speech(text)
+        sentences = self._split_sentences(text)
+        loop = asyncio.get_running_loop()
+        total_bytes = 0
+        for sentence in sentences:
+            total_bytes += await loop.run_in_executor(None, self.enqueue_chunk, sentence, voice_id, speed)
+        await self.end_stream(total_bytes)
 
     async def _recv_mic_audio(self, track):
         """Background task: continuously receive audio frames from browser mic."""

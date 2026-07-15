@@ -11,6 +11,7 @@ from aiohttp import web
 
 from voice.webrtc import Session
 from voice import voice_catalog
+from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
@@ -140,24 +141,82 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _handle_agent_request(
-    ws: web.WebSocketResponse,
-    session: Session,
-    client: httpx.AsyncClient,
-    text: str,
-) -> None:
-    """POST to nano-claw /api/chat and handle the response."""
+async def _handle_agent_request(ws, session, client, text):
+    """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     try:
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             f"{NANO_CLAW_URL}/api/chat",
             json={"message": text, "sessionId": SESSION_ID},
-        )
-        await _process_api_response(ws, session, resp.json())
+            headers={"Accept": "text/event-stream"},
+        ) as resp:
+            ctype = resp.headers.get("content-type", "")
+            if "text/event-stream" not in ctype:
+                data = json.loads(await resp.aread())
+                await _process_api_response(ws, session, data)
+                return
+            await _consume_sse(ws, session, resp)
     except Exception:
-        log.exception("nano-claw API call failed")
+        log.exception("nano-claw streaming call failed")
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+async def _consume_sse(ws, session, resp):
+    """Parse SSE frames, speaking each chunk and forwarding text to the browser."""
+    chunker = TextChunker()
+    loop = asyncio.get_running_loop()
+    total_bytes = 0
+    spoke_any = False
+    event = ""
+    data_lines: list[str] = []
+
+    async def speak_chunk(chunk: str):
+        nonlocal total_bytes
+        await ws.send_json({"type": "agent_reply_delta", "text": chunk})
+        total_bytes += await loop.run_in_executor(
+            None, session.enqueue_chunk, chunk, session.voice_id, session.speed
+        )
+
+    session.begin_stream()
+    await ws.send_json({"type": "agent_audio_start"})
+
+    async for raw in resp.aiter_lines():
+        if raw == "":  # frame boundary
+            payload = "\n".join(data_lines)
+            data_lines = []
+            ev, event = event, ""
+            if not payload:
+                continue
+            obj = json.loads(payload)
+            if ev == "delta":
+                for chunk in chunker.push(obj.get("text", "")):
+                    spoke_any = True
+                    await speak_chunk(chunk)
+            elif ev == "tool_pending":
+                await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
+                await ws.send_json({"type": "agent_audio_end"})
+                return
+            elif ev == "final":
+                tail = chunker.flush()
+                if tail:
+                    spoke_any = True
+                    await speak_chunk(tail)
+                if obj.get("debug"):
+                    await ws.send_json({"type": "debug", **obj["debug"]})
+                await ws.send_json({"type": "agent_reply_done"})
+            elif ev == "error":
+                await ws.send_json({"type": "agent_reply", "text": "Error from agent."})
+            continue
+        if raw.startswith("event:"):
+            event = raw[6:].strip()
+        elif raw.startswith("data:"):
+            data_lines.append(raw[5:].strip())
+
+    await session.end_stream(total_bytes)
+    if not session._closed:
+        await ws.send_json({"type": "agent_audio_end"})
 
 
 async def _handle_tool_decision(
