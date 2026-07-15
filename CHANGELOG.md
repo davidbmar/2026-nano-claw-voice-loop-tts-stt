@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Barge-in (opt-in, `NANO_CLAW_BARGE_IN=1`): interrupt Claude mid-reply — playback
+  pauses on your voice, your speech becomes the next turn, and a false alarm
+  resumes the reply after a randomized exponential backoff. Regardless of the
+  flag, a second text message sent while a reply is still streaming is
+  dropped rather than queued (one reply at a time).
+- Kokoro-82M TTS as a native Mac service (port 8300) with a browser voice picker
+  (American/British English + Spanish), quality-grade labels, per-voice preview,
+  and a speed slider. Piper remains as the fast, low-latency option. Selecting a
+  Kokoro voice while the service is down falls back to Piper automatically.
+- Streaming voice replies — Claude's answer is spoken sentence-by-sentence as it's
+  generated (Anthropic native streaming → SSE → incremental TTS), so audio starts
+  at the first sentence. Text also streams into the chat log. `NANO_CLAW_STREAM=0`
+  forces the legacy path.
+
 ### Planned Features
 
 - Gateway server for channel integrations

@@ -1,7 +1,96 @@
 import axios, { AxiosInstance } from 'axios';
-import { Message, LLMResponse, ToolDefinition, ToolCall } from '../types';
+import type { Readable } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
+import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
+
+/**
+ * Read a Node Readable SSE body and yield {event, data} frames.
+ * Frames are separated by a blank line; `event:` and `data:` lines accumulate.
+ */
+export async function* readSSEFrames(
+  stream: Readable
+): AsyncGenerator<{ event: string; data: string }> {
+  let buffer = '';
+  const decoder = new StringDecoder('utf8');
+  for await (const chunk of stream) {
+    buffer += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      let event = 'message';
+      const dataLines: string[] = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length) yield { event, data: dataLines.join('\n') };
+    }
+  }
+  buffer += decoder.end();
+}
+
+/**
+ * Parse Anthropic /messages streaming events into StreamEvents.
+ */
+export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<StreamEvent> {
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let finishReason: string | undefined;
+  // tool_use accumulation, keyed by content block index
+  const toolAcc = new Map<number, { id: string; name: string; json: string }>();
+
+  for await (const { data } of readSSEFrames(stream)) {
+    if (data === '[DONE]') break;
+    let evt: any;
+    try {
+      evt = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    switch (evt.type) {
+      case 'message_start':
+        promptTokens = evt.message?.usage?.input_tokens ?? 0;
+        break;
+      case 'content_block_start':
+        if (evt.content_block?.type === 'tool_use') {
+          toolAcc.set(evt.index, { id: evt.content_block.id, name: evt.content_block.name, json: '' });
+        }
+        break;
+      case 'content_block_delta':
+        if (evt.delta?.type === 'text_delta' && evt.delta.text) {
+          yield { type: 'text', delta: evt.delta.text };
+        } else if (evt.delta?.type === 'input_json_delta') {
+          const acc = toolAcc.get(evt.index);
+          if (acc) acc.json += evt.delta.partial_json ?? '';
+        }
+        break;
+      case 'message_delta':
+        finishReason = evt.delta?.stop_reason ?? finishReason;
+        completionTokens = evt.usage?.output_tokens ?? completionTokens;
+        break;
+      case 'message_stop':
+        // handled after the loop
+        break;
+    }
+  }
+
+  if (toolAcc.size > 0) {
+    const toolCalls: ToolCall[] = [...toolAcc.values()].map((t) => ({
+      id: t.id,
+      type: 'function',
+      function: { name: t.name, arguments: t.json || '{}' },
+    }));
+    yield { type: 'tool_calls', toolCalls };
+  }
+  yield {
+    type: 'done',
+    finishReason,
+    usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+  };
+}
 
 /**
  * Base class for LLM providers
@@ -39,6 +128,29 @@ export abstract class BaseProvider {
     maxTokens?: number,
     tools?: ToolDefinition[]
   ): Promise<LLMResponse>;
+
+  /**
+   * Stream a completion. Default: call complete() once and yield it whole.
+   * Providers with native streaming override this.
+   */
+  async *completeStream(
+    messages: Message[],
+    model: string,
+    temperature?: number,
+    maxTokens?: number,
+    tools?: ToolDefinition[]
+  ): AsyncGenerator<StreamEvent> {
+    const res = await this.complete(messages, model, temperature, maxTokens, tools);
+    if (res.content) yield { type: 'text', delta: res.content };
+    if (res.toolCalls && res.toolCalls.length > 0) {
+      yield { type: 'tool_calls', toolCalls: res.toolCalls };
+    }
+    yield {
+      type: 'done',
+      finishReason: res.finishReason,
+      usage: res.usage,
+    };
+  }
 
   /**
    * Format model name for provider
@@ -275,6 +387,51 @@ export class AnthropicProvider extends BaseProvider {
       }
       throw new ProviderError(`Anthropic API error: ${(error as Error).message}`);
     }
+  }
+
+  async *completeStream(
+    messages: Message[],
+    model: string,
+    temperature = 0.7,
+    maxTokens = 4096,
+    tools?: ToolDefinition[]
+  ): AsyncGenerator<StreamEvent> {
+    const systemMessage = messages.find((m) => m.role === 'system')?.content || '';
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
+    const anthropicMessages = this.formatAnthropicMessages(nonSystemMessages);
+
+    const requestData: Record<string, unknown> = {
+      model: this.formatModelName(model),
+      messages: anthropicMessages,
+      temperature,
+      max_tokens: maxTokens,
+      stream: true,
+    };
+    if (systemMessage) requestData.system = systemMessage;
+    if (tools && tools.length > 0) {
+      requestData.tools = tools.map((t) => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: t.function.parameters,
+      }));
+    }
+
+    let response;
+    try {
+      response = await this.client.post('/messages', requestData, {
+        responseType: 'stream',
+        headers: { 'anthropic-version': '2023-06-01', 'x-api-key': this.apiKey },
+      });
+    } catch (error) {
+      logger.error({ error }, 'Anthropic API error');
+      if (axios.isAxiosError(error)) {
+        throw new ProviderError(
+          `Anthropic API error: ${error.response?.data?.error?.message || error.message}`
+        );
+      }
+      throw new ProviderError(`Anthropic API error: ${(error as Error).message}`);
+    }
+    yield* parseAnthropicEvents(response.data as Readable);
   }
 }
 

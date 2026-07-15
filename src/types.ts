@@ -137,6 +137,18 @@ export interface LLMResponse {
 }
 
 /**
+ * One event in a streamed LLM completion.
+ */
+export type StreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool_calls'; toolCalls: ToolCall[] }
+  | {
+      type: 'done';
+      finishReason?: string;
+      usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+    };
+
+/**
  * Agent execution context
  */
 export interface AgentContext {

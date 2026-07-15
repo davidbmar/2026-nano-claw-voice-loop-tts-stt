@@ -10,12 +10,34 @@ import httpx
 from aiohttp import web
 
 from voice.webrtc import Session
+from voice import voice_catalog
+from voice.text_chunker import TextChunker
+from voice.tts import synthesize as tts_synthesize
+from voice.wav import pcm_to_wav
+from voice import kokoro_client
+from voice.backoff import Backoff
 
 log = logging.getLogger("voice-server")
+
+
+def _on_agent_task_done(task: asyncio.Task) -> None:
+    """Log unexpected failures from a spawned agent-handler task.
+
+    A cancellation is the expected outcome of a committed barge-in
+    (`Session.cancel_stream` cancels this exact task), so it's silently
+    swallowed here rather than logged as an error.
+    """
+    if task.cancelled():
+        return  # committed barge-in cancels the task on purpose
+    exc = task.exception()
+    if exc is not None:
+        log.error("Agent task failed", exc_info=exc)
+
 
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 SESSION_ID = "voice-default"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
+BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
 
 
 async def index_handler(request: web.Request) -> web.FileResponse:
@@ -38,6 +60,20 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     session: Session | None = None
     http_client = httpx.AsyncClient(timeout=120.0)
 
+    def _spawn_agent(coro):
+        # One active agent reply at a time. If a reply is still in flight,
+        # drop the duplicate (the browser also gates new turns behind
+        # agentSpeaking) so two tasks can't race on the audio queue / WS
+        # and orphan each other past barge-in's reach.
+        existing = session._stream_task if session else None
+        if existing is not None and not existing.done():
+            log.info("Agent reply already in flight; ignoring duplicate request")
+            coro.close()  # avoid 'coroutine was never awaited' warning
+            return
+        task = asyncio.create_task(coro)
+        session.set_stream_task(task)
+        task.add_done_callback(_on_agent_task_done)
+
     try:
         async for raw_msg in ws:
             if raw_msg.type != web.WSMsgType.TEXT:
@@ -51,10 +87,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             msg_type = msg.get("type", "")
 
             if msg_type == "hello":
-                await ws.send_json({"type": "hello_ack"})
+                await ws.send_json({"type": "hello_ack", "bargeIn": BARGE_IN_ENABLED})
 
             elif msg_type == "webrtc_offer":
                 session = Session()
+                session._backoff = Backoff()          # per-session backoff
+                session._resume_task = None            # pending false-alarm resume timer
                 answer_sdp = await session.handle_offer(msg["sdp"])
                 await ws.send_json({"type": "webrtc_answer", "sdp": answer_sdp})
 
@@ -75,8 +113,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # Show user's speech
                 await ws.send_json({"type": "transcription", "text": text})
 
-                # Send to nano-claw API
-                await _handle_agent_request(ws, session, http_client, text)
+                # Send to nano-claw API — spawn so the receive loop stays free
+                # to dispatch barge_in* messages while the reply streams/plays.
+                _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
             elif msg_type == "mic_cancel":
                 if session:
@@ -87,23 +126,72 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text or not session:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
-                await _handle_agent_request(ws, session, http_client, text)
+                _spawn_agent(_handle_agent_request(ws, session, http_client, text))
+
+            elif msg_type == "set_voice":
+                if not session:
+                    continue
+                voice_id = msg.get("voiceId", "")
+                session.set_voice(voice_id, msg.get("speed", 1.0))
+                # Proactively warn if a Kokoro voice was picked but the service
+                # is down — the reply will still work (Piper fallback).
+                entry = voice_catalog.lookup(voice_id)
+                if entry and entry["engine"] == "kokoro":
+                    loop = asyncio.get_running_loop()
+                    healthy = await loop.run_in_executor(None, kokoro_client.is_healthy)
+                    if not healthy:
+                        await ws.send_json({
+                            "type": "voice_notice",
+                            "text": "Kokoro voice unavailable — using the fast voice.",
+                        })
 
             elif msg_type == "tool_approve":
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                await _handle_tool_decision(ws, session, http_client, "approve", request_id)
+                _spawn_agent(_handle_tool_decision(ws, session, http_client, "approve", request_id))
 
             elif msg_type == "tool_reject":
                 request_id = msg.get("requestId", "")
                 if not request_id or not session:
                     continue
-                await _handle_tool_decision(ws, session, http_client, "reject", request_id)
+                _spawn_agent(_handle_tool_decision(ws, session, http_client, "reject", request_id))
 
             elif msg_type == "stop_speaking":
                 if session:
                     session.stop_speaking()
+
+            elif msg_type == "barge_in":
+                if BARGE_IN_ENABLED and session:
+                    # Cancel any pending resume, then pause.
+                    if getattr(session, "_resume_task", None):
+                        session._resume_task.cancel()
+                        session._resume_task = None
+                    session.pause_speaking()
+
+            elif msg_type == "barge_in_commit":
+                if BARGE_IN_ENABLED and session:
+                    if getattr(session, "_resume_task", None):
+                        session._resume_task.cancel()
+                        session._resume_task = None
+                    session.cancel_stream()          # abort reply + clear audio
+                    session._backoff.reset()
+                    await ws.send_json({"type": "agent_audio_end"})   # re-arm mic for the user's turn
+
+            elif msg_type == "barge_in_false":
+                if BARGE_IN_ENABLED and session and session.is_paused():
+                    delay = session._backoff.next()
+                    log.info("Barge-in false alarm; resuming in %.2fs", delay)
+
+                    async def _resume_after(d, sess=session, w=ws):
+                        try:
+                            await asyncio.sleep(d)
+                            if sess.is_paused() and not w.closed:
+                                sess.resume_speaking()
+                        except asyncio.CancelledError:
+                            pass
+
+                    session._resume_task = asyncio.ensure_future(_resume_after(delay))
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
@@ -111,6 +199,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     except Exception:
         log.exception("WebSocket error")
     finally:
+        if session and session._stream_task and not session._stream_task.done():
+            session._stream_task.cancel()
+            try:
+                await session._stream_task
+            except BaseException:
+                pass  # CancelledError (expected) or the task's own error — we're tearing down
         await http_client.aclose()
         if session:
             await session.close()
@@ -125,18 +219,96 @@ async def _handle_agent_request(
     client: httpx.AsyncClient,
     text: str,
 ) -> None:
-    """POST to nano-claw /api/chat and handle the response."""
+    """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     try:
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             f"{NANO_CLAW_URL}/api/chat",
             json={"message": text, "sessionId": SESSION_ID},
-        )
-        await _process_api_response(ws, session, resp.json())
+            headers={"Accept": "text/event-stream"},
+        ) as resp:
+            ctype = resp.headers.get("content-type", "")
+            if "text/event-stream" not in ctype:
+                data = json.loads(await resp.aread())
+                await _process_api_response(ws, session, data)
+                return
+            await _consume_sse(ws, session, resp)
     except Exception:
-        log.exception("nano-claw API call failed")
+        log.exception("nano-claw streaming call failed")
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+async def _consume_sse(
+    ws: web.WebSocketResponse,
+    session: Session,
+    resp: httpx.Response,
+) -> None:
+    """Parse SSE frames, speaking each chunk and forwarding text to the browser."""
+    # Redundant with the spawn-time set_stream_task() in websocket_handler:
+    # this coroutine now always runs inside that same spawned task, so
+    # current_task() here IS the task already registered on the session.
+    # Left in place as a harmless no-op / safety net.
+    session.set_stream_task(asyncio.current_task())
+    chunker = TextChunker()
+    loop = asyncio.get_running_loop()
+    total_bytes = 0
+    event = ""
+    data_lines: list[str] = []
+
+    async def speak_chunk(chunk: str):
+        nonlocal total_bytes
+        await ws.send_json({"type": "agent_reply_delta", "text": chunk})
+        total_bytes += await loop.run_in_executor(
+            None, session.enqueue_chunk, chunk, session.voice_id, session.speed
+        )
+
+    session.begin_stream()
+    await ws.send_json({"type": "agent_audio_start"})
+    try:
+        async for raw in resp.aiter_lines():
+            if raw == "":  # frame boundary
+                payload = "\n".join(data_lines)
+                data_lines = []
+                ev, event = event, ""
+                if not payload:
+                    continue
+                obj = json.loads(payload)
+                if ev == "delta":
+                    for chunk in chunker.push(obj.get("text", "")):
+                        await speak_chunk(chunk)
+                elif ev == "tool_pending":
+                    tail = chunker.flush()
+                    if tail:
+                        await speak_chunk(tail)
+                    await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
+                    await ws.send_json({"type": "agent_audio_end"})
+                    return
+                elif ev == "final":
+                    tail = chunker.flush()
+                    if tail:
+                        await speak_chunk(tail)
+                    if obj.get("debug"):
+                        await ws.send_json({"type": "debug", **obj["debug"]})
+                    await ws.send_json({"type": "agent_reply_done"})
+                elif ev == "error":
+                    await ws.send_json({"type": "agent_reply", "text": f"Error: {obj.get('error', 'agent error')}"})
+                continue
+            if raw.startswith("event:"):
+                event = raw[6:].strip()
+            elif raw.startswith("data:"):
+                data_lines.append(raw[5:].strip())
+
+        await session.end_stream(total_bytes)
+        session._backoff.reset()   # clean drain — clear consecutive-false count
+        if not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
+    except Exception:
+        session.stop_speaking()
+        if not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
+        raise
 
 
 async def _handle_tool_decision(
@@ -149,11 +321,18 @@ async def _handle_tool_decision(
     """POST approve/reject to nano-claw API and handle response."""
     try:
         endpoint = f"{NANO_CLAW_URL}/api/chat/{action}"
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             endpoint,
             json={"requestId": request_id, "sessionId": SESSION_ID},
-        )
-        await _process_api_response(ws, session, resp.json())
+            headers={"Accept": "text/event-stream"},
+        ) as resp:
+            ctype = resp.headers.get("content-type", "")
+            if "text/event-stream" not in ctype:
+                data = json.loads(await resp.aread())
+                await _process_api_response(ws, session, data)
+                return
+            await _consume_sse(ws, session, resp)
     except Exception:
         log.exception("nano-claw API %s call failed", action)
         error_text = "Sorry, tool execution failed."
@@ -169,7 +348,7 @@ async def _speak_with_events(
     """Keep browser VAD muted until synthesized audio actually finishes."""
     await ws.send_json({"type": "agent_audio_start"})
     try:
-        await session.speak_text(text)
+        await session.speak_text(text, session.voice_id, session.speed)
     finally:
         if not ws.closed:
             await ws.send_json({"type": "agent_audio_end"})
@@ -214,10 +393,36 @@ async def _process_api_response(
         await _speak_with_events(ws, session, error_text)
 
 
+_PREVIEW_SAMPLES = {
+    "a": "Hi, this is how I sound.",
+    "b": "Hi, this is how I sound.",
+    "e": "Hola, así es como sueno.",
+}
+
+
+async def voices_handler(request: web.Request) -> web.Response:
+    return web.json_response(voice_catalog.grouped_for_ui())
+
+
+async def preview_handler(request: web.Request) -> web.Response:
+    body = await request.json()
+    voice_id = body.get("voiceId", "")
+    entry = voice_catalog.lookup(voice_id)
+    if not entry:
+        raise web.HTTPBadRequest(text="unknown voice")
+    sample = _PREVIEW_SAMPLES.get(entry.get("lang", "a"), _PREVIEW_SAMPLES["a"])
+    loop = asyncio.get_running_loop()
+    pcm_48k = await loop.run_in_executor(None, tts_synthesize, sample, voice_id, 1.0)
+    wav = pcm_to_wav(pcm_48k, 48000)
+    return web.Response(body=wav, content_type="audio/wav")
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/ws", websocket_handler)
+    app.router.add_get("/api/voices", voices_handler)
+    app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/{filename}", static_handler)
     return app
 

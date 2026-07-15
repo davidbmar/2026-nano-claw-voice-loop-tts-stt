@@ -13,6 +13,10 @@ const debugContent = document.getElementById("debug-content");
 const debugModalOverlay = document.getElementById("debug-modal-overlay");
 const debugModalBody = document.getElementById("debug-modal-body");
 const debugModalClose = document.getElementById("debug-modal-close");
+const voiceSelect = document.getElementById("voice-select");
+const voicePreviewBtn = document.getElementById("voice-preview-btn");
+const speedSlider = document.getElementById("speed-slider");
+const speedValue = document.getElementById("speed-value");
 
 // ── State ────────────────────────────────────────────────────
 let ws = null;
@@ -32,6 +36,8 @@ let vadFrameRequest = null;
 let vadCalibration = [];
 let vadCalibrationUntil = 0;
 let vadRearmAt = 0;
+let bargeInEnabled = false;
+let bargeDetector = null;
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
@@ -122,6 +128,7 @@ function addBubble(text, role) {
     }
     chatLog.appendChild(bubble);
     chatLog.scrollTop = chatLog.scrollHeight;
+    return bubble;
 }
 
 function showThinking() {
@@ -131,6 +138,21 @@ function showThinking() {
     el.textContent = "Thinking...";
     chatLog.appendChild(el);
     chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+var streamingBubble = null;
+
+function appendAgentDelta(text) {
+    if (!streamingBubble) {
+        streamingBubble = addBubble("", "agent");
+    }
+    // addBubble returns the bubble element; append text with a leading space if needed
+    streamingBubble.textContent = (streamingBubble.textContent + " " + text).trim();
+    chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function finalizeAgentBubble() {
+    streamingBubble = null;
 }
 
 function clearThinking() {
@@ -352,6 +374,80 @@ function sendMsg(type, payload) {
     ws.send(JSON.stringify(Object.assign({ type: type }, payload || {})));
 }
 
+// ── Voice picker ─────────────────────────────────────────────
+var LS_VOICE = "nanoclaw.voiceId";
+var LS_SPEED = "nanoclaw.speed";
+var currentVoiceId = localStorage.getItem(LS_VOICE) || "af_heart";
+var currentSpeed = parseFloat(localStorage.getItem(LS_SPEED) || "1") || 1;
+var previewAudio = new Audio();
+
+function renderVoiceOptions(uiCatalog) {
+    voiceSelect.innerHTML = "";
+    VoiceUI.groupVoices(uiCatalog).forEach(function (group) {
+        var og = document.createElement("optgroup");
+        og.label = group.label;
+        group.options.forEach(function (opt) {
+            var o = document.createElement("option");
+            o.value = opt.id;
+            o.textContent = opt.label;
+            og.appendChild(o);
+        });
+        voiceSelect.appendChild(og);
+    });
+    voiceSelect.value = currentVoiceId;
+    if (!voiceSelect.value) {
+        currentVoiceId = uiCatalog.default;
+        voiceSelect.value = currentVoiceId;
+    }
+    voiceSelect.disabled = false;
+    voicePreviewBtn.disabled = false;
+}
+
+function pushVoice() {
+    sendMsg("set_voice", { voiceId: currentVoiceId, speed: currentSpeed });
+}
+
+function loadVoices() {
+    fetch("/api/voices")
+        .then(function (r) { return r.json(); })
+        .then(function (uiCatalog) {
+            renderVoiceOptions(uiCatalog);
+            speedSlider.value = String(currentSpeed);
+            speedValue.textContent = currentSpeed.toFixed(1) + "×";
+            pushVoice();
+        })
+        .catch(function () { statusText.textContent = "Could not load voices"; });
+}
+
+voiceSelect.addEventListener("change", function () {
+    currentVoiceId = voiceSelect.value;
+    localStorage.setItem(LS_VOICE, currentVoiceId);
+    pushVoice();
+});
+
+speedSlider.addEventListener("input", function () {
+    currentSpeed = parseFloat(speedSlider.value);
+    speedValue.textContent = currentSpeed.toFixed(1) + "×";
+    localStorage.setItem(LS_SPEED, String(currentSpeed));
+});
+speedSlider.addEventListener("change", pushVoice);
+
+voicePreviewBtn.addEventListener("click", function () {
+    voicePreviewBtn.disabled = true;
+    fetch("/api/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voiceId: currentVoiceId }),
+    })
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+            previewAudio.src = URL.createObjectURL(blob);
+            return previewAudio.play();
+        })
+        .catch(function () { /* ignore preview errors */ })
+        .finally(function () { voicePreviewBtn.disabled = false; });
+});
+
 function connect() {
     statusText.textContent = "Connecting...";
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -360,6 +456,7 @@ function connect() {
     ws.onopen = function () {
         statusText.textContent = "Authenticating...";
         sendMsg("hello");
+        loadVoices();
     };
 
     ws.onmessage = function (ev) {
@@ -382,6 +479,10 @@ function connect() {
 function handleMessage(msg) {
     switch (msg.type) {
         case "hello_ack":
+            bargeInEnabled = !!msg.bargeIn;
+            if (bargeInEnabled && typeof BargeInDetector !== "undefined") {
+                bargeDetector = new BargeInDetector({});
+            }
             startWebRTC();
             break;
 
@@ -407,13 +508,26 @@ function handleMessage(msg) {
             setPhoneStatus("Claude is speaking to the phone...");
             break;
 
+        case "agent_reply_delta":
+            clearThinking();
+            appendAgentDelta(msg.text);
+            setAgentSpeaking(true);
+            setPhoneStatus("Claude is speaking to the phone...");
+            break;
+
+        case "agent_reply_done":
+            finalizeAgentBubble();
+            break;
+
         case "agent_audio_start":
             setAgentSpeaking(true);
             setPhoneStatus("Claude is speaking to the phone...");
             break;
 
         case "agent_audio_end":
+            finalizeAgentBubble();
             setAgentSpeaking(false);
+            if (bargeDetector) bargeDetector.reset();
             rearmPhoneMode("Waiting for the phone side...");
             break;
 
@@ -427,11 +541,16 @@ function handleMessage(msg) {
             addDebugEntry(msg);
             break;
 
+        case "voice_notice":
+            statusText.textContent = msg.text;
+            break;
+
         case "pong":
             break;
 
         case "error":
             console.error("Server error:", msg.message);
+            finalizeAgentBubble();
             rearmPhoneMode("Voice error; listening again...");
             break;
     }
@@ -583,7 +702,23 @@ function monitorPhoneAudio(timestamp) {
         vadCalibration = [];
         console.info("Phone VAD calibrated", thresholds);
         setPhoneStatus("Waiting for the phone side...");
-    } else if (agentSpeaking || autoTurnPending || timestamp < vadRearmAt) {
+    } else if (agentSpeaking) {
+        if (bargeInEnabled && bargeDetector) {
+            const evt = bargeDetector.sample(rms, timestamp);
+            if (evt && evt.type === "barge_in") {
+                sendMsg("barge_in");
+                setPhoneStatus("Heard you — pausing...");
+            } else if (evt && evt.type === "barge_in_commit") {
+                sendMsg("barge_in_commit");
+                // The server re-arms the mic (agent_audio_end); the user's
+                // speech is captured by the normal VAD turn on the next frames.
+            } else if (evt && evt.type === "barge_in_false") {
+                sendMsg("barge_in_false");
+                setPhoneStatus("False alarm — resuming...");
+            }
+        }
+        vadGate.reset();  // don't let the normal turn-VAD fire while agent speaks
+    } else if (autoTurnPending || timestamp < vadRearmAt) {
         vadGate.reset();
     } else {
         const event = vadGate.sample(rms, timestamp);
@@ -596,6 +731,7 @@ function monitorPhoneAudio(timestamp) {
 
 function rearmPhoneMode(message) {
     autoTurnPending = false;
+    if (bargeDetector) bargeDetector.reset();
     if (!phoneModeEnabled || !vadGate) return;
     vadGate.reset();
     vadRearmAt = performance.now() + PHONE_REARM_MS;

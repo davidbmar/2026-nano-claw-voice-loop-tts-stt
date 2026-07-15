@@ -78,25 +78,59 @@ def _get_voice(voice_id: str = ""):
     return voice
 
 
-def synthesize(text: str, voice_id: str = "") -> bytes:
-    """Convert text to 48kHz mono int16 PCM bytes."""
-    voice = _get_voice(voice_id)
-    native_rate = voice.config.sample_rate
-
-    raw_parts = []
-    for chunk in voice.synthesize(text):
-        raw_parts.append(chunk.audio_int16_bytes)
-
-    if not raw_parts:
-        log.warning("TTS produced no audio for: %r", text[:50])
+def _resample_to_48k(pcm: bytes, native_rate: int) -> bytes:
+    """Resample int16 PCM from native_rate to 48kHz (WebRTC Opus)."""
+    if not pcm:
         return b""
-
-    raw_pcm = b"".join(raw_parts)
-    samples = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float64)
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    if native_rate == TARGET_RATE:
+        return samples.astype(np.int16).tobytes()
     num_output_samples = int(len(samples) * TARGET_RATE / native_rate)
     resampled = resample(samples, num_output_samples)
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-
-    log.debug("TTS [%s]: %d chars -> %.2fs audio", voice_id or DEFAULT_VOICE,
-              len(text), len(resampled) / TARGET_RATE)
     return resampled.tobytes()
+
+
+def _synthesize_piper(text: str, voice_id: str) -> bytes:
+    """Piper path: text → 48kHz int16 PCM (the original fast engine)."""
+    voice = _get_voice(voice_id)
+    native_rate = voice.config.sample_rate
+    raw_parts = [chunk.audio_int16_bytes for chunk in voice.synthesize(text)]
+    if not raw_parts:
+        log.warning("Piper produced no audio for: %r", text[:50])
+        return b""
+    return _resample_to_48k(b"".join(raw_parts), native_rate)
+
+
+def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
+    """Kokoro path: fetch from the native service, resample to 48kHz.
+
+    Falls back to the Piper default voice if the service is unavailable so the
+    voice loop is never silent (degraded-mode convention).
+    """
+    from voice import kokoro_client
+
+    try:
+        pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
+        return _resample_to_48k(pcm, rate)
+    except (kokoro_client.KokoroUnavailable, ValueError) as exc:
+        log.warning("Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE)
+        return _synthesize_piper(text, DEFAULT_VOICE)
+
+
+def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
+    """Route to the right engine and return 48kHz mono int16 PCM.
+
+    - Kokoro voices → native TTS service (uses `speed`).
+    - Piper voices  → local Piper (ignores `speed`; it is the fast option).
+    - Unknown id    → Piper default.
+    """
+    from voice import voice_catalog
+
+    entry = voice_catalog.lookup(voice_id) if voice_id else None
+    if entry and entry["engine"] == "kokoro":
+        return _synthesize_kokoro(text, voice_id, speed)
+
+    piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
+    return _synthesize_piper(text, piper_id)

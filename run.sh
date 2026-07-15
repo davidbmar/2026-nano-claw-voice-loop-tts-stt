@@ -57,6 +57,8 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Start STT service if not already running
 STT_SERVICE_URL="${STT_SERVICE_URL:-http://host.docker.internal:8200}"
 STT_CHECK_URL="${STT_SERVICE_URL/host.docker.internal/localhost}"
@@ -66,7 +68,6 @@ if curl -sf "$STT_CHECK_URL/health" >/dev/null 2>&1; then
   echo "STT service already running at $STT_CHECK_URL"
 else
   echo "=== Starting STT service ==="
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   STT_VENV="$SCRIPT_DIR/stt-service/.venv"
   if [ ! -d "$STT_VENV" ]; then
     echo "Creating STT virtual environment..."
@@ -87,13 +88,47 @@ else
   echo ""
 fi
 
-# Clean up STT service on exit
+# Start TTS service (Kokoro) if not already running
+TTS_SERVICE_URL="${TTS_SERVICE_URL:-http://host.docker.internal:8300}"
+TTS_CHECK_URL="${TTS_SERVICE_URL/host.docker.internal/localhost}"
+TTS_PID=""
+
+if curl -sf "$TTS_CHECK_URL/health" >/dev/null 2>&1; then
+  echo "TTS service already running at $TTS_CHECK_URL"
+else
+  echo "=== Starting TTS service (Kokoro) ==="
+  TTS_VENV="$SCRIPT_DIR/tts-service/.venv"
+  if [ ! -d "$TTS_VENV" ]; then
+    echo "Creating TTS virtual environment..."
+    python3 -m venv "$TTS_VENV"
+  fi
+  "$TTS_VENV/bin/pip" install -q -r "$SCRIPT_DIR/tts-service/requirements.txt"
+  PYTORCH_ENABLE_MPS_FALLBACK=1 "$TTS_VENV/bin/python" "$SCRIPT_DIR/tts-service/server.py" &
+  TTS_PID=$!
+
+  # Wait for readiness — first run downloads the ~310MB model, so allow longer.
+  for i in $(seq 1 60); do
+    if curl -sf "$TTS_CHECK_URL/health" >/dev/null 2>&1; then
+      echo "TTS service ready"
+      break
+    fi
+    sleep 1
+  done
+  echo ""
+fi
+
+# Clean up services on exit
 cleanup() {
   if [ -n "$STT_PID" ]; then
     echo ""
     echo "Stopping STT service (pid $STT_PID)..."
     kill $STT_PID 2>/dev/null
     wait $STT_PID 2>/dev/null
+  fi
+  if [ -n "$TTS_PID" ]; then
+    echo "Stopping TTS service (pid $TTS_PID)..."
+    kill $TTS_PID 2>/dev/null
+    wait $TTS_PID 2>/dev/null
   fi
 }
 trap cleanup EXIT
@@ -105,5 +140,6 @@ docker run -it --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
+  -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
   nano-claw-voice

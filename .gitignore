@@ -36,6 +36,7 @@ coverage/
 
 # Python virtual environments
 .venv/
+.venv-test/
 __pycache__/
 *.py[cod]
 
