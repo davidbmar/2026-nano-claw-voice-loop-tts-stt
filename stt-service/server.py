@@ -16,25 +16,29 @@ log = logging.getLogger("stt-service")
 
 app = FastAPI()
 
-MODEL_SIZE = "base"  # ~75MB, good accuracy for short utterances
+SIZES = ["tiny", "base", "small", "medium"]
+DEFAULT_SIZE = "base"  # ~75MB, good accuracy for short utterances
 WHISPER_RATE = 16000  # faster-whisper expects 16kHz input
 
-# Lazy-loaded Whisper model
-_model = None
+# Lazy-loaded Whisper models, cached per size
+_models: dict = {}
 
 
-def _get_model():
-    """Load the faster-whisper model on first use (auto-downloads ~75MB)."""
-    global _model
-    if _model is not None:
-        return _model
+def _valid_size(size: str) -> bool:
+    return size in SIZES
+
+
+def _get_model(size: str):
+    """Load + cache a faster-whisper model per size (auto-downloads on first use)."""
+    if size in _models:
+        return _models[size]
 
     from faster_whisper import WhisperModel
 
-    log.info("Loading faster-whisper model: %s (first run downloads ~75MB)...", MODEL_SIZE)
-    _model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
-    log.info("Whisper model loaded: %s", MODEL_SIZE)
-    return _model
+    log.info("Loading faster-whisper model: %s ...", size)
+    _models[size] = WhisperModel(size, device="cpu", compute_type="int8")
+    log.info("Whisper model loaded: %s", size)
+    return _models[size]
 
 
 @app.get("/health")
@@ -48,6 +52,7 @@ async def transcribe(request: Request):
 
     Headers:
         X-Sample-Rate: sample rate of the audio (default 48000)
+        X-Model-Size: Whisper model size to use (default "base"; one of SIZES)
 
     Body:
         Raw PCM int16 mono audio bytes (application/octet-stream)
@@ -57,12 +62,15 @@ async def transcribe(request: Request):
     """
     audio_bytes = await request.body()
     sample_rate = int(request.headers.get("X-Sample-Rate", "48000"))
+    size = request.headers.get("X-Model-Size", DEFAULT_SIZE)
+    if not _valid_size(size):
+        size = DEFAULT_SIZE
 
     if not audio_bytes:
         return {"text": "", "duration_s": 0.0}
 
     start = time.time()
-    model = _get_model()
+    model = _get_model(size)
 
     # Convert int16 PCM to float32 normalized [-1.0, 1.0]
     samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
