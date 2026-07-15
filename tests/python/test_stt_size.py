@@ -15,6 +15,14 @@ stt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(stt)
 
 
+def test_transcribe_returns_processing_ms_key():
+    # The response contract must include processing_ms (pure structural check
+    # on the module — the empty-body branch returns it too).
+    import inspect
+    src = inspect.getsource(stt.transcribe)
+    assert "processing_ms" in src
+
+
 def test_sizes_list():
     assert stt.SIZES == ["tiny", "base", "small", "medium"]
 

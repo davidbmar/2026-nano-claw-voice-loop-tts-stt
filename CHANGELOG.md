@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- SQLite telemetry for every conversational turn, including per-stage timing,
+  token usage, estimated cost, persisted storage, per-model metrics, and live
+  LLM time-to-first-token in the Debug panel.
 - Pipeline settings (⚙ panel): switch STT (Whisper model size), LLM (any
   cataloged model whose provider key is set in `.env`), and TTS voice — all
   live, no restart. `GET /api/models` reports the catalog with per-model

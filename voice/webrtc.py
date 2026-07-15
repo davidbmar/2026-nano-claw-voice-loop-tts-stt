@@ -7,6 +7,7 @@ from collections import deque
 import logging
 import os
 import re
+import time
 
 import httpx
 import numpy as np
@@ -62,6 +63,7 @@ class Session:
 
         self._paused = False
         self._stream_task: asyncio.Task | None = None
+        self._turn: dict = {}
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
@@ -105,17 +107,17 @@ class Session:
         self._mic_frames.clear()
         log.info("Mic recording cancelled")
 
-    async def stop_recording(self) -> tuple[str, float]:
+    async def stop_recording(self) -> tuple[str, float, int | None]:
         """Stop recording and transcribe all captured audio.
 
         Returns:
-            Tuple of (transcribed_text, audio_duration_seconds).
+            Tuple of (transcribed_text, audio_duration_seconds, stt_ms).
         """
         self._recording = False
 
         if not self._mic_frames:
             log.warning("No mic frames captured")
-            return "", 0.0
+            return "", 0.0, None
 
         pcm_data = b"".join(self._mic_frames)
         self._mic_frames.clear()
@@ -137,10 +139,11 @@ class Session:
                 )
                 result = resp.json()
                 text = result.get("text", "")
+                stt_ms = result.get("processing_ms")
         except Exception:
             log.exception("STT service call failed (is stt-service running on %s?)", stt_url)
-            text = ""
-        return text, audio_duration_s
+            return "", 0.0, None
+        return text, audio_duration_s, stt_ms
 
     def stop_speaking(self):
         """Stop TTS playback — clear the audio queue."""
@@ -249,16 +252,21 @@ class Session:
         if not self._paused:
             self._audio_source.clear_generator()
 
-    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
+    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0) -> float | None:
         """Whole-text path (non-streaming fallback): clean, split, enqueue, drain."""
         self.begin_stream()
         text = self._clean_for_speech(text)
         sentences = self._split_sentences(text)
         loop = asyncio.get_running_loop()
         total_bytes = 0
+        first_audio = None
         for sentence in sentences:
-            total_bytes += await loop.run_in_executor(None, self.enqueue_chunk, sentence, voice_id, speed)
+            queued_bytes = await loop.run_in_executor(None, self.enqueue_chunk, sentence, voice_id, speed)
+            total_bytes += queued_bytes
+            if queued_bytes and first_audio is None:
+                first_audio = time.monotonic()
         await self.end_stream(total_bytes)
+        return first_audio
 
     async def _recv_mic_audio(self, track):
         """Background task: continuously receive audio frames from browser mic."""

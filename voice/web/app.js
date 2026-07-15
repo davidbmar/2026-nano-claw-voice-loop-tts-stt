@@ -247,6 +247,12 @@ function addDebugEntry(info) {
         ["finish", info.finishReason || "—"],
     ];
 
+    if (info.firstTokenMs !== undefined || info.durationMs !== undefined) {
+        var ttft = info.firstTokenMs !== undefined ? info.firstTokenMs + "ms" : "—";
+        var total = info.durationMs !== undefined ? info.durationMs + "ms" : "—";
+        fields.push(["llm", "TTFT " + ttft + " · total " + total]);
+    }
+
     fields.forEach(function (pair, i) {
         if (i > 0) row.appendChild(document.createTextNode("  "));
         var label = document.createElement("span");

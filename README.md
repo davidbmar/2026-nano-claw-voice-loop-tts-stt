@@ -281,6 +281,27 @@ iter 1  msgs 2  model anthropic/claude-sonnet-4-5  tok 897/68/965  dur 2131ms  f
 
 See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full observability guide.
 
+## Metrics
+
+Every completed conversational turn is logged to a local SQLite database at
+`/app/data/metrics.db`. The `nano-claw-data` Docker volume persists the database
+across container restarts. Each row includes the model, STT timing, LLM
+time-to-first-token and total time, TTS timing, end-to-end latency, token usage,
+and estimated cost.
+
+`GET /api/metrics` returns the 50 most recent turns and per-model averages:
+
+```bash
+curl http://localhost:9090/api/metrics
+```
+
+You can also inspect a mounted database directly with `sqlite3`:
+
+```bash
+sqlite3 /app/data/metrics.db \
+  'SELECT model, llm_ttft_ms, e2e_ms, est_cost_usd FROM turns ORDER BY id DESC LIMIT 5;'
+```
+
 ## Component Details
 
 | Component | Where it runs | Role |
@@ -313,6 +334,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e STT_SERVICE_URL="http://host.docker.internal:8200" \
   -v nano-claw-models:/app/voice/models \
+  -v nano-claw-data:/app/data \
   nano-claw-voice
 ```
 

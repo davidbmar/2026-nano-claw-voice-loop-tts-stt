@@ -169,6 +169,26 @@ describe('stepLoopStream', () => {
   });
 });
 
+describe('stepLoopStream TTFT', () => {
+  it('reports firstTokenMs on the final debug', async () => {
+    __setProviderManagerForTest({
+      async *completeStream() {
+        await new Promise((r) => setTimeout(r, 20));
+        yield { type: 'text', delta: 'Hello.' };
+        yield { type: 'done', finishReason: 'stop', usage: undefined };
+      },
+    } as any);
+    const mem = new Memory('ttft-test');
+    mem.addMessage({ role: 'user', content: 'hi' });
+    let finalEvt: any;
+    for await (const e of stepLoopStream(mem, { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any, 0)) {
+      if ((e as any).type === 'final') finalEvt = e;
+    }
+    expect(finalEvt.debug.firstTokenMs).toBeGreaterThanOrEqual(15);
+    expect(finalEvt.debug.firstTokenMs).toBeLessThanOrEqual(finalEvt.debug.durationMs);
+  });
+});
+
 describe('getAgentConfig model override', () => {
   it('honors an available catalog override, else falls back to the default', () => {
     // No provider keys in the test env → every catalog model is unavailable → fall back to default.

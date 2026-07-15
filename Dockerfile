@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r voice/requirements.txt
 
 # Create dirs for runtime data
 RUN mkdir -p /root/.nano-claw/memory /app/voice/models
+RUN mkdir -p /app/data
 
 # Default config (API keys come via env vars)
 COPY docker/default-config.json /root/.nano-claw/config.json
