@@ -7,6 +7,7 @@ from collections import deque
 import logging
 import os
 import re
+import time
 
 import httpx
 import numpy as np
@@ -251,16 +252,21 @@ class Session:
         if not self._paused:
             self._audio_source.clear_generator()
 
-    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0):
+    async def speak_text(self, text: str, voice_id: str = "", speed: float = 1.0) -> float | None:
         """Whole-text path (non-streaming fallback): clean, split, enqueue, drain."""
         self.begin_stream()
         text = self._clean_for_speech(text)
         sentences = self._split_sentences(text)
         loop = asyncio.get_running_loop()
         total_bytes = 0
+        first_audio = None
         for sentence in sentences:
-            total_bytes += await loop.run_in_executor(None, self.enqueue_chunk, sentence, voice_id, speed)
+            queued_bytes = await loop.run_in_executor(None, self.enqueue_chunk, sentence, voice_id, speed)
+            total_bytes += queued_bytes
+            if queued_bytes and first_audio is None:
+                first_audio = time.monotonic()
         await self.end_stream(total_bytes)
+        return first_audio
 
     async def _recv_mic_audio(self, track):
         """Background task: continuously receive audio frames from browser mic."""
