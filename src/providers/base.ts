@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { Message, LLMResponse, ToolDefinition, ToolCall } from '../types';
+import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
@@ -39,6 +39,29 @@ export abstract class BaseProvider {
     maxTokens?: number,
     tools?: ToolDefinition[]
   ): Promise<LLMResponse>;
+
+  /**
+   * Stream a completion. Default: call complete() once and yield it whole.
+   * Providers with native streaming override this.
+   */
+  async *completeStream(
+    messages: Message[],
+    model: string,
+    temperature?: number,
+    maxTokens?: number,
+    tools?: ToolDefinition[]
+  ): AsyncGenerator<StreamEvent> {
+    const res = await this.complete(messages, model, temperature, maxTokens, tools);
+    if (res.content) yield { type: 'text', delta: res.content };
+    if (res.toolCalls && res.toolCalls.length > 0) {
+      yield { type: 'tool_calls', toolCalls: res.toolCalls };
+    }
+    yield {
+      type: 'done',
+      finishReason: res.finishReason,
+      usage: res.usage,
+    };
+  }
 
   /**
    * Format model name for provider

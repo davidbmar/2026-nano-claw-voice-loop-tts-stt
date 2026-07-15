@@ -1,5 +1,5 @@
 import { Config } from '../config/schema';
-import { Message, LLMResponse, ToolDefinition, ProviderConfig } from '../types';
+import { Message, LLMResponse, ToolDefinition, ProviderConfig, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider } from './base';
@@ -161,5 +161,23 @@ export class ProviderManager {
     );
 
     return provider.complete(messages, model, temperature, maxTokens, tools);
+  }
+
+  /**
+   * Streaming variant of complete() — routes to the model's provider.
+   */
+  async *completeStream(
+    messages: Message[],
+    model: string,
+    temperature?: number,
+    maxTokens?: number,
+    tools?: ToolDefinition[]
+  ): AsyncGenerator<StreamEvent> {
+    const providerSpec = findProviderByModel(model);
+    if (!providerSpec) {
+      throw new ProviderError(`No provider found for model: ${model}`);
+    }
+    const provider = this.getProviderInstance(providerSpec.name);
+    yield* provider.completeStream(messages, model, temperature, maxTokens, tools);
   }
 }
