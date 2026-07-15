@@ -1054,10 +1054,10 @@ console.log("voice-ui tests passed");
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `node --test tests/voice-ui.test.mjs` (or `npx vitest run tests/voice-ui.test.mjs`)
-Expected: FAIL — `voice/web/voice-ui.js` does not exist.
+Run: `node tests/voice-ui.test.mjs`
+Expected: FAIL — `voice/web/voice-ui.js` does not exist (import throws).
 
-> The existing `tests/phone-vad.test.mjs` runs under vitest via `npm test`. `node --test` also executes `.mjs` top-level asserts. Use whichever the repo CI uses; both work for this file.
+> Match the existing pattern: `tests/phone-vad.test.mjs` is a plain ESM script of top-level `assert` calls run directly with `node <file>` (prints a success line and exits 0; throws on failure). Do NOT use `node --test` or bare `vitest` (watch mode) — this file has no `test()` blocks.
 
 - [ ] **Step 3: Create `voice/web/voice-ui.js`**
 
@@ -1102,8 +1102,8 @@ Expected: FAIL — `voice/web/voice-ui.js` does not exist.
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `node --test tests/voice-ui.test.mjs`
-Expected: PASS — "voice-ui tests passed".
+Run: `node tests/voice-ui.test.mjs`
+Expected: PASS — prints "voice-ui tests passed", exits 0.
 
 - [ ] **Step 5: Add the picker markup to `voice/web/index.html`**
 
