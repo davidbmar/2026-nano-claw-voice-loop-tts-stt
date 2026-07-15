@@ -97,7 +97,50 @@ each voice shows a quality grade. Click preview (▶) to hear a sample before
 picking, or drag the speed slider to change Kokoro's tempo (Piper ignores
 speed — it doesn't support it). Piper ("Lessac") stays available as the
 fast, low-latency option, and it's what plays automatically if the Kokoro
-service is down or unreachable.
+service is down or unreachable. The voice picker lives inside the **⚙
+Pipeline settings** panel — see below.
+
+### Pipeline settings
+
+Click the **⚙** button next to the message box to open the pipeline
+settings panel. It switches all three stages of the voice loop live, with no
+restart or reconnect needed:
+
+- **STT (Whisper)** — pick the Whisper model size (`tiny`, `base`, `small`,
+  `medium`). Bigger sizes transcribe more accurately but take longer; the
+  STT service loads and caches a separate model per size, keyed by the
+  `X-Model-Size` header sent with each transcription request.
+- **LLM** — pick any model from the catalog. A model is selectable only if
+  its provider's API key was present in `.env` (or the environment) when
+  the container started; otherwise it's greyed out and labeled
+  "— no key". The choice is sent as `set_model` over the WebSocket and
+  applies starting with your next turn.
+- **Voice** — the Kokoro/Piper picker described above, now nested in this
+  same panel.
+
+Your STT size, LLM model, and voice selections persist in `localStorage`
+and are restored (and re-applied to the session) the next time you load
+the page.
+
+#### Recognized provider keys
+
+Set any of these in `.env` to unlock the matching model(s) in the LLM
+picker. All of them stream via the same OpenAI-compatible SSE path except
+Anthropic, which streams natively:
+
+| Env var | Provider | Model(s) in the catalog |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic | Claude Haiku 4.5, Claude Sonnet 4.5 |
+| `GEMINI_API_KEY` | Google Gemini | Gemini 2.0 Flash |
+| `DEEPSEEK_API_KEY` | DeepSeek | DeepSeek Chat |
+| `GROQ_API_KEY` | Groq | Llama 3.3 70B Versatile |
+| `DASHSCOPE_API_KEY` | Alibaba (DashScope) | Qwen Plus |
+| `OPENAI_API_KEY` | OpenAI | GPT-4o mini |
+
+A model whose key is missing still shows up in the list (so you can see
+what's available) but stays disabled with "— no key" until the key is
+added and the container is restarted — the catalog's availability is
+computed once at startup, not re-checked live.
 
 ### Barge-in (experimental)
 
