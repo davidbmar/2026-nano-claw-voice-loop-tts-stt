@@ -15,12 +15,14 @@ from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
+from voice.backoff import Backoff
 
 log = logging.getLogger("voice-server")
 
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 SESSION_ID = "voice-default"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
+BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
 
 
 async def index_handler(request: web.Request) -> web.FileResponse:
@@ -56,10 +58,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             msg_type = msg.get("type", "")
 
             if msg_type == "hello":
-                await ws.send_json({"type": "hello_ack"})
+                await ws.send_json({"type": "hello_ack", "bargeIn": BARGE_IN_ENABLED})
 
             elif msg_type == "webrtc_offer":
                 session = Session()
+                session._backoff = Backoff()          # per-session backoff
+                session._resume_task = None            # pending false-alarm resume timer
                 answer_sdp = await session.handle_offer(msg["sdp"])
                 await ws.send_json({"type": "webrtc_answer", "sdp": answer_sdp})
 
@@ -127,6 +131,38 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if session:
                     session.stop_speaking()
 
+            elif msg_type == "barge_in":
+                if BARGE_IN_ENABLED and session:
+                    # Cancel any pending resume, then pause.
+                    if getattr(session, "_resume_task", None):
+                        session._resume_task.cancel()
+                        session._resume_task = None
+                    session.pause_speaking()
+
+            elif msg_type == "barge_in_commit":
+                if BARGE_IN_ENABLED and session:
+                    if getattr(session, "_resume_task", None):
+                        session._resume_task.cancel()
+                        session._resume_task = None
+                    session.cancel_stream()          # abort reply + clear audio
+                    session._backoff.reset()
+                    await ws.send_json({"type": "agent_audio_end"})   # re-arm mic for the user's turn
+
+            elif msg_type == "barge_in_false":
+                if BARGE_IN_ENABLED and session and session.is_paused():
+                    delay = session._backoff.next()
+                    log.info("Barge-in false alarm; resuming in %.2fs", delay)
+
+                    async def _resume_after(d):
+                        try:
+                            await asyncio.sleep(d)
+                            if session.is_paused() and not ws.closed:
+                                session.resume_speaking()
+                        except asyncio.CancelledError:
+                            pass
+
+                    session._resume_task = asyncio.ensure_future(_resume_after(delay))
+
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
 
@@ -174,6 +210,7 @@ async def _consume_sse(
     resp: httpx.Response,
 ) -> None:
     """Parse SSE frames, speaking each chunk and forwarding text to the browser."""
+    session.set_stream_task(asyncio.current_task())
     chunker = TextChunker()
     loop = asyncio.get_running_loop()
     total_bytes = 0
@@ -224,6 +261,7 @@ async def _consume_sse(
                 data_lines.append(raw[5:].strip())
 
         await session.end_stream(total_bytes)
+        session._backoff.reset()   # clean drain — clear consecutive-false count
         if not ws.closed:
             await ws.send_json({"type": "agent_audio_end"})
     except Exception:
