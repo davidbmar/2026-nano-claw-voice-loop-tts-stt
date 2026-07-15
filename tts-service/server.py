@@ -15,6 +15,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 import voices as voice_catalog
 
@@ -81,6 +82,28 @@ async def list_voices():
     return {"voices": voice_catalog.KOKORO_VOICES}
 
 
+def _synthesize_pcm(text: str, voice: str, speed: float) -> bytes:
+    """Blocking Kokoro synthesis: pipeline lookup + synthesis loop + PCM assembly.
+
+    Runs on a threadpool worker (via run_in_threadpool) so the CPU/GPU-bound
+    Kokoro call doesn't block uvicorn's event loop — otherwise /health and any
+    concurrent request would hang until synthesis finishes.
+    """
+    lang_code = voice_catalog.lang_code_for(voice)
+    pipeline = _get_pipeline(lang_code)
+
+    chunks = []
+    for _gs, _ps, audio in pipeline(text, voice=voice, speed=speed):
+        arr = np.asarray(audio, dtype=np.float32)  # torch tensor / ndarray
+        chunks.append(arr)
+
+    if not chunks:
+        return b""
+
+    audio = np.concatenate(chunks)
+    return np.clip(audio * 32767.0, -32768, 32767).astype(np.int16).tobytes()
+
+
 @app.post("/synthesize")
 async def synthesize(request: Request):
     """Synthesize text → raw int16 PCM (24kHz). Body: {text, voice, speed}."""
@@ -93,23 +116,15 @@ async def synthesize(request: Request):
         return Response(content=b"", headers={"X-Sample-Rate": str(KOKORO_RATE)})
 
     try:
-        lang_code = voice_catalog.lang_code_for(voice)
+        voice_catalog.lang_code_for(voice)
     except KeyError:
         return Response(status_code=400, content=b"unsupported voice")
 
     start = time.time()
-    pipeline = _get_pipeline(lang_code)
+    pcm = await run_in_threadpool(_synthesize_pcm, text, voice, speed)
 
-    chunks = []
-    for _gs, _ps, audio in pipeline(text, voice=voice, speed=speed):
-        arr = np.asarray(audio, dtype=np.float32)  # torch tensor / ndarray
-        chunks.append(arr)
-
-    if not chunks:
+    if not pcm:
         return Response(content=b"", headers={"X-Sample-Rate": str(KOKORO_RATE)})
-
-    audio = np.concatenate(chunks)
-    pcm = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16).tobytes()
 
     log.info("Synth voice=%s %d chars -> %.2fs in %.2fs",
              voice, len(text), len(pcm) / (KOKORO_RATE * 2), time.time() - start)
