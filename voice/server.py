@@ -474,6 +474,15 @@ async def models_handler(request: web.Request) -> web.Response:
         return web.json_response(resp.json())
 
 
+async def metrics_handler(request: web.Request) -> web.Response:
+    if METRICS is None:
+        return web.json_response({"recent": [], "byModel": []})
+    return web.json_response({
+        "recent": metrics_db.recent(METRICS, 50),
+        "byModel": metrics_db.aggregates(METRICS),
+    })
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -494,6 +503,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/voices", voices_handler)
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
+    app.router.add_get("/api/metrics", metrics_handler)
     app.router.add_get("/{filename}", static_handler)
     return app
 
