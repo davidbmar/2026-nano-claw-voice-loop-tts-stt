@@ -21,6 +21,7 @@ import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
 import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
+import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -123,9 +124,15 @@ function createToolRegistry(): ToolRegistry {
   return registry;
 }
 
-function getAgentConfig(): AgentConfig {
+/**
+ * Build the agent config for a turn. If `modelOverride` names a model in the
+ * catalog, it wins; otherwise falls back to the configured default.
+ */
+export function getAgentConfig(modelOverride?: string): AgentConfig {
+  initShared();
+  const valid = !!modelOverride && modelsWithAvailability(config).some((m) => m.id === modelOverride && m.available);
   return {
-    model: config.agents?.defaults?.model || 'anthropic/claude-opus-4-5',
+    model: valid ? (modelOverride as string) : (config.agents?.defaults?.model || DEFAULT_MODEL),
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     systemPrompt: config.agents?.defaults?.systemPrompt,
@@ -405,8 +412,13 @@ function safeParseToolArgs(argsJson: string): Record<string, unknown> {
 
 // ── Route handlers ───────────────────────────────────────────
 
+function handleModels(res: http.ServerResponse): void {
+  initShared();
+  sendJson(res, 200, { models: modelsWithAvailability(config), default: DEFAULT_MODEL });
+}
+
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const body = parseJsonBody(await readBody(req)) as { message?: string; sessionId?: string } | null;
+  const body = parseJsonBody(await readBody(req)) as { message?: string; sessionId?: string; model?: string } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
     return;
@@ -416,11 +428,12 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
   memory.addMessage({ role: 'user', content: body.message });
 
+  const agentConfig = getAgentConfig(body.model);
   if (wantsStream(req)) {
-    await streamLoopToSSE(res, stepLoopStream(memory, getAgentConfig(), 0));
+    await streamLoopToSSE(res, stepLoopStream(memory, agentConfig, 0));
     return;
   }
-  const result = await stepLoop(memory, getAgentConfig(), 0);
+  const result = await stepLoop(memory, agentConfig, 0);
   sendJson(res, 200, result);
 }
 
@@ -532,6 +545,9 @@ export function createServer(): http.Server {
     try {
       if (method === 'GET' && url === '/api/health') {
         sendJson(res, 200, { status: 'ok' });
+      } else if (method === 'GET' && url === '/api/models') {
+        setCorsHeaders(res);
+        handleModels(res);
       } else if (method === 'POST' && (url === '/api/chat' || url === '/api/chat/approve' || url === '/api/chat/reject')) {
         const ct = req.headers['content-type'] || '';
         if (!ct.includes('application/json')) {

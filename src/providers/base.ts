@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
+import { PROVIDERS } from './registry';
 
 /**
  * Read a Node Readable SSE body and yield {event, data} frames.
@@ -90,6 +91,45 @@ export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<St
     finishReason,
     usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
   };
+}
+
+/** Parse OpenAI-compatible /chat/completions streaming events into StreamEvents. */
+export async function* parseOpenAIEvents(stream: Readable): AsyncGenerator<StreamEvent> {
+  let finishReason: string | undefined;
+  let usage: LLMResponse['usage'];
+  const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+
+  for await (const { data } of readSSEFrames(stream)) {
+    if (data === '[DONE]') break;
+    let evt: any;
+    try { evt = JSON.parse(data); } catch { continue; }
+    const choice = evt.choices?.[0];
+    if (evt.usage) {
+      usage = { promptTokens: evt.usage.prompt_tokens, completionTokens: evt.usage.completion_tokens, totalTokens: evt.usage.total_tokens };
+    }
+    if (!choice) continue;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    const delta = choice.delta || {};
+    if (delta.content) yield { type: 'text', delta: delta.content };
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const idx = tc.index ?? 0;
+        const acc = toolAcc.get(idx) || { id: '', name: '', args: '' };
+        if (tc.id) acc.id = tc.id;
+        if (tc.function?.name) acc.name = tc.function.name;
+        if (tc.function?.arguments) acc.args += tc.function.arguments;
+        toolAcc.set(idx, acc);
+      }
+    }
+  }
+
+  if (toolAcc.size > 0) {
+    const toolCalls: ToolCall[] = [...toolAcc.values()].map((t) => ({
+      id: t.id, type: 'function', function: { name: t.name, arguments: t.args || '{}' },
+    }));
+    yield { type: 'tool_calls', toolCalls };
+  }
+  yield { type: 'done', finishReason, usage };
 }
 
 /**
@@ -444,11 +484,15 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   protected formatModelName(model: string): string {
-    // Remove openai/ prefix if present
-    if (model.startsWith('openai/')) {
-      return model.substring(7);
-    }
-    return model;
+    // Strip a leading "provider/" prefix (openai/, gemini/, groq/, deepseek/, dashscope/, …)
+    // only when that segment is a registered provider name — otherwise a
+    // legitimate slash-bearing model id (e.g. a vLLM/HF slug like
+    // "meta-llama/Llama-3.1-8B-Instruct") would get mangled.
+    const slash = model.indexOf('/');
+    if (slash === -1) return model;
+    const prefix = model.slice(0, slash);
+    const known = PROVIDERS.some((p) => p.name === prefix);
+    return known ? model.slice(slash + 1) : model;
   }
 
   async complete(
@@ -502,5 +546,33 @@ export class OpenAIProvider extends BaseProvider {
       }
       throw new ProviderError(`OpenAI API error: ${(error as Error).message}`);
     }
+  }
+
+  async *completeStream(
+    messages: Message[], model: string, temperature = 0.7, maxTokens = 4096, tools?: ToolDefinition[]
+  ): AsyncGenerator<StreamEvent> {
+    const requestData: Record<string, unknown> = {
+      model: this.formatModelName(model),
+      messages: messages.map((m) => ({
+        role: m.role, content: m.content,
+        ...(m.name && { name: m.name }),
+        ...(m.tool_calls && { tool_calls: m.tool_calls }),
+        ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
+      })),
+      temperature, max_tokens: maxTokens, stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (tools && tools.length > 0) requestData.tools = tools;
+    let response;
+    try {
+      response = await this.client.post('/chat/completions', requestData, { responseType: 'stream' });
+    } catch (error) {
+      logger.error({ error }, 'OpenAI API error');
+      if (axios.isAxiosError(error)) {
+        throw new ProviderError(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
+      }
+      throw new ProviderError(`OpenAI API error: ${(error as Error).message}`);
+    }
+    yield* parseOpenAIEvents(response.data as Readable);
   }
 }

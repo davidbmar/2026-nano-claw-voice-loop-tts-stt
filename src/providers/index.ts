@@ -59,7 +59,7 @@ export class ProviderManager {
       case 'gemini':
         provider = new OpenAIProvider(
           providerConfig.apiKey,
-          providerConfig.apiBase || 'https://generativelanguage.googleapis.com/v1beta'
+          providerConfig.apiBase || 'https://generativelanguage.googleapis.com/v1beta/openai'
         );
         break;
       case 'minimax':

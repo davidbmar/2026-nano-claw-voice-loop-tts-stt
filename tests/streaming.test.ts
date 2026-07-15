@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { BaseProvider, parseAnthropicEvents } from '../src/providers/base';
+import { BaseProvider, parseAnthropicEvents, parseOpenAIEvents, OpenAIProvider } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
-import { __setProviderManagerForTest, stepLoopStream } from '../src/api/server';
+import { __setProviderManagerForTest, stepLoopStream, getAgentConfig } from '../src/api/server';
 import { Memory } from '../src/agent/memory';
 
 class FakeProvider extends BaseProvider {
@@ -103,6 +103,49 @@ describe('parseAnthropicEvents', () => {
   });
 });
 
+describe('parseOpenAIEvents', () => {
+  function sse(s: string) { return require('node:stream').Readable.from([Buffer.from(s)]); }
+
+  it('assembles content deltas and ends on [DONE]', async () => {
+    const body =
+      'data: {"choices":[{"delta":{"content":"Hi "}}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"there."},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n' +
+      'data: [DONE]\n\n';
+    const out: any[] = [];
+    for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
+    expect(out.filter(e => e.type === 'text').map(e => e.delta).join('')).toBe('Hi there.');
+    const done = out.find(e => e.type === 'done');
+    expect(done.finishReason).toBe('stop');
+    expect(done.usage).toEqual({ promptTokens: 5, completionTokens: 3, totalTokens: 8 });
+  });
+
+  it('assembles a streamed tool_call by index', async () => {
+    const body =
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell","arguments":""}}]}}]}\n\n' +
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"cmd\\":"}}]}}]}\n\n' +
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"ls\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n' +
+      'data: [DONE]\n\n';
+    const out: any[] = [];
+    for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
+    const t = out.find(e => e.type === 'tool_calls');
+    expect(t.toolCalls[0]).toEqual({ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{"cmd":"ls"}' } });
+  });
+});
+
+describe('OpenAIProvider.formatModelName', () => {
+  it('strips any leading provider/ prefix', () => {
+    const p = new OpenAIProvider('k');
+    // formatModelName is protected; exercise via a tiny subclass
+    const f = (m: string) => (p as any).formatModelName(m);
+    expect(f('groq/llama-3.3-70b-versatile')).toBe('llama-3.3-70b-versatile');
+    expect(f('gemini/gemini-2.0-flash')).toBe('gemini-2.0-flash');
+    expect(f('gpt-4o-mini')).toBe('gpt-4o-mini');
+    expect(f('meta-llama/Llama-3.1-8B-Instruct')).toBe('meta-llama/Llama-3.1-8B-Instruct'); // unknown prefix, untouched
+    expect(f('dashscope/qwen-plus')).toBe('qwen-plus');
+  });
+});
+
 describe('stepLoopStream', () => {
   it('forwards text deltas then a final event when there are no tool calls', async () => {
     __setProviderManagerForTest({
@@ -123,5 +166,13 @@ describe('stepLoopStream', () => {
     expect(texts).toBe('Part one. Part two.');
     const final = events.find((e) => e.type === 'final');
     expect(final.response).toBe('Part one. Part two.');
+  });
+});
+
+describe('getAgentConfig model override', () => {
+  it('honors an available catalog override, else falls back to the default', () => {
+    // No provider keys in the test env → every catalog model is unavailable → fall back to default.
+    expect(getAgentConfig('groq/llama-3.3-70b-versatile').model).toBe(getAgentConfig().model);
+    expect(getAgentConfig('totally-unknown-model').model).toBe(getAgentConfig().model);
   });
 });

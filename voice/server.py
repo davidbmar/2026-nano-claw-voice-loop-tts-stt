@@ -128,6 +128,17 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"type": "transcription", "text": text})
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text))
 
+            elif msg_type == "set_model":
+                if session:
+                    session.model = msg.get("modelId", "") or ""
+                    log.info("Model set: %s", session.model or "(default)")
+
+            elif msg_type == "set_stt":
+                if session:
+                    size = msg.get("size", "base")
+                    session.stt_size = size if size in ("tiny", "base", "small", "medium") else "base"
+                    log.info("STT size set: %s", session.stt_size)
+
             elif msg_type == "set_voice":
                 if not session:
                     continue
@@ -224,7 +235,7 @@ async def _handle_agent_request(
         async with client.stream(
             "POST",
             f"{NANO_CLAW_URL}/api/chat",
-            json={"message": text, "sessionId": SESSION_ID},
+            json={"message": text, "sessionId": SESSION_ID, **({"model": session.model} if session.model else {})},
             headers={"Accept": "text/event-stream"},
         ) as resp:
             ctype = resp.headers.get("content-type", "")
@@ -404,6 +415,12 @@ async def voices_handler(request: web.Request) -> web.Response:
     return web.json_response(voice_catalog.grouped_for_ui())
 
 
+async def models_handler(request: web.Request) -> web.Response:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{NANO_CLAW_URL}/api/models")
+        return web.json_response(resp.json())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -423,6 +440,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/voices", voices_handler)
     app.router.add_post("/api/preview", preview_handler)
+    app.router.add_get("/api/models", models_handler)
     app.router.add_get("/{filename}", static_handler)
     return app
 

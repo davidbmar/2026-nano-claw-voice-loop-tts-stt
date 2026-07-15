@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Pipeline settings (⚙ panel): switch STT (Whisper model size), LLM (any
+  cataloged model whose provider key is set in `.env`), and TTS voice — all
+  live, no restart. `GET /api/models` reports the catalog with per-model
+  `available` reflecting which provider keys are configured; models without
+  a key show "— no key" and are unselectable. `POST /api/chat` accepts a
+  per-request `model` override, validated against the catalog. Recognized
+  keys: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`,
+  `GROQ_API_KEY`, `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`. Selections persist
+  in `localStorage` and are re-applied to the session via `set_model` /
+  `set_stt` WebSocket messages.
+- OpenAI-compatible SSE streaming, extended to every OpenAI-compatible
+  provider (Gemini, DeepSeek, Groq, Alibaba DashScope, OpenAI) — previously
+  only Anthropic streamed. Text deltas and tool-call deltas are parsed
+  incrementally so replies from any of these providers speak
+  sentence-by-sentence like the Anthropic path.
 - Barge-in (opt-in, `NANO_CLAW_BARGE_IN=1`): interrupt Claude mid-reply — playback
   pauses on your voice, your speech becomes the next turn, and a false alarm
   resumes the reply after a randomized exponential backoff. Regardless of the
