@@ -31,6 +31,7 @@ interface DebugInfo {
   model: string;
   tokenUsage?: { prompt: number; completion: number; total: number };
   durationMs: number;
+  firstTokenMs?: number;
   finishReason?: string;
 }
 
@@ -266,11 +267,13 @@ export async function* stepLoopStream(
     let toolCalls: ToolCall[] | undefined;
     let finishReason: string | undefined;
     let usage: LLMResponse['usage'];
+    let firstTokenAt: number | undefined;
 
     for await (const ev of providerManager.completeStream(
       contextMessages, agentConfig.model, agentConfig.temperature, agentConfig.maxTokens, tools
     )) {
       if (ev.type === 'text') {
+        if (firstTokenAt === undefined) firstTokenAt = Date.now();
         text += ev.delta;
         yield ev; // forward the delta to the SSE writer
       } else if (ev.type === 'tool_calls') {
@@ -289,6 +292,7 @@ export async function* stepLoopStream(
         ? { prompt: usage.promptTokens, completion: usage.completionTokens, total: usage.totalTokens }
         : undefined,
       durationMs: Date.now() - startTime,
+      firstTokenMs: firstTokenAt !== undefined ? firstTokenAt - startTime : undefined,
       finishReason,
     };
 
