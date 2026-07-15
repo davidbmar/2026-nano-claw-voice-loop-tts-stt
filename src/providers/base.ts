@@ -1,5 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 import type { Readable } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
@@ -12,8 +13,9 @@ export async function* readSSEFrames(
   stream: Readable
 ): AsyncGenerator<{ event: string; data: string }> {
   let buffer = '';
+  const decoder = new StringDecoder('utf8');
   for await (const chunk of stream) {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     let sep: number;
     while ((sep = buffer.indexOf('\n\n')) !== -1) {
       const frame = buffer.slice(0, sep);
@@ -27,6 +29,7 @@ export async function* readSSEFrames(
       if (dataLines.length) yield { event, data: dataLines.join('\n') };
     }
   }
+  buffer += decoder.end();
 }
 
 /**
@@ -413,10 +416,21 @@ export class AnthropicProvider extends BaseProvider {
       }));
     }
 
-    const response = await this.client.post('/messages', requestData, {
-      responseType: 'stream',
-      headers: { 'anthropic-version': '2023-06-01', 'x-api-key': this.apiKey },
-    });
+    let response;
+    try {
+      response = await this.client.post('/messages', requestData, {
+        responseType: 'stream',
+        headers: { 'anthropic-version': '2023-06-01', 'x-api-key': this.apiKey },
+      });
+    } catch (error) {
+      logger.error({ error }, 'Anthropic API error');
+      if (axios.isAxiosError(error)) {
+        throw new ProviderError(
+          `Anthropic API error: ${error.response?.data?.error?.message || error.message}`
+        );
+      }
+      throw new ProviderError(`Anthropic API error: ${(error as Error).message}`);
+    }
     yield* parseAnthropicEvents(response.data as Readable);
   }
 }

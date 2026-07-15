@@ -67,4 +67,36 @@ describe('parseAnthropicEvents', () => {
       function: { name: 'shell', arguments: '{"cmd":"ls"}' },
     });
   });
+
+  it('reassembles a text_delta whose multi-byte UTF-8 char and SSE frame are split across chunk reads', async () => {
+    const body =
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"canción"}}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+
+    const buf = Buffer.from(body, 'utf8');
+
+    // Byte offset landing in the MIDDLE of the 2-byte 'ó' character.
+    const charIdx = body.indexOf('ó');
+    const oStartByte = Buffer.byteLength(body.slice(0, charIdx), 'utf8');
+    const splitInsideChar = oStartByte + 1;
+
+    // Byte offset landing in the MIDDLE of a later frame (not on a '\n\n' boundary).
+    const messageDeltaIdx = body.indexOf('event: message_delta');
+    const midFrameCharIdx = messageDeltaIdx + 10;
+    const splitInsideFrame = Buffer.byteLength(body.slice(0, midFrameCharIdx), 'utf8');
+
+    const stream = Readable.from([
+      buf.subarray(0, splitInsideChar),
+      buf.subarray(splitInsideChar, splitInsideFrame),
+      buf.subarray(splitInsideFrame),
+    ]);
+
+    const out: any[] = [];
+    for await (const e of parseAnthropicEvents(stream)) out.push(e);
+    const textEvt = out.find((e) => e.type === 'text');
+    expect(textEvt).toBeTruthy();
+    expect(textEvt.delta).toBe('canción');
+  });
 });
