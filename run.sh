@@ -136,9 +136,19 @@ trap cleanup EXIT
 echo "=== Starting container ==="
 echo "Open http://localhost:9090 in your browser"
 echo ""
+# Bare `-e VAR` forwards a variable only when it is set in this shell
+# (.env is sourced above with `set -a`), so optional keys/flags pass
+# through automatically without being required.
 docker run -it --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e GEMINI_API_KEY \
+  -e DEEPSEEK_API_KEY \
+  -e GROQ_API_KEY \
+  -e DASHSCOPE_API_KEY \
+  -e OPENAI_API_KEY \
+  -e NANO_CLAW_BARGE_IN \
+  -e NANO_CLAW_STREAM \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
