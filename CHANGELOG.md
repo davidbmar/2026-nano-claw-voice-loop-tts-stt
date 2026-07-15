@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (American/British English + Spanish), quality-grade labels, per-voice preview,
   and a speed slider. Piper remains as the fast, low-latency option. Selecting a
   Kokoro voice while the service is down falls back to Piper automatically.
+- Streaming voice replies — Claude's answer is spoken sentence-by-sentence as it's
+  generated (Anthropic native streaming → SSE → incremental TTS), so audio starts
+  at the first sentence. Text also streams into the chat log. `NANO_CLAW_STREAM=0`
+  forces the legacy path.
 
 ### Planned Features
 

@@ -67,16 +67,26 @@ You speak into mic
     → WebRTC audio stream to Docker container
     → Voice server sends audio bytes to STT service (native Mac, port 8200)
     → Whisper transcribes to text (Metal-accelerated)
-    → Voice server POSTs text to nano-claw API
-    → Claude generates response (may request tools)
-    → If tool_pending: browser shows approval card, you approve/reject
+    → Voice server POSTs text to nano-claw API's /api/chat, requesting
+      text/event-stream
+    → Claude's reply streams back over SSE, sentence by sentence (may
+      request tools)
+    → If tool_pending: streaming stops, browser shows approval card, you
+      approve/reject
     → If approved: tools execute, loop continues
-    → Final text sent back via WebSocket
+    → As each sentence arrives, the voice server synthesizes and queues it
+      immediately (first audio at the first sentence, not the whole reply)
+      and forwards the text to the browser as agent_reply_delta over
+      WebSocket, followed by agent_reply_done when finished
     → Voice server routes the selected voice: Kokoro voices go to the native
       TTS service (native Mac, port 8300), Piper voices are synthesized locally
       in the container. If Kokoro is unavailable, it falls back to Piper.
     → WebRTC audio stream back to your browser
 You hear the answer
+
+Set NANO_CLAW_STREAM=0 to force the legacy whole-reply path: the API
+responds with a single application/json body instead of SSE, and the voice
+server speaks (and sends) the full reply at once.
 ```
 
 ### Voices

@@ -126,6 +126,7 @@ function addBubble(text, role) {
     }
     chatLog.appendChild(bubble);
     chatLog.scrollTop = chatLog.scrollHeight;
+    return bubble;
 }
 
 function showThinking() {
@@ -135,6 +136,21 @@ function showThinking() {
     el.textContent = "Thinking...";
     chatLog.appendChild(el);
     chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+var streamingBubble = null;
+
+function appendAgentDelta(text) {
+    if (!streamingBubble) {
+        streamingBubble = addBubble("", "agent");
+    }
+    // addBubble returns the bubble element; append text with a leading space if needed
+    streamingBubble.textContent = (streamingBubble.textContent + " " + text).trim();
+    chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function finalizeAgentBubble() {
+    streamingBubble = null;
 }
 
 function clearThinking() {
@@ -484,6 +500,17 @@ function handleMessage(msg) {
             addBubble(msg.text, "agent");
             setAgentSpeaking(true);
             setPhoneStatus("Claude is speaking to the phone...");
+            break;
+
+        case "agent_reply_delta":
+            clearThinking();
+            appendAgentDelta(msg.text);
+            setAgentSpeaking(true);
+            setPhoneStatus("Claude is speaking to the phone...");
+            break;
+
+        case "agent_reply_done":
+            finalizeAgentBubble();
             break;
 
         case "agent_audio_start":
