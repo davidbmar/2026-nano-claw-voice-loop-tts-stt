@@ -141,6 +141,8 @@ describe('OpenAIProvider.formatModelName', () => {
     expect(f('groq/llama-3.3-70b-versatile')).toBe('llama-3.3-70b-versatile');
     expect(f('gemini/gemini-2.0-flash')).toBe('gemini-2.0-flash');
     expect(f('gpt-4o-mini')).toBe('gpt-4o-mini');
+    expect(f('meta-llama/Llama-3.1-8B-Instruct')).toBe('meta-llama/Llama-3.1-8B-Instruct'); // unknown prefix, untouched
+    expect(f('dashscope/qwen-plus')).toBe('qwen-plus');
   });
 });
 
@@ -168,8 +170,9 @@ describe('stepLoopStream', () => {
 });
 
 describe('getAgentConfig model override', () => {
-  it('uses a valid catalog model override, else the default', () => {
-    expect(getAgentConfig('groq/llama-3.3-70b-versatile').model).toBe('groq/llama-3.3-70b-versatile');
-    expect(getAgentConfig('totally-unknown-model').model).toBe(getAgentConfig().model); // falls back
+  it('honors an available catalog override, else falls back to the default', () => {
+    // No provider keys in the test env → every catalog model is unavailable → fall back to default.
+    expect(getAgentConfig('groq/llama-3.3-70b-versatile').model).toBe(getAgentConfig().model);
+    expect(getAgentConfig('totally-unknown-model').model).toBe(getAgentConfig().model);
   });
 });

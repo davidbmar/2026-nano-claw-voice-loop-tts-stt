@@ -21,7 +21,7 @@ import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
 import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
-import { modelsWithAvailability, MODEL_CATALOG, DEFAULT_MODEL } from '../agent/models';
+import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -130,7 +130,7 @@ function createToolRegistry(): ToolRegistry {
  */
 export function getAgentConfig(modelOverride?: string): AgentConfig {
   initShared();
-  const valid = modelOverride && MODEL_CATALOG.some((m) => m.id === modelOverride);
+  const valid = !!modelOverride && modelsWithAvailability(config).some((m) => m.id === modelOverride && m.available);
   return {
     model: valid ? (modelOverride as string) : (config.agents?.defaults?.model || DEFAULT_MODEL),
     temperature: config.agents?.defaults?.temperature || 0.7,

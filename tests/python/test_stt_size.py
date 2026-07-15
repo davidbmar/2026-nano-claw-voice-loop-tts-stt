@@ -1,6 +1,12 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("uvicorn")
+pytest.importorskip("fastapi")
+pytest.importorskip("scipy")
+
 _spec = importlib.util.spec_from_file_location(
     "stt_server", Path(__file__).resolve().parents[2] / "stt-service" / "server.py"
 )

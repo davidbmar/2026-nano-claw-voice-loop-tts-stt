@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
+import { PROVIDERS } from './registry';
 
 /**
  * Read a Node Readable SSE body and yield {event, data} frames.
@@ -483,9 +484,15 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   protected formatModelName(model: string): string {
-    // Strip a leading "provider/" prefix (openai/, gemini/, groq/, deepseek/, dashscope/, …).
+    // Strip a leading "provider/" prefix (openai/, gemini/, groq/, deepseek/, dashscope/, …)
+    // only when that segment is a registered provider name — otherwise a
+    // legitimate slash-bearing model id (e.g. a vLLM/HF slug like
+    // "meta-llama/Llama-3.1-8B-Instruct") would get mangled.
     const slash = model.indexOf('/');
-    return slash === -1 ? model : model.slice(slash + 1);
+    if (slash === -1) return model;
+    const prefix = model.slice(0, slash);
+    const known = PROVIDERS.some((p) => p.name === prefix);
+    return known ? model.slice(slash + 1) : model;
   }
 
   async complete(
