@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { BaseProvider, parseAnthropicEvents } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
+import { __setProviderManagerForTest, stepLoopStream } from '../src/api/server';
+import { Memory } from '../src/agent/memory';
 
 class FakeProvider extends BaseProvider {
   protected getDefaultApiBase(): string { return 'http://example.invalid'; }
@@ -98,5 +100,28 @@ describe('parseAnthropicEvents', () => {
     const textEvt = out.find((e) => e.type === 'text');
     expect(textEvt).toBeTruthy();
     expect(textEvt.delta).toBe('canción');
+  });
+});
+
+describe('stepLoopStream', () => {
+  it('forwards text deltas then a final event when there are no tool calls', async () => {
+    __setProviderManagerForTest({
+      async *completeStream() {
+        yield { type: 'text', delta: 'Part one. ' };
+        yield { type: 'text', delta: 'Part two.' };
+        yield { type: 'done', finishReason: 'stop', usage: undefined };
+      },
+    } as any);
+
+    const mem = new Memory('test-stream');
+    mem.addMessage({ role: 'user', content: 'hi' });
+    const events: any[] = [];
+    for await (const e of stepLoopStream(mem, { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any, 0)) {
+      events.push(e);
+    }
+    const texts = events.filter((e) => e.type === 'text').map((e) => e.delta).join('');
+    expect(texts).toBe('Part one. Part two.');
+    const final = events.find((e) => e.type === 'final');
+    expect(final.response).toBe('Part one. Part two.');
   });
 });

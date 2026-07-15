@@ -10,7 +10,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { AgentConfig, ToolCall } from '../types';
+import { AgentConfig, ToolCall, StreamEvent, LLMResponse } from '../types';
 import { ProviderManager } from '../providers/index';
 import { Memory } from '../agent/memory';
 import { ContextBuilder } from '../agent/context';
@@ -19,7 +19,7 @@ import { ToolRegistry } from '../agent/tools/registry';
 import { ShellTool } from '../agent/tools/shell';
 import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
-import { getConfig } from '../config/index';
+import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
 
 // ── Types ────────────────────────────────────────────────────
@@ -70,9 +70,32 @@ let providerManager: ProviderManager;
 let skillsLoader: SkillsLoader;
 
 function initShared(): void {
-  config = getConfig();
+  try {
+    config = getConfig();
+  } catch (error) {
+    // No config file on disk (e.g. `nano-claw onboard` never run, or running
+    // under test). Degrade to defaults instead of crashing at import time —
+    // any env-supplied provider keys still get picked up. Real HTTP requests
+    // that need a provider will fail with a clear "No provider configured"
+    // error from ProviderManager at call time.
+    logger.warn(
+      { error: (error as Error).message },
+      'No nano-claw config found; falling back to defaults'
+    );
+    config = mergeEnvConfig(createDefaultConfig());
+  }
   providerManager = new ProviderManager(config);
   skillsLoader = new SkillsLoader();
+}
+
+// Initialize shared state eagerly on import so module-level exports like
+// `stepLoopStream` are usable without first calling `createServer()` (e.g.
+// from unit tests that only need `Memory` + a stubbed provider manager).
+initShared();
+
+/** Test-only: inject a stub provider manager. */
+export function __setProviderManagerForTest(pm: unknown): void {
+  providerManager = pm as ProviderManager;
 }
 
 function createToolRegistry(): ToolRegistry {
@@ -200,6 +223,78 @@ async function stepLoop(
   return { type: 'final', response: 'Max iterations reached.', debug: { iteration: MAX_ITERATIONS, messageCount: memory.getMessages().length, model: agentConfig.model, durationMs: 0, finishReason: 'max_iterations' } };
 }
 
+/**
+ * Streaming variant of stepLoop — yields text deltas as they arrive, then a
+ * terminal `tool_pending` or `final` event (mirrors stepLoop's return value).
+ */
+export async function* stepLoopStream(
+  memory: Memory,
+  agentConfig: AgentConfig,
+  iteration: number
+): AsyncGenerator<StreamEvent | ApiResponse> {
+  const toolRegistry = createToolRegistry();
+
+  while (iteration < MAX_ITERATIONS) {
+    iteration++;
+    const messageCount = memory.getMessages().length;
+    const startTime = Date.now();
+    const skills = skillsLoader.getSkills();
+    const tools = toolRegistry.getDefinitions();
+    const contextBuilder = new ContextBuilder(agentConfig);
+    const contextMessages = contextBuilder.buildContextMessages(memory.getMessages(), skills, tools);
+
+    let text = '';
+    let toolCalls: ToolCall[] | undefined;
+    let finishReason: string | undefined;
+    let usage: LLMResponse['usage'];
+
+    for await (const ev of providerManager.completeStream(
+      contextMessages, agentConfig.model, agentConfig.temperature, agentConfig.maxTokens, tools
+    )) {
+      if (ev.type === 'text') {
+        text += ev.delta;
+        yield ev; // forward the delta to the SSE writer
+      } else if (ev.type === 'tool_calls') {
+        toolCalls = ev.toolCalls;
+      } else if (ev.type === 'done') {
+        finishReason = ev.finishReason;
+        usage = ev.usage;
+      }
+    }
+
+    const debug: DebugInfo = {
+      iteration,
+      messageCount,
+      model: agentConfig.model,
+      tokenUsage: usage
+        ? { prompt: usage.promptTokens, completion: usage.completionTokens, total: usage.totalTokens }
+        : undefined,
+      durationMs: Date.now() - startTime,
+      finishReason,
+    };
+
+    if (toolCalls && toolCalls.length > 0) {
+      memory.addMessage({ role: 'assistant', content: text, tool_calls: toolCalls });
+      const requestId = crypto.randomUUID();
+      pendingRequests.set(requestId, { memory, toolCalls, assistantContent: text, iteration, agentConfig });
+      pendingTimestamps.set(requestId, Date.now());
+      yield {
+        type: 'tool_pending',
+        requestId,
+        tools: toolCalls.map((tc) => ({ name: tc.function.name, args: safeParseToolArgs(tc.function.arguments) })),
+        debug,
+      };
+      return;
+    }
+
+    memory.addMessage({ role: 'assistant', content: text });
+    yield { type: 'final', response: text, debug };
+    return;
+  }
+
+  yield { type: 'final', response: 'Max iterations reached.', debug: { iteration: MAX_ITERATIONS, messageCount: memory.getMessages().length, model: agentConfig.model, durationMs: 0, finishReason: 'max_iterations' } };
+}
+
 // ── Session memory cache ─────────────────────────────────────
 
 const sessionMemories = new Map<string, Memory>();
@@ -225,6 +320,39 @@ function sendJson(res: http.ServerResponse, statusCode: number, body: unknown): 
   setCorsHeaders(res);
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+const STREAM_ENABLED = process.env.NANO_CLAW_STREAM !== '0' && process.env.NANO_CLAW_STREAM !== 'false';
+
+function wantsStream(req: http.IncomingMessage): boolean {
+  return STREAM_ENABLED && (req.headers['accept'] || '').includes('text/event-stream');
+}
+
+function sseWrite(res: http.ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+async function streamLoopToSSE(
+  res: http.ServerResponse,
+  gen: AsyncGenerator<StreamEvent | ApiResponse>
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+  try {
+    for await (const ev of gen) {
+      if ((ev as StreamEvent).type === 'text') sseWrite(res, 'delta', { text: (ev as { delta: string }).delta });
+      else if ((ev as ApiResponse).type === 'tool_pending') sseWrite(res, 'tool_pending', ev);
+      else if ((ev as ApiResponse).type === 'final') sseWrite(res, 'final', ev);
+    }
+  } catch (err) {
+    sseWrite(res, 'error', { error: err instanceof Error ? err.message : 'stream error' });
+  } finally {
+    res.end();
+  }
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
@@ -276,6 +404,10 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
   memory.addMessage({ role: 'user', content: body.message });
 
+  if (wantsStream(req)) {
+    await streamLoopToSSE(res, stepLoopStream(memory, getAgentConfig(), 0));
+    return;
+  }
   const result = await stepLoop(memory, getAgentConfig(), 0);
   sendJson(res, 200, result);
 }
@@ -322,6 +454,10 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   // Continue the loop
+  if (wantsStream(req)) {
+    await streamLoopToSSE(res, stepLoopStream(pending.memory, pending.agentConfig, pending.iteration));
+    return;
+  }
   const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
   sendJson(res, 200, result);
 }
@@ -353,6 +489,10 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
   }
 
   // Continue loop — LLM will respond without tool results
+  if (wantsStream(req)) {
+    await streamLoopToSSE(res, stepLoopStream(pending.memory, pending.agentConfig, pending.iteration));
+    return;
+  }
   const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
   sendJson(res, 200, result);
 }
