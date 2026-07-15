@@ -113,9 +113,9 @@ def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
     try:
         pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
         return _resample_to_48k(pcm, rate)
-    except kokoro_client.KokoroUnavailable:
-        log.warning("Kokoro unavailable for %r; falling back to Piper %s",
-                    voice_id, DEFAULT_VOICE)
+    except (kokoro_client.KokoroUnavailable, ValueError) as exc:
+        log.warning("Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE)
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
