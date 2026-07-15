@@ -17,6 +17,10 @@ const voiceSelect = document.getElementById("voice-select");
 const voicePreviewBtn = document.getElementById("voice-preview-btn");
 const speedSlider = document.getElementById("speed-slider");
 const speedValue = document.getElementById("speed-value");
+const modelSelect = document.getElementById("model-select");
+const sttSelect = document.getElementById("stt-select");
+const settingsBtn = document.getElementById("settings-btn");
+const pipelinePanel = document.getElementById("pipeline-panel");
 
 // ── State ────────────────────────────────────────────────────
 let ws = null;
@@ -448,6 +452,40 @@ voicePreviewBtn.addEventListener("click", function () {
         .finally(function () { voicePreviewBtn.disabled = false; });
 });
 
+// ── Pipeline settings (STT / LLM / TTS) ─────────────────────
+var LS_MODEL = "nanoclaw.model", LS_STT = "nanoclaw.stt";
+var currentModel = localStorage.getItem(LS_MODEL) || "anthropic/claude-haiku-4-5";
+var currentStt = localStorage.getItem(LS_STT) || "base";
+
+settingsBtn.addEventListener("click", function () { pipelinePanel.classList.toggle("hidden"); });
+
+function loadModels() {
+    fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
+        modelSelect.innerHTML = "";
+        Pipeline.buildModelOptions(data.models).forEach(function (o) {
+            var el = document.createElement("option");
+            el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
+            modelSelect.appendChild(el);
+        });
+        // keep stored model if still available, else fall back to default
+        var chosen = data.models.find(function (m) { return m.id === currentModel && m.available; });
+        currentModel = chosen ? currentModel : data.default;
+        modelSelect.value = currentModel;
+        sttSelect.value = currentStt;
+        sendMsg("set_model", { modelId: currentModel });
+        sendMsg("set_stt", { size: currentStt });
+    }).catch(function () {});
+}
+
+modelSelect.addEventListener("change", function () {
+    currentModel = modelSelect.value; localStorage.setItem(LS_MODEL, currentModel);
+    sendMsg("set_model", { modelId: currentModel });
+});
+sttSelect.addEventListener("change", function () {
+    currentStt = sttSelect.value; localStorage.setItem(LS_STT, currentStt);
+    sendMsg("set_stt", { size: currentStt });
+});
+
 function connect() {
     statusText.textContent = "Connecting...";
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -457,6 +495,7 @@ function connect() {
         statusText.textContent = "Authenticating...";
         sendMsg("hello");
         loadVoices();
+        loadModels();
     };
 
     ws.onmessage = function (ev) {
