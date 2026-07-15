@@ -62,6 +62,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     log.info("WebSocket connected")
 
     session: Session | None = None
+    # The browser pushes its persisted set_voice/set_model/set_stt right after
+    # `hello`, but the session is only created when `webrtc_offer` arrives
+    # (after mic permission). Buffer early settings and apply them at session
+    # creation so saved choices survive a reconnect instead of being dropped.
+    pending_settings: dict = {}
     http_client = httpx.AsyncClient(timeout=120.0)
 
     def _spawn_agent(coro, turn_state=None):
@@ -99,6 +104,17 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 session = Session()
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
+                # Apply any settings the browser pushed before the session existed.
+                if "voice" in pending_settings:
+                    v = pending_settings["voice"]
+                    session.set_voice(v["voiceId"], v["speed"])
+                if "model" in pending_settings:
+                    session.model = pending_settings["model"]
+                    log.info("Model set (pending): %s", session.model or "(default)")
+                if "stt" in pending_settings:
+                    session.stt_size = pending_settings["stt"]
+                    log.info("STT size set (pending): %s", session.stt_size)
+                pending_settings.clear()
                 answer_sdp = await session.handle_offer(msg["sdp"])
                 await ws.send_json({"type": "webrtc_answer", "sdp": answer_sdp})
 
@@ -136,18 +152,28 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text), turn_state)
 
             elif msg_type == "set_model":
+                model_id = msg.get("modelId", "") or ""
                 if session:
-                    session.model = msg.get("modelId", "") or ""
+                    session.model = model_id
                     log.info("Model set: %s", session.model or "(default)")
+                else:
+                    pending_settings["model"] = model_id
 
             elif msg_type == "set_stt":
+                size = msg.get("size", "base")
+                size = size if size in ("tiny", "base", "small", "medium") else "base"
                 if session:
-                    size = msg.get("size", "base")
-                    session.stt_size = size if size in ("tiny", "base", "small", "medium") else "base"
+                    session.stt_size = size
                     log.info("STT size set: %s", session.stt_size)
+                else:
+                    pending_settings["stt"] = size
 
             elif msg_type == "set_voice":
                 if not session:
+                    pending_settings["voice"] = {
+                        "voiceId": msg.get("voiceId", ""),
+                        "speed": msg.get("speed", 1.0),
+                    }
                     continue
                 voice_id = msg.get("voiceId", "")
                 session.set_voice(voice_id, msg.get("speed", 1.0))
