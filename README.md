@@ -99,6 +99,22 @@ speed — it doesn't support it). Piper ("Lessac") stays available as the
 fast, low-latency option, and it's what plays automatically if the Kokoro
 service is down or unreachable.
 
+### Barge-in (experimental)
+
+Set `NANO_CLAW_BARGE_IN=1` (default off) to let you interrupt Claude while it's
+speaking. Talking over the reply pauses playback almost immediately; if what
+you said was real speech, it becomes the next turn and the interrupted reply
+is dropped. If it turns out to be a false alarm (a cough, a door closing),
+playback resumes after a short randomized backoff that grows with repeated
+false alarms and resets once a turn completes cleanly. The flag is surfaced
+to the browser via `hello_ack.bargeIn` — with the flag off, playback is not
+interruptible and behavior is unchanged from before this feature existed.
+
+Barge-in works best in **hands-free phone mode**. On speakers, the browser's
+echo cancellation (AEC) plus the backoff absorb most false trips caused by
+the agent's own voice bleeding into the mic; a headset avoids the issue
+entirely.
+
 ## Quick Start
 
 ### Prerequisites
