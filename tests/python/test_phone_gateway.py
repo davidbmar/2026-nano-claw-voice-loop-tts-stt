@@ -93,6 +93,16 @@ def test_media_ws_rejects_bad_token():
     run(_run())
 
 
+def test_idle_action_policy():
+    # Under threshold: nothing, prompted or not
+    assert phone.idle_action(10, False, 30) == ""
+    assert phone.idle_action(29.9, True, 30) == ""
+    # First stretch of silence: prompt once
+    assert phone.idle_action(31, False, 30) == "prompt"
+    # Prompted and the caller stayed silent another stretch: hang up
+    assert phone.idle_action(31, True, 30) == "hangup"
+
+
 def test_routes_not_registered_when_env_incomplete(monkeypatch):
     monkeypatch.delenv("TELNYX_API_KEY")
     app = make_app()

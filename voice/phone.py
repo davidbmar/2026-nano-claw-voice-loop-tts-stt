@@ -60,6 +60,19 @@ DEFAULT_GREETING = (
     "You've reached Space Channel. Ask me about rocket launches, "
     "U F O cases, space news, podcasts, or live shows."
 )
+IDLE_PROMPT_TEXT = "Hi — are you still there?"
+IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling Space Channel — goodbye!"
+
+
+def idle_action(idle_s: float, prompted: bool, prompt_after_s: float) -> str:
+    """Pure idle-policy decision: '', 'prompt', or 'hangup'.
+
+    One prompt per silence stretch; a further full stretch after the prompt
+    (still nothing) means the caller is gone.
+    """
+    if idle_s < prompt_after_s:
+        return ""
+    return "hangup" if prompted else "prompt"
 
 
 def _cfg(name: str, default: str = "") -> str:
@@ -107,12 +120,47 @@ class PhoneCall:
         self.closed = False
         self._turn_task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=120.0)
+        # Idle policy: clock runs from the last time the caller spoke or the
+        # agent finished speaking; one "are you still there?" per stretch.
+        self.last_activity = time.monotonic()
+        self.idle_prompted = False
+        self._idle_task = asyncio.create_task(self._idle_watchdog())
 
     async def close(self) -> None:
         self.closed = True
         if self._turn_task and not self._turn_task.done():
             self._turn_task.cancel()
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
         await self._http.aclose()
+
+    def _mark_activity(self) -> None:
+        self.last_activity = time.monotonic()
+        self.idle_prompted = False
+
+    async def _idle_watchdog(self) -> None:
+        """Prompt after NANO_CLAW_PHONE_IDLE_S of silence; hang up after a
+        second full stretch with still no reply (default 30s → 60s total)."""
+        prompt_after = float(_cfg("NANO_CLAW_PHONE_IDLE_S", "30") or 30)
+        while not self.closed:
+            await asyncio.sleep(2.5)
+            if self.closed:
+                return
+            if self.speaking or (self._turn_task and not self._turn_task.done()):
+                continue
+            action = idle_action(
+                time.monotonic() - self.last_activity, self.idle_prompted, prompt_after
+            )
+            if action == "prompt":
+                log.info("[phone %s] idle %.0fs — prompting caller", self.call_id[:8], prompt_after)
+                self.idle_prompted = True
+                await self.speak(IDLE_PROMPT_TEXT)
+            elif action == "hangup":
+                log.info("[phone %s] idle after prompt — hanging up", self.call_id[:8])
+                await self.speak(IDLE_GOODBYE_TEXT)
+                await _telnyx_cmd(self._http, self.call_id, "hangup", {})
+                self.closed = True
+                return
 
     # ── Inbound audio ────────────────────────────────────────────
 
@@ -135,6 +183,7 @@ class PhoneCall:
 
         utterance = self.endpointer.feed(pcm)
         if utterance:
+            self._mark_activity()
             if self._turn_task and not self._turn_task.done():
                 self._turn_task.cancel()  # interrupted turn still unwinding
             self.interrupted = False
@@ -144,6 +193,7 @@ class PhoneCall:
         """Caller talked over the agent: flush Telnyx's audio buffer, stop
         speaking, and turn the interruption itself into the next utterance."""
         log.info("[phone %s] barge-in — caller interrupted", self.call_id[:8])
+        self._mark_activity()
         self.interrupted = True
         self.speaking = False  # speak() loop sees this and aborts
         frames = self.barge.take_frames()
@@ -242,6 +292,10 @@ class PhoneCall:
             if not self.interrupted:
                 self.endpointer.reset()  # drop anything "heard" while talking
             # else: the endpointer was primed with the interruption — keep it
+            # Idle clock restarts when we stop talking — but only the clock;
+            # clearing idle_prompted here would make the idle prompt reset
+            # itself and re-prompt forever instead of hanging up.
+            self.last_activity = time.monotonic()
 
 
 # ── HTTP handlers ────────────────────────────────────────────────
