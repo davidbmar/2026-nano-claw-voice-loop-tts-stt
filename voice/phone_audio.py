@@ -120,6 +120,17 @@ class UtteranceEndpointer:
         self._silence_ms = 0
         self._in_utterance = False
 
+    def prime(self, frames: list[np.ndarray]) -> None:
+        """Begin an utterance pre-seeded with frames captured elsewhere
+        (barge-in: the speech that interrupted playback IS the next turn)."""
+        self.reset()
+        if not frames:
+            return
+        self._in_utterance = True
+        self._frames = list(frames)
+        self._speech_ms = sum(len(f) for f in frames) * 1000 // TELNYX_RATE
+        self._silence_ms = 0
+
     def feed(self, frame: np.ndarray) -> bytes | None:
         """Consume one PCM16 frame (any length ≥ 1 sample at 8 kHz)."""
         frame_ms = len(frame) * 1000 // TELNYX_RATE
@@ -159,6 +170,45 @@ class UtteranceEndpointer:
         if not spoke_enough:
             return None  # a cough, click, or line noise — not a turn
         return np.concatenate(frames).astype(np.int16).tobytes()
+
+
+class BargeInDetector:
+    """Detects sustained caller speech while the agent is talking.
+
+    Stricter than the endpointer on purpose: the trigger threshold is higher
+    and requires sustained speech, so line noise, clicks, or acoustic echo
+    from a speakerphone don't cut the agent off mid-sentence.
+    """
+
+    def __init__(
+        self,
+        *,
+        rms_threshold: float = 550.0,
+        trigger_ms: int = 240,
+        window_ms: int = 800,
+    ) -> None:
+        self.rms_threshold = rms_threshold
+        self.trigger_ms = trigger_ms
+        self._window_frames = max(1, window_ms // FRAME_MS)
+        self.reset()
+
+    def reset(self) -> None:
+        self._recent: list[tuple[np.ndarray, bool]] = []
+
+    def feed(self, frame: np.ndarray) -> bool:
+        """Returns True when the caller has clearly started talking over us."""
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
+        self._recent.append((frame, rms >= self.rms_threshold))
+        if len(self._recent) > self._window_frames:
+            self._recent.pop(0)
+        speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // TELNYX_RATE
+        return speech_ms >= self.trigger_ms
+
+    def take_frames(self) -> list[np.ndarray]:
+        """The buffered window (the interruption itself), for endpointer priming."""
+        frames = [f for f, _ in self._recent]
+        self.reset()
+        return frames
 
 
 def pcm48k_to_ulaw_frames(pcm48k_bytes: bytes) -> list[bytes]:

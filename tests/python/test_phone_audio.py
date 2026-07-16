@@ -2,6 +2,7 @@ import numpy as np
 
 from voice.phone_audio import (
     FRAME_SAMPLES,
+    BargeInDetector,
     UtteranceEndpointer,
     pcm48k_to_ulaw_frames,
     resample_48k_to_8k,
@@ -85,3 +86,39 @@ class TestUtteranceEndpointer:
             [tone(300, 500), silence(900), tone(300, 500), silence(900)]
         )
         assert len(self.feed_all(ep, pcm)) == 2
+
+    def test_prime_seeds_an_in_progress_utterance(self):
+        ep = UtteranceEndpointer()
+        barge_frames = self.frames(tone(300, 400))
+        ep.prime(barge_frames)
+        # Silence after the primed speech should close the utterance.
+        utterances = self.feed_all(ep, silence(900))
+        assert len(utterances) == 1
+        assert len(utterances[0]) >= 8000 * 2 * 0.3  # contains the primed speech
+
+
+class TestBargeInDetector:
+    def frames(self, pcm: np.ndarray):
+        return [pcm[i : i + FRAME_SAMPLES] for i in range(0, len(pcm), FRAME_SAMPLES)]
+
+    def test_sustained_speech_triggers(self):
+        det = BargeInDetector()
+        triggered = [det.feed(f) for f in self.frames(tone(300, 400))]
+        assert any(triggered)
+
+    def test_silence_never_triggers(self):
+        det = BargeInDetector()
+        assert not any(det.feed(f) for f in self.frames(silence(2000)))
+
+    def test_short_click_does_not_trigger(self):
+        det = BargeInDetector(trigger_ms=240)
+        pcm = np.concatenate([silence(200), tone(300, 100), silence(600)])
+        assert not any(det.feed(f) for f in self.frames(pcm))
+
+    def test_take_frames_returns_window_and_resets(self):
+        det = BargeInDetector()
+        for f in self.frames(tone(300, 400)):
+            det.feed(f)
+        frames = det.take_frames()
+        assert frames, "expected buffered frames"
+        assert det.take_frames() == []  # reset after take

@@ -18,9 +18,9 @@ Enabled only when NANO_CLAW_PHONE=1. Required env:
 Optional:
     NANO_CLAW_PHONE_GREETING        spoken on answer
     NANO_CLAW_PHONE_VOICE           TTS voice id (default af_heart)
-
-Half-duplex by design: inbound audio is ignored while the agent is speaking
-(no barge-in on the phone leg yet).
+    NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
+                                    mid-speech (buffer-flush via Telnyx
+                                    "clear"); unset = half-duplex
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from aiohttp import web
 
 from voice.phone_audio import (
     FRAME_MS,
+    BargeInDetector,
     UtteranceEndpointer,
     pcm48k_to_ulaw_frames,
     ulaw_decode,
@@ -62,6 +63,12 @@ def _cfg(name: str, default: str = "") -> str:
 
 def phone_enabled() -> bool:
     return _cfg("NANO_CLAW_PHONE") in ("1", "true", "yes")
+
+
+def barge_in_enabled() -> bool:
+    """Caller can interrupt the agent mid-speech (NANO_CLAW_PHONE_BARGE_IN=1).
+    Off by default: the phone leg is half-duplex unless opted in."""
+    return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
 
 
 async def _telnyx_cmd(client: httpx.AsyncClient, cid: str, command: str, payload: dict) -> bool:
@@ -89,7 +96,9 @@ class PhoneCall:
         self.call_id = call_id
         self.session_id = f"phone-{call_id[:24]}"
         self.endpointer = UtteranceEndpointer()
+        self.barge = BargeInDetector()
         self.speaking = False
+        self.interrupted = False
         self.closed = False
         self._turn_task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=120.0)
@@ -103,14 +112,46 @@ class PhoneCall:
     # ── Inbound audio ────────────────────────────────────────────
 
     def feed_media(self, payload_b64: str) -> None:
-        if self.speaking or self.closed:
-            return  # half-duplex: the agent has the floor
-        if self._turn_task and not self._turn_task.done():
-            return  # a turn is already being processed
+        if self.closed:
+            return
         pcm = ulaw_decode(base64.b64decode(payload_b64))
+
+        if self.speaking:
+            # Barge-in (NANO_CLAW_PHONE_BARGE_IN=1): listen for the caller
+            # talking over us; otherwise stay half-duplex.
+            if barge_in_enabled() and self.barge.feed(pcm):
+                self._interrupt()
+            return
+
+        # While a turn is still thinking (STT/LLM), ignore audio — unless we
+        # just interrupted, in which case the caller's speech IS the new turn.
+        if self._turn_task and not self._turn_task.done() and not self.interrupted:
+            return
+
         utterance = self.endpointer.feed(pcm)
         if utterance:
+            if self._turn_task and not self._turn_task.done():
+                self._turn_task.cancel()  # interrupted turn still unwinding
+            self.interrupted = False
             self._turn_task = asyncio.create_task(self._run_turn(utterance))
+
+    def _interrupt(self) -> None:
+        """Caller talked over the agent: flush Telnyx's audio buffer, stop
+        speaking, and turn the interruption itself into the next utterance."""
+        log.info("[phone %s] barge-in — caller interrupted", self.call_id[:8])
+        self.interrupted = True
+        self.speaking = False  # speak() loop sees this and aborts
+        frames = self.barge.take_frames()
+        self.endpointer.prime(frames)
+        # Telnyx buffers outbound media ahead of playback; without a clear
+        # the caller keeps hearing the old answer for seconds after we stop.
+        asyncio.create_task(self._send_clear())
+
+    async def _send_clear(self) -> None:
+        try:
+            await self.ws.send_json({"event": "clear"})
+        except Exception:
+            log.exception("[phone %s] clear failed", self.call_id[:8])
 
     # ── One conversational turn ──────────────────────────────────
 
@@ -165,6 +206,7 @@ class PhoneCall:
         if self.closed or not text:
             return
         self.speaking = True
+        self.barge.reset()
         voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
         loop = asyncio.get_running_loop()
         chunker = TextChunker()
@@ -174,11 +216,11 @@ class PhoneCall:
             sentences.append(tail)
         try:
             for sentence in sentences:
-                if self.closed:
-                    return
+                if self.closed or not self.speaking:
+                    return  # hung up or barged in
                 pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, 1.0)
                 for frame in pcm48k_to_ulaw_frames(pcm48k):
-                    if self.closed:
+                    if self.closed or not self.speaking:
                         return
                     await self.ws.send_json(
                         {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
@@ -190,7 +232,9 @@ class PhoneCall:
             log.exception("[phone %s] speak failed", self.call_id[:8])
         finally:
             self.speaking = False
-            self.endpointer.reset()  # drop anything "heard" while talking
+            if not self.interrupted:
+                self.endpointer.reset()  # drop anything "heard" while talking
+            # else: the endpointer was primed with the interruption — keep it
 
 
 # ── HTTP handlers ────────────────────────────────────────────────
