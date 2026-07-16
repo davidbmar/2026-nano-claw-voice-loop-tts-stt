@@ -63,6 +63,8 @@ export class AgentLoop {
    */
   private registerBuiltInTools(config: Config): void {
     const toolsConfig = config.tools;
+    // Knowledge-only mode: see NANO_CLAW_DISABLE_TOOLS / tools.enabled
+    if (toolsConfig?.enabled === false) return;
 
     this.toolRegistry.register(
       new ShellTool(

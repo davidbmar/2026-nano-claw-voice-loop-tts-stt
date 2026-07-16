@@ -120,6 +120,9 @@ export function __setProviderManagerForTest(pm: unknown): void {
 function createToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   const toolsConfig = config.tools;
+  // Knowledge-only mode: no tools registered → no tools offered to the LLM,
+  // no approval pauses; the agent answers purely from persona + knowledge.
+  if (toolsConfig?.enabled === false) return registry;
   registry.register(
     new ShellTool(
       toolsConfig?.restrictToWorkspace,

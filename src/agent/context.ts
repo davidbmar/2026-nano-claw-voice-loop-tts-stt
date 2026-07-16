@@ -86,6 +86,14 @@ export class ContextBuilder {
         parts.push(`- **${tool.function.name}**: ${tool.function.description}`);
       }
       parts.push('');
+    } else {
+      // Knowledge-only mode: the base persona may mention tools — override
+      // that so the model never promises actions it cannot take.
+      parts.push(
+        '\nNo tools are available in this session. Answer directly from this ' +
+          'prompt and the conversation; never say you will run, check, or look ' +
+          'something up with a tool.'
+      );
     }
 
     return parts.join('\n');

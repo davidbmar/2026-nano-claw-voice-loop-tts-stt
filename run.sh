@@ -169,6 +169,7 @@ docker run -it --rm \
   -e NANO_CLAW_BARGE_IN \
   -e NANO_CLAW_STREAM \
   -e NANO_CLAW_KNOWLEDGE \
+  -e NANO_CLAW_DISABLE_TOOLS \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
