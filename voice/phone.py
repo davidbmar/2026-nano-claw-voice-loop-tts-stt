@@ -43,9 +43,11 @@ from aiohttp import web
 from voice import metrics_db
 from voice.phone_audio import (
     FRAME_MS,
+    TELNYX_RATE,
     BargeInDetector,
     UtteranceEndpointer,
     pcm48k_to_ulaw_frames,
+    transcript_looks_incomplete,
     ulaw_decode,
 )
 from voice.text_chunker import TextChunker
@@ -89,6 +91,15 @@ def barge_in_enabled() -> bool:
     return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
 
 
+def dynamic_endpoint_enabled() -> bool:
+    """Two-stage endpointing (NANO_CLAW_PHONE_DYNAMIC_ENDPOINT=1): endpoint
+    on a short pause, but if the transcript ends mid-thought ('...tell me
+    about'), keep listening and merge the continuation instead of answering
+    the fragment. Emulates the semantic half of LiveKit-style turn detection
+    with a deterministic tail check."""
+    return _cfg("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT") in ("1", "true", "yes")
+
+
 async def _telnyx_cmd(client: httpx.AsyncClient, cid: str, command: str, payload: dict) -> bool:
     """POST a Call Control command; never raises (a webhook must always 200)."""
     try:
@@ -113,7 +124,15 @@ class PhoneCall:
         self.ws = ws
         self.call_id = call_id
         self.session_id = f"phone-{call_id[:24]}"
-        self.endpointer = UtteranceEndpointer()
+        # Dynamic mode endpoints fast (450 ms) because the semantic tail
+        # check can rescue fragments; fixed mode keeps the safer 700 ms.
+        self.dynamic = dynamic_endpoint_enabled()
+        self.endpointer = UtteranceEndpointer(
+            end_silence_ms=450 if self.dynamic else 700
+        )
+        self._tail_extensions = 0
+        self._primed_len = 0
+        self._primed_text = ""
         self.barge = BargeInDetector()
         self.speaking = False
         self.interrupted = False
@@ -212,9 +231,42 @@ class PhoneCall:
 
     async def _run_turn(self, pcm8k: bytes) -> None:
         try:
-            text = await self._transcribe(pcm8k)
+            # If we extended the window and the caller stayed quiet (<600 ms
+            # of new audio), don't re-transcribe near-identical audio — they
+            # trailed off; answer what we already heard.
+            new_audio_bytes = len(pcm8k) - self._primed_len
+            if self._tail_extensions and new_audio_bytes < int(TELNYX_RATE * 2 * 0.6):
+                text = self._primed_text
+                self._tail_extensions = 2  # no further extensions
+            else:
+                text = await self._transcribe(pcm8k)
             if not text.strip():
+                self._tail_extensions = 0
                 return
+            # Semantic tail check: a transcript ending mid-thought means the
+            # short pause was a breath, not a turn end. Re-prime the
+            # endpointer with the same audio and keep listening; the next
+            # endpoint re-transcribes the MERGED utterance. Bounded to 2
+            # extensions so a trailing-off caller still gets an answer.
+            if (
+                self.dynamic
+                and self._tail_extensions < 2
+                and transcript_looks_incomplete(text)
+            ):
+                self._tail_extensions += 1
+                self._primed_len = len(pcm8k)
+                self._primed_text = text
+                log.info(
+                    "[phone %s] tail-incomplete (%r…) — extending listen window (%d)",
+                    self.call_id[:8], text[-30:], self._tail_extensions,
+                )
+                pcm = np.frombuffer(pcm8k, dtype=np.int16)
+                frame = TELNYX_RATE * FRAME_MS // 1000
+                self.endpointer.prime(
+                    [pcm[i : i + frame] for i in range(0, len(pcm), frame)]
+                )
+                return
+            self._tail_extensions = 0
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
             await self._stream_reply(text)

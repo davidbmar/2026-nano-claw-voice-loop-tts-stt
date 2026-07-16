@@ -188,6 +188,48 @@ class UtteranceEndpointer:
         return np.concatenate(frames).astype(np.int16).tobytes()
 
 
+# Words that end an utterance only when the speaker isn't done: prepositions,
+# conjunctions, articles, fillers, and dangling verbs. Derived from riff's
+# observed fragmented turns ("...like tell me about", "What is the next",
+# "...hear about, um,") — a transcript ending here means "keep listening".
+_INCOMPLETE_TAIL_WORDS = {
+    # prepositions / particles
+    "about", "with", "for", "of", "to", "in", "on", "at", "by", "from",
+    "into", "onto", "over", "under", "between", "through", "during",
+    # conjunctions / connectors
+    "and", "or", "but", "so", "because", "if", "when", "while", "than",
+    "that", "which", "whose", "where",
+    # articles / determiners / possessives
+    "the", "a", "an", "my", "your", "our", "their", "his", "her", "its",
+    "this", "these", "those", "some", "any", "every", "each",
+    # fillers / hesitations
+    "um", "uh", "umm", "uhh", "er", "ah", "hmm", "like", "you know",
+    # dangling verbs / auxiliaries
+    "is", "are", "was", "were", "be", "being", "have", "has", "had",
+    "do", "does", "did", "can", "could", "will", "would", "should",
+    "want", "need", "gonna", "wanna", "let", "tell", "give", "show",
+    # dangling adjectives/ordinals before an elided noun ("the next…")
+    "next", "last", "latest", "first", "second", "other", "another",
+    "more", "most", "best", "new",
+}
+
+
+def transcript_looks_incomplete(text: str) -> bool:
+    """Semantic tail check: does this transcript end mid-thought?
+
+    The cheap, license-free half of turn detection: acoustics miss callers
+    who trail off with 'finished' prosody, but a sentence ending in a
+    preposition/article/filler is incomplete no matter how it sounded.
+    """
+    cleaned = text.strip().rstrip(".!?").strip()
+    if not cleaned:
+        return False
+    if cleaned.endswith(",") or cleaned.endswith("-") or cleaned.endswith("…"):
+        return True
+    last = cleaned.split()[-1].lower().strip(",;:")
+    return last in _INCOMPLETE_TAIL_WORDS
+
+
 class BargeInDetector:
     """Detects sustained caller speech while the agent is talking.
 

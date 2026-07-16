@@ -6,6 +6,7 @@ from voice.phone_audio import (
     UtteranceEndpointer,
     pcm48k_to_ulaw_frames,
     resample_48k_to_8k,
+    transcript_looks_incomplete,
     ulaw_decode,
     ulaw_encode,
 )
@@ -95,6 +96,36 @@ class TestUtteranceEndpointer:
         utterances = self.feed_all(ep, silence(900))
         assert len(utterances) == 1
         assert len(utterances[0]) >= 8000 * 2 * 0.3  # contains the primed speech
+
+
+class TestTranscriptTailCheck:
+    def test_riff_observed_fragments_are_incomplete(self):
+        # These exact fragments came out of riff's live call logs.
+        for frag in (
+            "tell me some other interesting things about space channel like tell me about",
+            "What is the next",
+            "I would like to hear about, um,",
+            "Tell me about the",
+            "I want to",
+            "and stock news and",
+        ):
+            assert transcript_looks_incomplete(frag), frag
+
+    def test_complete_utterances_pass(self):
+        for text in (
+            "Hi, can you tell me about the latest launches?",
+            "What is the next rocket launch?",
+            "Mars",
+            "Yes.",
+            "No thanks, goodbye.",
+            "Tell me about the U F O cases.",
+        ):
+            assert not transcript_looks_incomplete(text), text
+
+    def test_trailing_comma_and_empty(self):
+        assert transcript_looks_incomplete("So I was thinking,")
+        assert not transcript_looks_incomplete("")
+        assert not transcript_looks_incomplete("   ")
 
 
 class TestBargeInDetector:
