@@ -317,6 +317,14 @@ function showDebugDetail(info) {
             desc: "Prompt + completion. This determines API cost.",
         },
         {
+            key: "Cache read/write",
+            value: info.tokenUsage && (info.tokenUsage.cacheRead || info.tokenUsage.cacheWrite)
+                ? (info.tokenUsage.cacheRead || 0) + "/" + (info.tokenUsage.cacheWrite || 0)
+                : "—",
+            cls: "tok",
+            desc: "Prompt tokens served from / written to the provider's prompt cache. A large read count means the stable prefix (persona + site knowledge) was cached — those tokens cost ~10% and skip prefill.",
+        },
+        {
             key: "Duration",
             value: info.durationMs + " ms",
             cls: "dur",
