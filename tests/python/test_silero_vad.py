@@ -30,19 +30,19 @@ def test_prob_is_bounded_and_stateful():
 def test_rebuffering_needs_full_chunk():
     if not silero_vad.available():
         pytest.skip("model unavailable")
-    # Default path upsamples 8k→16k: a 160-sample frame becomes 320; the
-    # 16k chunk is 512, so one frame buffers and two frames run one chunk.
-    vad = silero_vad.SileroVAD()
-    vad.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
-    assert len(vad._buf) == 2 * FRAME_SAMPLES
-    vad.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
-    assert len(vad._buf) == 4 * FRAME_SAMPLES - 512
-    # Raw 8k path keeps the 256-sample chunk
-    raw = silero_vad.SileroVAD(upsample_phone_audio=False)
+    # Default = raw 8k path (upsample is opt-in and currently broken):
+    # 160-sample frames vs the 256-sample chunk.
+    raw = silero_vad.SileroVAD()
     raw.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
     assert len(raw._buf) == FRAME_SAMPLES
     raw.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
     assert len(raw._buf) == 2 * FRAME_SAMPLES - silero_vad.CHUNK_8K
+    # Opt-in upsample path: 160 → 320 samples at 16k against a 512 chunk
+    up = silero_vad.SileroVAD(upsample_phone_audio=True)
+    up.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
+    assert len(up._buf) == 2 * FRAME_SAMPLES
+    up.feed(np.zeros(FRAME_SAMPLES, dtype=np.int16))
+    assert len(up._buf) == 4 * FRAME_SAMPLES - 512
 
 
 def test_endpointer_honors_external_speech_flag():
