@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.phone-node</string>
+    <!-- Critical: without this, launchd kills the whole process group when
+         the --ensure script exits, reaping the nohup'd cloudflared and
+         run.sh children it just started. Riff's phone-node hit the same. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/davidmar/src/nano-claw/scripts/phone-node-start.sh</string>
+        <string>--ensure</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/nano-claw-phone-node/launchagent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/nano-claw-phone-node/launchagent.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

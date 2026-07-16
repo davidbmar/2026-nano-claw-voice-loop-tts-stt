@@ -25,20 +25,27 @@ if [ -n "$OLD" ]; then
   docker rm -f $OLD
 fi
 
-# Remove old image
-if docker image inspect nano-claw-voice >/dev/null 2>&1; then
-  echo "Removing old image..."
-  docker rmi nano-claw-voice
+# Fast path for supervisors (launchd watchdog): reuse the existing image
+# instead of a minutes-long --no-cache rebuild. Only skips when the image
+# actually exists; a fresh machine still builds.
+if [ "${NANO_CLAW_SKIP_BUILD:-}" = "1" ] && docker image inspect nano-claw-voice >/dev/null 2>&1; then
+  echo "=== Reusing existing image (NANO_CLAW_SKIP_BUILD=1) ==="
+else
+  # Remove old image
+  if docker image inspect nano-claw-voice >/dev/null 2>&1; then
+    echo "Removing old image..."
+    docker rmi nano-claw-voice
+  fi
+
+  # Prune dangling images/layers from previous builds
+  echo "Pruning dangling images..."
+  docker image prune -f
+  echo ""
+
+  # Build
+  echo "=== Building ==="
+  docker build --no-cache -t nano-claw-voice .
 fi
-
-# Prune dangling images/layers from previous builds
-echo "Pruning dangling images..."
-docker image prune -f
-echo ""
-
-# Build
-echo "=== Building ==="
-docker build --no-cache -t nano-claw-voice .
 
 echo ""
 echo "=== Disk Space After Build ==="
@@ -158,7 +165,13 @@ fi
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
-docker run -it --rm \
+# -it only when attached to a real terminal, so run.sh also works headless
+# (e.g. launched by an agent or launchd).
+TTY_FLAGS=""
+if [ -t 0 ]; then
+  TTY_FLAGS="-it"
+fi
+docker run $TTY_FLAGS --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e GEMINI_API_KEY \
