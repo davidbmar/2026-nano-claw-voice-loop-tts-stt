@@ -37,12 +37,24 @@ tunnel_up()    { pgrep -f "$TUNNEL_CONFIG" >/dev/null 2>&1; }
 
 stack_healthy() { container_up && voice_up && stt_up && tts_up; }
 
+first_boot() {
+  # No image or no service venvs yet: run.sh is doing a from-scratch build
+  # (docker build + torch installs + model downloads) that can take many
+  # minutes. Without the longer grace the watchdog would kill and restart
+  # the build every cycle, forever.
+  ! docker image inspect nano-claw-voice >/dev/null 2>&1 \
+    || [ ! -d "$ROOT/stt-service/.venv" ] \
+    || [ ! -d "$ROOT/tts-service/.venv" ]
+}
+
 stack_booting() {
   [ -f "$STARTED_AT_FILE" ] || return 1
-  local started now
+  local started now grace
   started=$(cat "$STARTED_AT_FILE" 2>/dev/null || echo 0)
   now=$(date +%s)
-  [ $((now - started)) -lt "$BOOT_GRACE_S" ] && pgrep -f "bash $ROOT/run.sh" >/dev/null 2>&1
+  grace="$BOOT_GRACE_S"
+  first_boot && grace=1200
+  [ $((now - started)) -lt "$grace" ] && pgrep -f "bash $ROOT/run.sh" >/dev/null 2>&1
 }
 
 status() {
