@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.refresh-spacechannel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/davidmar/src/nano-claw/scripts/refresh_site.sh</string>
+        <string>spacechannel</string>
+    </array>
+    <!-- 2:00 AM and 2:00 PM daily. refresh_site.sh is fail-loud: a broken
+         crawl exits nonzero and never replaces the last good knowledge.md.
+         The running voice server hot-reloads the digest on mtime change. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>2</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>14</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/tmp/nano-claw-phone-node/refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/nano-claw-phone-node/refresh.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
