@@ -14,6 +14,7 @@ import { AgentConfig, ToolCall, StreamEvent, LLMResponse } from '../types';
 import { ProviderManager } from '../providers/index';
 import { Memory } from '../agent/memory';
 import { ContextBuilder } from '../agent/context';
+import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
 import { ToolRegistry } from '../agent/tools/registry';
 import { ShellTool } from '../agent/tools/shell';
@@ -137,6 +138,7 @@ export function getAgentConfig(modelOverride?: string): AgentConfig {
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     systemPrompt: config.agents?.defaults?.systemPrompt,
+    knowledgeFiles: resolveKnowledgeFiles(config),
   };
 }
 

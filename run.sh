@@ -136,6 +136,18 @@ trap cleanup EXIT
 echo "=== Starting container ==="
 echo "Open http://localhost:9090 in your browser"
 echo ""
+# Site knowledge (scripts/crawl_site.py + scripts/build_knowledge.py):
+# auto-load every data/*/knowledge.md unless NANO_CLAW_KNOWLEDGE is already
+# set in .env. Host data/ is mounted read-only at /app/sites (the /app/data
+# named volume holds runtime state and stays untouched).
+if [ -z "${NANO_CLAW_KNOWLEDGE:-}" ]; then
+  NANO_CLAW_KNOWLEDGE=$(ls data/*/knowledge.md 2>/dev/null \
+    | sed 's|^data/|/app/sites/|' | paste -sd, -)
+  export NANO_CLAW_KNOWLEDGE
+fi
+if [ -n "$NANO_CLAW_KNOWLEDGE" ]; then
+  echo "Knowledge: $NANO_CLAW_KNOWLEDGE"
+fi
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
@@ -149,8 +161,10 @@ docker run -it --rm \
   -e OPENAI_API_KEY \
   -e NANO_CLAW_BARGE_IN \
   -e NANO_CLAW_STREAM \
+  -e NANO_CLAW_KNOWLEDGE \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
   -v nano-claw-data:/app/data \
+  -v "$(pwd)/data":/app/sites:ro \
   nano-claw-voice
