@@ -1,4 +1,4 @@
-import { Message, Skill, ToolDefinition, AgentConfig } from '../types';
+import { Message, Skill, ToolDefinition, AgentConfig, SYSTEM_CACHE_MARKER } from '../types';
 import { formatDate } from '../utils/helpers';
 import { loadKnowledge } from './knowledge';
 
@@ -53,6 +53,11 @@ export class ContextBuilder {
         );
       }
     }
+
+    // Everything above this marker (persona + knowledge) is stable across
+    // turns; cache-capable providers mark it as a cacheable prefix, others
+    // strip the marker. The timestamp and anything below churn per turn.
+    parts.push(SYSTEM_CACHE_MARKER);
 
     // Add current time (minute precision — finer would churn the cacheable
     // prompt prefix every turn for no benefit)

@@ -30,7 +30,13 @@ interface DebugInfo {
   iteration: number;
   messageCount: number;
   model: string;
-  tokenUsage?: { prompt: number; completion: number; total: number };
+  tokenUsage?: {
+    prompt: number;
+    completion: number;
+    total: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
   durationMs: number;
   firstTokenMs?: number;
   finishReason?: string;
@@ -186,7 +192,13 @@ async function stepLoop(
       messageCount,
       model: agentConfig.model,
       tokenUsage: response.usage
-        ? { prompt: response.usage.promptTokens, completion: response.usage.completionTokens, total: response.usage.totalTokens }
+        ? {
+            prompt: response.usage.promptTokens,
+            completion: response.usage.completionTokens,
+            total: response.usage.totalTokens,
+            cacheRead: response.usage.cacheReadTokens,
+            cacheWrite: response.usage.cacheWriteTokens,
+          }
         : undefined,
       durationMs,
       finishReason: response.finishReason,
@@ -291,7 +303,13 @@ export async function* stepLoopStream(
       messageCount,
       model: agentConfig.model,
       tokenUsage: usage
-        ? { prompt: usage.promptTokens, completion: usage.completionTokens, total: usage.totalTokens }
+        ? {
+            prompt: usage.promptTokens,
+            completion: usage.completionTokens,
+            total: usage.totalTokens,
+            cacheRead: usage.cacheReadTokens,
+            cacheWrite: usage.cacheWriteTokens,
+          }
         : undefined,
       durationMs: Date.now() - startTime,
       firstTokenMs: firstTokenAt !== undefined ? firstTokenAt - startTime : undefined,

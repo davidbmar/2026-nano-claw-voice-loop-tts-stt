@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import type { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
-import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent } from '../types';
+import { Message, LLMResponse, ToolDefinition, ToolCall, StreamEvent, SYSTEM_CACHE_MARKER } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { PROVIDERS } from './registry';
@@ -33,11 +33,41 @@ export async function* readSSEFrames(
   buffer += decoder.end();
 }
 
+/** Remove the cache marker for providers that don't support prompt caching. */
+export function stripCacheMarker(content: string): string {
+  return content.split(SYSTEM_CACHE_MARKER).join('\n');
+}
+
+/**
+ * Build the Anthropic `system` param: when the ContextBuilder's cache marker
+ * is present, split there and mark the stable prefix (persona + knowledge)
+ * with an ephemeral cache_control breakpoint — the prompt cache then covers
+ * tools + that prefix, so a ~10k-token knowledge digest isn't full-price
+ * prefill on every voice turn. Below Anthropic's per-model cache minimum the
+ * breakpoint is simply ignored; no fallback needed.
+ */
+export function anthropicSystemParam(
+  systemMessage: string
+): string | Array<Record<string, unknown>> {
+  const idx = systemMessage.indexOf(SYSTEM_CACHE_MARKER);
+  if (idx === -1) return systemMessage;
+  const stable = systemMessage.slice(0, idx).trim();
+  const volatile = systemMessage.slice(idx + SYSTEM_CACHE_MARKER.length).trim();
+  if (!stable) return volatile;
+  const blocks: Array<Record<string, unknown>> = [
+    { type: 'text', text: stable, cache_control: { type: 'ephemeral' } },
+  ];
+  if (volatile) blocks.push({ type: 'text', text: volatile });
+  return blocks;
+}
+
 /**
  * Parse Anthropic /messages streaming events into StreamEvents.
  */
 export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<StreamEvent> {
   let promptTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let completionTokens = 0;
   let finishReason: string | undefined;
   // tool_use accumulation, keyed by content block index
@@ -54,6 +84,8 @@ export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<St
     switch (evt.type) {
       case 'message_start':
         promptTokens = evt.message?.usage?.input_tokens ?? 0;
+        cacheReadTokens = evt.message?.usage?.cache_read_input_tokens ?? 0;
+        cacheWriteTokens = evt.message?.usage?.cache_creation_input_tokens ?? 0;
         break;
       case 'content_block_start':
         if (evt.content_block?.type === 'tool_use') {
@@ -89,7 +121,13 @@ export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<St
   yield {
     type: 'done',
     finishReason,
-    usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+    usage: {
+      promptTokens,
+      completionTokens,
+      totalTokens: promptTokens + completionTokens,
+      ...(cacheReadTokens > 0 && { cacheReadTokens }),
+      ...(cacheWriteTokens > 0 && { cacheWriteTokens }),
+    },
   };
 }
 
@@ -220,7 +258,7 @@ export class OpenRouterProvider extends BaseProvider {
         model: this.formatModelName(model),
         messages: messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          content: m.role === 'system' ? stripCacheMarker(m.content) : m.content,
           ...(m.name && { name: m.name }),
           ...(m.tool_calls && { tool_calls: m.tool_calls }),
           ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
@@ -367,7 +405,7 @@ export class AnthropicProvider extends BaseProvider {
       };
 
       if (systemMessage) {
-        requestData.system = systemMessage;
+        requestData.system = anthropicSystemParam(systemMessage);
       }
 
       if (tools && tools.length > 0) {
@@ -415,6 +453,12 @@ export class AnthropicProvider extends BaseProvider {
               promptTokens: response.data.usage.input_tokens,
               completionTokens: response.data.usage.output_tokens,
               totalTokens: response.data.usage.input_tokens + response.data.usage.output_tokens,
+              ...(response.data.usage.cache_read_input_tokens > 0 && {
+                cacheReadTokens: response.data.usage.cache_read_input_tokens,
+              }),
+              ...(response.data.usage.cache_creation_input_tokens > 0 && {
+                cacheWriteTokens: response.data.usage.cache_creation_input_tokens,
+              }),
             }
           : undefined,
       };
@@ -447,7 +491,7 @@ export class AnthropicProvider extends BaseProvider {
       max_tokens: maxTokens,
       stream: true,
     };
-    if (systemMessage) requestData.system = systemMessage;
+    if (systemMessage) requestData.system = anthropicSystemParam(systemMessage);
     if (tools && tools.length > 0) {
       requestData.tools = tools.map((t) => ({
         name: t.function.name,
@@ -507,7 +551,7 @@ export class OpenAIProvider extends BaseProvider {
         model: this.formatModelName(model),
         messages: messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          content: m.role === 'system' ? stripCacheMarker(m.content) : m.content,
           ...(m.name && { name: m.name }),
           ...(m.tool_calls && { tool_calls: m.tool_calls }),
           ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
@@ -554,7 +598,7 @@ export class OpenAIProvider extends BaseProvider {
     const requestData: Record<string, unknown> = {
       model: this.formatModelName(model),
       messages: messages.map((m) => ({
-        role: m.role, content: m.content,
+        role: m.role, content: m.role === 'system' ? stripCacheMarker(m.content) : m.content,
         ...(m.name && { name: m.name }),
         ...(m.tool_calls && { tool_calls: m.tool_calls }),
         ...(m.tool_call_id && { tool_call_id: m.tool_call_id }),
