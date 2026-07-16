@@ -17,7 +17,11 @@ Enabled only when NANO_CLAW_PHONE=1. Required env:
                                     token-in-URL is the auth boundary)
 Optional:
     NANO_CLAW_PHONE_GREETING        spoken on answer
-    NANO_CLAW_PHONE_VOICE           TTS voice id (default af_heart)
+    NANO_CLAW_PHONE_VOICE           TTS voice id (default af_heart; use a
+                                    Piper voice on nodes where Kokoro/MPS
+                                    is slow or unstable)
+    NANO_CLAW_PHONE_STT_SIZE        Whisper size for phone turns (default
+                                    base; "tiny" for low-powered nodes)
     NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
                                     mid-speech (buffer-flush via Telnyx
                                     "clear"); unset = half-duplex
@@ -182,7 +186,8 @@ class PhoneCall:
             headers={
                 "Content-Type": "application/octet-stream",
                 "X-Sample-Rate": "8000",
-                "X-Model-Size": "base",
+                # Lower-powered nodes (M1 failover) run "tiny" for speed.
+                "X-Model-Size": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
             },
         )
         return resp.json().get("text", "")
