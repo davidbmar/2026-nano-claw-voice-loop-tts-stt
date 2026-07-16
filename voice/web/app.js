@@ -19,6 +19,34 @@ const speedSlider = document.getElementById("speed-slider");
 const speedValue = document.getElementById("speed-value");
 const modelSelect = document.getElementById("model-select");
 const sttSelect = document.getElementById("stt-select");
+const vadSelect = document.getElementById("vad-select");
+
+// VAD dropdown (phone line): mirrors the STT/LLM/Voice pipeline selectors.
+// Applies to NEW phone calls; served by GET/POST /api/phone/vad.
+fetch("/api/phone/vad").then(function (r) { return r.json(); }).then(function (v) {
+    v.options.forEach(function (mode) {
+        var o = document.createElement("option");
+        o.value = mode;
+        o.textContent = mode === "silero"
+            ? "silero (neural)" + (v.silero_available ? "" : " — unavailable")
+            : "energy (threshold)";
+        o.disabled = mode === "silero" && !v.silero_available;
+        vadSelect.appendChild(o);
+    });
+    vadSelect.value = v.active;
+}).catch(function () {
+    var o = document.createElement("option");
+    o.textContent = "n/a (phone disabled)";
+    vadSelect.appendChild(o);
+    vadSelect.disabled = true;
+});
+vadSelect.addEventListener("change", function () {
+    fetch("/api/phone/vad", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: vadSelect.value }),
+    });
+});
 const settingsBtn = document.getElementById("settings-btn");
 const pipelinePanel = document.getElementById("pipeline-panel");
 

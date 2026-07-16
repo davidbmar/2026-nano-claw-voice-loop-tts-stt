@@ -40,7 +40,7 @@ import httpx
 import numpy as np
 from aiohttp import web
 
-from voice import metrics_db
+from voice import metrics_db, silero_vad
 from voice.phone_audio import (
     FRAME_MS,
     TELNYX_RATE,
@@ -91,6 +91,32 @@ def barge_in_enabled() -> bool:
     return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
 
 
+VAD_MODES = ("energy", "silero")
+_vad_mode: str | None = None  # resolved lazily; runtime-switchable via /api/phone/vad
+
+
+def get_vad_mode() -> str:
+    """Active VAD for NEW calls: runtime selection > env > energy default.
+    Falls back to energy loudly if silero is selected but unavailable."""
+    global _vad_mode
+    if _vad_mode is None:
+        want = _cfg("NANO_CLAW_PHONE_VAD", "energy").lower()
+        _vad_mode = want if want in VAD_MODES else "energy"
+    if _vad_mode == "silero" and not silero_vad.available():
+        log.error("[phone] silero VAD selected but unavailable — using energy")
+        return "energy"
+    return _vad_mode
+
+
+def set_vad_mode(mode: str) -> bool:
+    global _vad_mode
+    if mode not in VAD_MODES:
+        return False
+    _vad_mode = mode
+    log.info("[phone] VAD switched to %s (applies to new calls)", mode)
+    return True
+
+
 def dynamic_endpoint_enabled() -> bool:
     """Two-stage endpointing (NANO_CLAW_PHONE_DYNAMIC_ENDPOINT=1): endpoint
     on a short pause, but if the transcript ends mid-thought ('...tell me
@@ -134,6 +160,10 @@ class PhoneCall:
         self._primed_len = 0
         self._primed_text = ""
         self.barge = BargeInDetector()
+        # Neural VAD (one streaming instance per call; None = energy mode)
+        self.vad_mode = get_vad_mode()
+        self.vad = silero_vad.SileroVAD() if self.vad_mode == "silero" else None
+        log.info("[phone %s] VAD: %s", call_id[:8], self.vad_mode)
         self.speaking = False
         self.interrupted = False
         self.closed = False
@@ -187,11 +217,14 @@ class PhoneCall:
         if self.closed:
             return
         pcm = ulaw_decode(base64.b64decode(payload_b64))
+        # Feed the neural VAD continuously (its recurrent state needs every
+        # frame); both detectors then share one speech decision per frame.
+        is_speech = self.vad.feed(pcm) >= 0.5 if self.vad else None
 
         if self.speaking:
             # Barge-in (NANO_CLAW_PHONE_BARGE_IN=1): listen for the caller
             # talking over us; otherwise stay half-duplex.
-            if barge_in_enabled() and self.barge.feed(pcm):
+            if barge_in_enabled() and self.barge.feed(pcm, is_speech=is_speech):
                 self._interrupt()
             return
 
@@ -200,7 +233,7 @@ class PhoneCall:
         if self._turn_task and not self._turn_task.done() and not self.interrupted:
             return
 
-        utterance = self.endpointer.feed(pcm)
+        utterance = self.endpointer.feed(pcm, is_speech=is_speech)
         if utterance:
             self._mark_activity()
             if self._turn_task and not self._turn_task.done():
@@ -520,11 +553,35 @@ async def calls_handler(request: web.Request) -> web.Response:
     try:
         conn = metrics_db.connect()
     except Exception:
-        return web.json_response({"node": _node(), "calls": [], "error": "db unavailable"})
+        return web.json_response(
+            {"node": _node(), "vad": get_vad_mode(), "calls": [], "error": "db unavailable"}
+        )
     try:
-        return web.json_response({"node": _node(), "calls": metrics_db.recent_calls(conn)})
+        return web.json_response(
+            {"node": _node(), "vad": get_vad_mode(), "calls": metrics_db.recent_calls(conn)}
+        )
     finally:
         conn.close()
+
+
+async def vad_get_handler(request: web.Request) -> web.Response:
+    """Pipeline-settings surface: which VAD is active, what's selectable."""
+    return web.json_response({
+        "active": get_vad_mode(),
+        "options": list(VAD_MODES),
+        "silero_available": silero_vad.available(),
+    })
+
+
+async def vad_set_handler(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.Response(status=400, text="bad json")
+    mode = str(body.get("mode", "")).lower()
+    if not set_vad_mode(mode):
+        return web.Response(status=400, text=f"unknown mode: {mode}")
+    return web.json_response({"active": get_vad_mode()})
 
 
 def register_phone_routes(app: web.Application) -> None:
@@ -544,5 +601,7 @@ def register_phone_routes(app: web.Application) -> None:
     app.router.add_post("/api/phone/incoming", incoming_handler)
     app.router.add_get("/ws/phone-media", media_ws_handler)
     app.router.add_get("/api/calls", calls_handler)
-    log.info("[phone] Telnyx gateway registered (webhook base: %s)",
-             _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE"))
+    app.router.add_get("/api/phone/vad", vad_get_handler)
+    app.router.add_post("/api/phone/vad", vad_set_handler)
+    log.info("[phone] Telnyx gateway registered (webhook base: %s, VAD: %s)",
+             _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE"), get_vad_mode())

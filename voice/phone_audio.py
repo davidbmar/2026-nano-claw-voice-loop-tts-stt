@@ -147,11 +147,16 @@ class UtteranceEndpointer:
         self._speech_ms = sum(len(f) for f in frames) * 1000 // TELNYX_RATE
         self._silence_ms = 0
 
-    def feed(self, frame: np.ndarray) -> bytes | None:
-        """Consume one PCM16 frame (any length ≥ 1 sample at 8 kHz)."""
+    def feed(self, frame: np.ndarray, is_speech: bool | None = None) -> bytes | None:
+        """Consume one PCM16 frame (any length ≥ 1 sample at 8 kHz).
+
+        is_speech: externally-decided speech flag (e.g. Silero VAD). When
+        None, falls back to the internal RMS threshold (energy mode).
+        """
         frame_ms = len(frame) * 1000 // TELNYX_RATE
-        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
-        is_speech = rms >= self.rms_threshold
+        if is_speech is None:
+            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
+            is_speech = rms >= self.rms_threshold
 
         if not self._in_utterance:
             # Keep a short preroll so the first syllable isn't clipped.
@@ -253,10 +258,17 @@ class BargeInDetector:
     def reset(self) -> None:
         self._recent: list[tuple[np.ndarray, bool]] = []
 
-    def feed(self, frame: np.ndarray) -> bool:
-        """Returns True when the caller has clearly started talking over us."""
-        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
-        self._recent.append((frame, rms >= self.rms_threshold))
+    def feed(self, frame: np.ndarray, is_speech: bool | None = None) -> bool:
+        """Returns True when the caller has clearly started talking over us.
+
+        is_speech: externally-decided flag (Silero); None = internal RMS.
+        Neural VAD matters most here — TTS echo and line noise cross energy
+        thresholds but don't classify as speech.
+        """
+        if is_speech is None:
+            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
+            is_speech = rms >= self.rms_threshold
+        self._recent.append((frame, is_speech))
         if len(self._recent) > self._window_frames:
             self._recent.pop(0)
         speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // TELNYX_RATE

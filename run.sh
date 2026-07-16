@@ -199,6 +199,7 @@ docker run $TTY_FLAGS --rm \
   -e NANO_CLAW_PHONE_STT_SIZE \
   -e NANO_CLAW_PHONE_BARGE_IN \
   -e NANO_CLAW_PHONE_DYNAMIC_ENDPOINT \
+  -e NANO_CLAW_PHONE_VAD \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
