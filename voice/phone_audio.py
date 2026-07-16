@@ -77,6 +77,22 @@ def _fir_48k_to_8k() -> np.ndarray:
     return _FIR_48K_TO_8K
 
 
+def resample_8k_to_16k(pcm16_8k: np.ndarray) -> np.ndarray:
+    """Upsample 8 kHz PCM16 to 16 kHz by linear interpolation (exactly 2×).
+
+    Adequate for upsampling (no aliasing risk); used to feed 16 kHz models
+    (Whisper-family, smart-turn) from the 8 kHz phone leg.
+    """
+    if len(pcm16_8k) == 0:
+        return np.zeros(0, dtype=np.int16)
+    x = pcm16_8k.astype(np.int32)
+    mid = (x + np.concatenate([x[1:], x[-1:]])) // 2
+    out = np.empty(2 * len(x), dtype=np.int32)
+    out[0::2] = x
+    out[1::2] = mid
+    return out.astype(np.int16)
+
+
 def resample_48k_to_8k(pcm16_48k: np.ndarray) -> np.ndarray:
     """Downsample 48 kHz PCM16 to 8 kHz: FIR lowpass then take every 6th."""
     if len(pcm16_48k) == 0:
