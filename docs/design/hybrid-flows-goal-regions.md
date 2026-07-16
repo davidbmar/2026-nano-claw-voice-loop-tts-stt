@@ -154,6 +154,33 @@ emulated algorithm — no LiveKit adoption, no license risk.
    their published false-cutoff numbers, a LiveKit-transport spike on a test
    number is the next experiment.
 
+## Empirical addendum (overnight bench results)
+
+smart-turn-v3.2 was benched on CPU (`scripts/turn_detection/`): 8–35 ms
+inference, real discrimination on synthetic mid-word cuts (0.34 vs 0.93).
+**But on riff's real archived caller audio it MISSED the marquee fragment**:
+"…space channel like tell me about" scored 0.987 COMPLETE at the exact
+boundary where riff cut the caller off (session `v3:YLa_t`, 16 kHz caller
+track). The caller trailed off with finished-sounding prosody — acoustics
+alone cannot catch this class.
+
+What would catch it is trivial: the transcript ends in a **preposition**.
+Same for the other observed fragments ("What is the next…" — article;
+"…about, um," — filler). Revised substrate recommendation, in order:
+
+1. **Text-tail completeness heuristic** (deterministic, license-free,
+   ~zero cost): utterance transcript ending in preposition / conjunction /
+   article / filler ⇒ treat as incomplete ⇒ extend the endpoint window.
+   Catches every fragment observed in riff's logs.
+2. **Dynamic two-stage endpointing**: short pause (~400 ms) → fast STT →
+   tail heuristic (and optionally smart-turn acoustic score as a second
+   vote) → endpoint now or keep listening (cap ~3 s).
+3. smart-turn-v3 stays useful as the acoustic vote and for barge-in
+   robustness, but is **not sufficient alone** for riff's #1 failure.
+
+This mirrors where the industry actually went — LiveKit's v1 fuses
+semantic + acoustic precisely because neither is enough alone.
+
 ## Open questions (for the morning)
 
 - Extractor cost/latency budget per turn inside regions (a second small LLM
