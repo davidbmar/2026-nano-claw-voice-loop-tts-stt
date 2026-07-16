@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE TABLE IF NOT EXISTS prices (
   model TEXT PRIMARY KEY, input_per_1m REAL, output_per_1m REAL, updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS phone_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id TEXT UNIQUE,
+  caller TEXT, called TEXT, node TEXT,
+  answered_at TEXT, ended_at TEXT,
+  turns INTEGER DEFAULT 0
+);
 """
 
 
@@ -103,6 +110,61 @@ def record_turn(conn, rec: dict) -> None:
         conn.commit()
     except Exception:
         log.exception("metrics record_turn failed")
+
+
+# ── Phone call log (who called, when, which node served) ───────
+# Every writer is best-effort: a telemetry failure must never take a call
+# down. Each node writes its own DB, so calls in the failover node's log
+# ARE the failover record.
+
+
+def record_call_start(conn, call_id: str, caller: str, called: str, node: str) -> None:
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO phone_calls(call_id, caller, called, node, answered_at)"
+            " VALUES(?,?,?,?,datetime('now'))",
+            (call_id, caller, called, node),
+        )
+        conn.commit()
+    except Exception:
+        log.exception("metrics record_call_start failed")
+
+
+def record_call_end(conn, call_id: str) -> None:
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE phone_calls SET ended_at = datetime('now') WHERE call_id = ?",
+            (call_id,),
+        )
+        conn.commit()
+    except Exception:
+        log.exception("metrics record_call_end failed")
+
+
+def bump_call_turns(conn, call_id: str) -> None:
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE phone_calls SET turns = turns + 1 WHERE call_id = ?", (call_id,)
+        )
+        conn.commit()
+    except Exception:
+        log.exception("metrics bump_call_turns failed")
+
+
+def recent_calls(conn, limit: int = 100) -> list[dict]:
+    try:
+        rows = conn.execute(
+            "SELECT * FROM phone_calls ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
 def recent(conn, limit: int = 50) -> list[dict]:

@@ -40,6 +40,7 @@ import httpx
 import numpy as np
 from aiohttp import web
 
+from voice import metrics_db
 from voice.phone_audio import (
     FRAME_MS,
     BargeInDetector,
@@ -171,6 +172,7 @@ class PhoneCall:
                 "[phone %s] agent (%.1fs): %s",
                 self.call_id[:8], time.monotonic() - t0, reply[:120],
             )
+            metrics_db.bump_call_turns(_metrics_conn, self.call_id)
             await self.speak(reply)
         except asyncio.CancelledError:
             raise
@@ -245,6 +247,11 @@ class PhoneCall:
 # ── HTTP handlers ────────────────────────────────────────────────
 
 _answered: dict[str, float] = {}  # call_control_id → answer time (webhook retries dedup)
+_metrics_conn = None  # set in register_phone_routes; every write is best-effort
+
+
+def _node() -> str:
+    return _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE").replace("https://", "").rstrip("/")
 
 
 def _token_ok(request: web.Request) -> bool:
@@ -279,7 +286,11 @@ async def incoming_handler(request: web.Request) -> web.Response:
             base.replace("https://", "wss://", 1)
             + f"/ws/phone-media?token={_cfg('NANO_CLAW_PHONE_TOKEN')}"
         )
-        log.info("[phone] incoming call from %s → answering", payload.get("from", "?"))
+        caller = payload.get("from", "?")
+        log.info("[phone] incoming call from %s → answering", caller)
+        metrics_db.record_call_start(
+            _metrics_conn, cid, caller, payload.get("to", "?"), _node()
+        )
         async with httpx.AsyncClient() as client:
             await _telnyx_cmd(client, cid, "answer", {
                 "command_id": f"answer-{cid}",
@@ -293,6 +304,7 @@ async def incoming_handler(request: web.Request) -> web.Response:
     elif event == "call.hangup":
         log.info("[phone] hangup cid=%s", cid[:16])
         _answered.pop(cid, None)
+        metrics_db.record_call_end(_metrics_conn, cid)
 
     return web.json_response({"ok": True})
 
@@ -332,8 +344,23 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def calls_handler(request: web.Request) -> web.Response:
+    """Recent call log — token-gated: caller numbers are not public data."""
+    if not _token_ok(request):
+        return web.Response(status=403, text="bad token")
+    try:
+        conn = metrics_db.connect()
+    except Exception:
+        return web.json_response({"node": _node(), "calls": [], "error": "db unavailable"})
+    try:
+        return web.json_response({"node": _node(), "calls": metrics_db.recent_calls(conn)})
+    finally:
+        conn.close()
+
+
 def register_phone_routes(app: web.Application) -> None:
     """Attach gateway routes when NANO_CLAW_PHONE=1 (no-op otherwise)."""
+    global _metrics_conn
     if not phone_enabled():
         return
     missing = [
@@ -344,7 +371,9 @@ def register_phone_routes(app: web.Application) -> None:
     if missing:
         log.error("[phone] NANO_CLAW_PHONE=1 but missing env: %s — gateway NOT registered", missing)
         return
+    _metrics_conn = metrics_db.init_db()
     app.router.add_post("/api/phone/incoming", incoming_handler)
     app.router.add_get("/ws/phone-media", media_ws_handler)
+    app.router.add_get("/api/calls", calls_handler)
     log.info("[phone] Telnyx gateway registered (webhook base: %s)",
              _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE"))
