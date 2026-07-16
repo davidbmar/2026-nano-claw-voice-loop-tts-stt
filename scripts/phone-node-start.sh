@@ -18,8 +18,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="/tmp/nano-claw-phone-node"
 DRAIN_FLAG="$LOG_DIR/DRAINED"
 STARTED_AT_FILE="$LOG_DIR/stack-started-at"
-TUNNEL_CONFIG="$HOME/.cloudflared/nano-claw-phone.yml"
-TUNNEL_NAME="nano-claw-phone"
+# Each node has its own dedicated tunnel (M3: nano-claw-phone.yml,
+# M1: nano-claw-m1.yml) — auto-detect, or override via env.
+TUNNEL_CONFIG="${NANO_CLAW_TUNNEL_CONFIG:-$(ls "$HOME"/.cloudflared/nano-claw-*.yml 2>/dev/null | head -1)}"
+TUNNEL_NAME="$(awk '/^tunnel:/ {print $2; exit}' "$TUNNEL_CONFIG" 2>/dev/null)"
 BOOT_GRACE_S=180   # don't judge a stack that's still booting
 
 mkdir -p "$LOG_DIR"
@@ -92,7 +94,11 @@ start_stack() {
 }
 
 start_tunnel() {
-  log "starting cloudflared connector"
+  if [ -z "$TUNNEL_CONFIG" ] || [ -z "$TUNNEL_NAME" ]; then
+    log "no nano-claw-*.yml tunnel config found in ~/.cloudflared — cannot start connector"
+    return 0
+  fi
+  log "starting cloudflared connector ($TUNNEL_NAME)"
   nohup cloudflared tunnel --config "$TUNNEL_CONFIG" run "$TUNNEL_NAME" \
     >> "$LOG_DIR/cloudflared.log" 2>&1 &
 }
