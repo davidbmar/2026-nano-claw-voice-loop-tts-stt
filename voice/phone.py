@@ -219,7 +219,7 @@ class PhoneCall:
         pcm = ulaw_decode(base64.b64decode(payload_b64))
         # Feed the neural VAD continuously (its recurrent state needs every
         # frame); both detectors then share one speech decision per frame.
-        is_speech = self.vad.feed(pcm) >= 0.5 if self.vad else None
+        is_speech = self.vad.feed_speech(pcm) if self.vad else None
 
         if self.speaking:
             # Barge-in (NANO_CLAW_PHONE_BARGE_IN=1): listen for the caller

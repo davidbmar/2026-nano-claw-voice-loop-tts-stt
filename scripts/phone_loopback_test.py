@@ -43,7 +43,22 @@ def env_token() -> str:
 
 
 def synthesize_caller_audio(text: str) -> bytes:
-    """Question audio as μ-law 8k — the local TTS service plays the caller."""
+    """Question audio as μ-law 8k — the local TTS service plays the caller.
+
+    NOTE: synthetic TTS scores LOW on neural VAD (Silero correctly doubts
+    it's a human). When the node runs NANO_CLAW_PHONE_VAD=silero, pass a
+    real-speech recording instead:  --wav path.wav  (mono 8k or 16k PCM).
+    """
+    if text.endswith(".wav"):
+        import wave
+
+        w = wave.open(text)
+        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        if w.getframerate() == 16000:
+            pcm = pcm[::2]
+        elif w.getframerate() != 8000:
+            raise SystemExit(f"unsupported rate {w.getframerate()} (need 8k/16k mono)")
+        return ulaw_encode(pcm)
     body = json.dumps({"text": text, "voice": "af_heart", "speed": 1.0}).encode()
     req = urllib.request.Request(TTS_URL, data=body, headers={"Content-Type": "application/json"})
     pcm48 = urllib.request.urlopen(req, timeout=60).read()

@@ -56,12 +56,18 @@ def available() -> bool:
 class SileroVAD:
     """Per-call streaming scorer: one instance per phone call."""
 
+    # Hysteresis: enter speech at ENTER, stay until prob drops below EXIT —
+    # intra-word dips don't flicker the decision (standard VAD practice).
+    ENTER = 0.5
+    EXIT = 0.35
+
     def __init__(self, sample_rate: int = 8000) -> None:
         self._sr = np.array(sample_rate, dtype=np.int64)
         self._chunk = CHUNK_8K if sample_rate == 8000 else 512
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._buf = np.zeros(0, dtype=np.float32)
         self.prob = 0.0
+        self._in_speech = False
 
     def feed(self, frame_int16: np.ndarray) -> float:
         """Consume one frame; returns the latest speech probability."""
@@ -83,3 +89,10 @@ class SileroVAD:
             )
             self.prob = float(out.squeeze())
         return self.prob
+
+    def feed_speech(self, frame_int16: np.ndarray) -> bool:
+        """feed() + hysteresis: the per-frame speech decision detectors use."""
+        self.feed(frame_int16)
+        threshold = self.EXIT if self._in_speech else self.ENTER
+        self._in_speech = self.prob >= threshold
+        return self._in_speech
