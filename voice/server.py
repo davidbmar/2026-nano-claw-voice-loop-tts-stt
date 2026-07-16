@@ -596,6 +596,7 @@ async def preview_handler(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
+    from voice.phone import register_phone_routes
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/ws", websocket_handler)
@@ -603,6 +604,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
     app.router.add_get("/api/metrics", metrics_handler)
+    register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
     app.router.add_get("/{filename}", static_handler)
     return app
 
