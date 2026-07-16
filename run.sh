@@ -66,6 +66,10 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Python for the native STT/TTS venvs: torch needs modern-but-not-bleeding
+# (no 3.14 wheels yet; macOS system 3.9 is too old for faster-whisper).
+SERVICE_PYTHON="$(command -v python3.12 || command -v python3.13 || command -v python3.11 || command -v python3)"
+
 # Start STT service if not already running
 STT_SERVICE_URL="${STT_SERVICE_URL:-http://host.docker.internal:8200}"
 STT_CHECK_URL="${STT_SERVICE_URL/host.docker.internal/localhost}"
@@ -78,7 +82,7 @@ else
   STT_VENV="$SCRIPT_DIR/stt-service/.venv"
   if [ ! -d "$STT_VENV" ]; then
     echo "Creating STT virtual environment..."
-    python3 -m venv "$STT_VENV"
+    "$SERVICE_PYTHON" -m venv "$STT_VENV"
   fi
   "$STT_VENV/bin/pip" install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
   "$STT_VENV/bin/python" "$SCRIPT_DIR/stt-service/server.py" &
@@ -107,7 +111,7 @@ else
   TTS_VENV="$SCRIPT_DIR/tts-service/.venv"
   if [ ! -d "$TTS_VENV" ]; then
     echo "Creating TTS virtual environment..."
-    python3 -m venv "$TTS_VENV"
+    "$SERVICE_PYTHON" -m venv "$TTS_VENV"
   fi
   "$TTS_VENV/bin/pip" install -q -r "$SCRIPT_DIR/tts-service/requirements.txt"
   PYTORCH_ENABLE_MPS_FALLBACK=1 "$TTS_VENV/bin/python" "$SCRIPT_DIR/tts-service/server.py" &
