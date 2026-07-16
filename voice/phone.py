@@ -163,6 +163,7 @@ class PhoneCall:
         # Neural VAD (one streaming instance per call; None = energy mode)
         self.vad_mode = get_vad_mode()
         self.vad = silero_vad.SileroVAD() if self.vad_mode == "silero" else None
+        self._vad_frames = 0
         log.info("[phone %s] VAD: %s", call_id[:8], self.vad_mode)
         self.speaking = False
         self.interrupted = False
@@ -220,6 +221,14 @@ class PhoneCall:
         # Feed the neural VAD continuously (its recurrent state needs every
         # frame); both detectors then share one speech decision per frame.
         is_speech = self.vad.feed_speech(pcm) if self.vad else None
+        if self.vad:
+            self._vad_frames += 1
+            if self._vad_frames % 250 == 0:  # every ~5s of call audio
+                vmax, vmean = self.vad.take_stats()
+                log.info(
+                    "[phone %s] silero last5s: max=%.2f mean=%.2f in_speech=%s",
+                    self.call_id[:8], vmax, vmean, is_speech,
+                )
 
         if self.speaking:
             # Barge-in (NANO_CLAW_PHONE_BARGE_IN=1): listen for the caller

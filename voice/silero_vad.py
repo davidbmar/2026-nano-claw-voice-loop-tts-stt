@@ -16,6 +16,7 @@ runs ~1 ms per chunk via onnxruntime.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -58,22 +59,38 @@ class SileroVAD:
 
     # Hysteresis: enter speech at ENTER, stay until prob drops below EXIT —
     # intra-word dips don't flicker the decision (standard VAD practice).
-    ENTER = 0.5
-    EXIT = 0.35
+    # Tunable without a rebuild: live phone audio runs quieter/noisier than
+    # archived recordings, and silero's 8k mode is weaker than 16k.
+    ENTER = float(os.environ.get("NANO_CLAW_PHONE_VAD_ENTER", "0.5"))
+    EXIT = float(os.environ.get("NANO_CLAW_PHONE_VAD_EXIT", "0.35"))
 
-    def __init__(self, sample_rate: int = 8000) -> None:
-        self._sr = np.array(sample_rate, dtype=np.int64)
-        self._chunk = CHUNK_8K if sample_rate == 8000 else 512
+    def __init__(self, sample_rate: int = 8000, upsample_phone_audio: bool = False) -> None:
+        # KNOWN BROKEN as of 2026-07-16: the 16k-upsampled path scores ~0.0
+        # on everything (silero v5 likely wants its 64-sample context prefix
+        # per chunk at 16k). The raw 8k path scores real callers correctly.
+        # Keep upsample opt-in for debugging only.
+        self._upsample = upsample_phone_audio and sample_rate == 8000
+        rate = 16000 if self._upsample else sample_rate
+        self._sr = np.array(rate, dtype=np.int64)
+        self._chunk = CHUNK_8K if rate == 8000 else 512
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._buf = np.zeros(0, dtype=np.float32)
         self.prob = 0.0
         self._in_speech = False
+        # Rolling diagnostics (read by the phone gateway's periodic stats log)
+        self.window_max = 0.0
+        self.window_sum = 0.0
+        self.window_n = 0
 
     def feed(self, frame_int16: np.ndarray) -> float:
         """Consume one frame; returns the latest speech probability."""
         sess = _get_session()
         if sess is None:
             return self.prob
+        if self._upsample:
+            from voice.phone_audio import resample_8k_to_16k
+
+            frame_int16 = resample_8k_to_16k(np.asarray(frame_int16, dtype=np.int16))
         self._buf = np.concatenate(
             [self._buf, frame_int16.astype(np.float32) / 32768.0]
         )
@@ -88,7 +105,19 @@ class SileroVAD:
                 },
             )
             self.prob = float(out.squeeze())
+            self.window_max = max(self.window_max, self.prob)
+            self.window_sum += self.prob
+            self.window_n += 1
         return self.prob
+
+    def take_stats(self) -> tuple[float, float]:
+        """(max, mean) prob since last call — for periodic diagnostics."""
+        if not self.window_n:
+            return 0.0, 0.0
+        stats = (self.window_max, self.window_sum / self.window_n)
+        self.window_max = self.window_sum = 0.0
+        self.window_n = 0
+        return stats
 
     def feed_speech(self, frame_int16: np.ndarray) -> bool:
         """feed() + hysteresis: the per-frame speech decision detectors use."""
