@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Site knowledge pipeline: `scripts/crawl_site.py` (site → `data/<site>/site_index.json`),
+  `scripts/build_knowledge.py` (index → `knowledge.md` digest + per-feed detail files),
+  and `scripts/refresh_site.sh` for cron re-crawls. Space Channel is the first site.
+- Knowledge injection into the system prompt via `agents.defaults.knowledgeFiles`
+  or `NANO_CLAW_KNOWLEDGE`; `run.sh` auto-detects `data/*/knowledge.md` and mounts
+  `data/` read-only at `/app/sites`. Digests re-load on mtime change.
+- Anthropic prompt caching: the stable system-prompt prefix (persona + knowledge)
+  is marked with a `cache_control` breakpoint; cache read/write token counts are
+  surfaced in `/api/chat` debug output.
+- Hand-authored site overviews under `docs/knowledge/<site>.md`, prepended to
+  digests to cover what feed crawls of SPA sites miss.
+
 ## [0.1.0] - 2026-02-11
 
 ### Added
