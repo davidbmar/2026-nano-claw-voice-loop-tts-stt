@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SYSTEM_CACHE_MARKER } from '../src/types';
-import { anthropicSystemParam, stripCacheMarker } from '../src/providers/base';
+import { anthropicSystemParam, anthropicUsage, stripCacheMarker } from '../src/providers/base';
 import { ContextBuilder } from '../src/agent/context';
 
 describe('anthropicSystemParam', () => {
@@ -25,6 +25,26 @@ describe('anthropicSystemParam', () => {
 
   it('degrades to a plain volatile string when the stable part is empty', () => {
     expect(anthropicSystemParam(`${SYSTEM_CACHE_MARKER}tail only`)).toBe('tail only');
+  });
+});
+
+describe('anthropicUsage', () => {
+  it('folds cache read/write tokens back into promptTokens for cost telemetry', () => {
+    const usage = anthropicUsage({
+      input_tokens: 200,
+      output_tokens: 50,
+      cache_read_input_tokens: 10000,
+      cache_creation_input_tokens: 0,
+    });
+    expect(usage.promptTokens).toBe(10200);
+    expect(usage.totalTokens).toBe(10250);
+    expect(usage.cacheReadTokens).toBe(10000);
+    expect(usage).not.toHaveProperty('cacheWriteTokens');
+  });
+
+  it('is a no-op when caching is not in play', () => {
+    const usage = anthropicUsage({ input_tokens: 300, output_tokens: 20 });
+    expect(usage).toEqual({ promptTokens: 300, completionTokens: 20, totalTokens: 320 });
   });
 });
 

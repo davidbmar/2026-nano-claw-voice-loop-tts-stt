@@ -28,6 +28,9 @@ while IFS= read -r feed; do
   [ -n "$feed" ] && feed_args+=(--feed "$feed")
 done < <("$python" -c "import json,sys; [print(u) for u in json.load(open(sys.argv[1])).get('feeds', {})]" "$index")
 
-echo "Refreshing $site from $base (${#feed_args[@]} feed args)"
-"$python" "$root/scripts/crawl_site.py" "$base" --name "$site" "${feed_args[@]}" "$@"
+# ${arr[@]+...} keeps empty-array expansion safe under `set -u` on bash 3.2
+# (macOS system bash, which cron's default PATH resolves).
+echo "Refreshing $site from $base ($((${#feed_args[@]} / 2)) feeds)"
+"$python" "$root/scripts/crawl_site.py" "$base" --name "$site" \
+  ${feed_args[@]+"${feed_args[@]}"} "$@"
 "$python" "$root/scripts/build_knowledge.py" "$site"

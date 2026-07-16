@@ -107,8 +107,16 @@ def test_feed_inner_timestamp_preferred_over_crawl_time(tmp_path):
 
 
 def test_empty_dsn_marked_not_omitted(tmp_path):
-    feed = {"stations": [], "timestamp": 1751566260000, "fetchedAt": "2026-07-03T18:11:00Z"}
-    site = make_index(tmp_path, feeds={"https://example.com/data/dsn-snapshot.json": feed})
+    dsn = {"stations": [], "timestamp": 1751566260000, "fetchedAt": "2026-07-03T18:11:00Z"}
+    site = make_index(
+        tmp_path,
+        feeds={
+            # one substantive feed so the degraded-crawl guard doesn't trip —
+            # the point here is that a single empty feed is marked, not omitted
+            "https://example.com/data/launches.json": LAUNCH_FEED,
+            "https://example.com/data/dsn-snapshot.json": dsn,
+        },
+    )
     text = build(site)
     assert "Deep Space Network" in text
     assert "EMPTY" in text
@@ -137,6 +145,59 @@ def test_authored_overview_included_when_present(tmp_path, monkeypatch):
     site = make_index(tmp_path)
     text = build(site)
     assert "Hand-written facts." in text
+
+
+def test_scrubbed_past_net_launch_not_reported_as_flown(tmp_path):
+    feed = {
+        "fetchedAt": "2026-07-14T20:15:00Z",
+        "results": [
+            {
+                "name": "Scrubbed Rocket | Held",
+                "status": {"name": "Go for Launch", "abbrev": "Go"},
+                "net": "2026-07-15T01:00:00Z",  # before CRAWLED, never marked flown
+                "net_precision": {"name": "Second"},
+                "launch_service_provider": {"name": "SpaceCo"},
+                "mission": {},
+                "pad": {},
+            }
+        ],
+    }
+    site = make_index(tmp_path, feeds={"https://example.com/data/launches.json": feed})
+    text = build(site)
+    assert "Recently flown" not in text
+    assert "outcome not confirmed" in text
+    assert "Scrubbed Rocket" in text
+
+
+def test_all_empty_feeds_keep_last_known_good_digest_and_details(tmp_path):
+    empty = {"fetchedAt": "2026-07-14T20:15:00Z", "results": []}
+    site = make_index(tmp_path, feeds={"https://example.com/data/launches.json": empty})
+    good = site / "knowledge.md"
+    good.write_text("LAST KNOWN GOOD")
+    details = site / "knowledge"
+    details.mkdir()
+    (details / "launches.md").write_text("GOOD DETAILS")
+    assert bk.build_site(site) is False
+    assert good.read_text() == "LAST KNOWN GOOD"
+    assert (details / "launches.md").read_text() == "GOOD DETAILS"
+
+
+def test_legal_page_detection_uses_exact_slug(tmp_path):
+    pages = [
+        {
+            "url": "https://example.com/data-privacy",
+            "title": "Data Privacy Practices",
+            "description": "",
+            "headings": [],
+            "text": "Real content about data handling",
+            "chars": 32,
+        }
+    ]
+    site = make_index(tmp_path, pages=pages)
+    text = build(site)
+    # Not an exact 'privacy' slug: rendered as a page, never declared omitted
+    assert "Data Privacy Practices" in text
+    assert "legal boilerplate" not in text
 
 
 def test_unknown_feed_uses_generic_fallback(tmp_path):

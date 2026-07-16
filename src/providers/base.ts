@@ -62,6 +62,24 @@ export function anthropicSystemParam(
 }
 
 /**
+ * Map an Anthropic usage object to LLMResponse usage. input_tokens EXCLUDES
+ * cache reads/writes, so they are folded back into promptTokens — downstream
+ * cost telemetry sums "prompt" and must see the whole prompt.
+ */
+export function anthropicUsage(usage: Record<string, number>): NonNullable<LLMResponse['usage']> {
+  const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+  const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0;
+  const promptTokens = (usage.input_tokens ?? 0) + cacheReadTokens + cacheWriteTokens;
+  return {
+    promptTokens,
+    completionTokens: usage.output_tokens ?? 0,
+    totalTokens: promptTokens + (usage.output_tokens ?? 0),
+    ...(cacheReadTokens > 0 && { cacheReadTokens }),
+    ...(cacheWriteTokens > 0 && { cacheWriteTokens }),
+  };
+}
+
+/**
  * Parse Anthropic /messages streaming events into StreamEvents.
  */
 export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<StreamEvent> {
@@ -83,9 +101,11 @@ export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<St
     }
     switch (evt.type) {
       case 'message_start':
-        promptTokens = evt.message?.usage?.input_tokens ?? 0;
         cacheReadTokens = evt.message?.usage?.cache_read_input_tokens ?? 0;
         cacheWriteTokens = evt.message?.usage?.cache_creation_input_tokens ?? 0;
+        // Anthropic's input_tokens EXCLUDES cached tokens; fold them back in
+        // so promptTokens keeps meaning "the whole prompt" for cost telemetry.
+        promptTokens = (evt.message?.usage?.input_tokens ?? 0) + cacheReadTokens + cacheWriteTokens;
         break;
       case 'content_block_start':
         if (evt.content_block?.type === 'tool_use') {
@@ -448,19 +468,7 @@ export class AnthropicProvider extends BaseProvider {
         content: textParts.join('\n'),
         toolCalls: toolUseBlocks.length > 0 ? toolUseBlocks : undefined,
         finishReason: response.data.stop_reason,
-        usage: response.data.usage
-          ? {
-              promptTokens: response.data.usage.input_tokens,
-              completionTokens: response.data.usage.output_tokens,
-              totalTokens: response.data.usage.input_tokens + response.data.usage.output_tokens,
-              ...(response.data.usage.cache_read_input_tokens > 0 && {
-                cacheReadTokens: response.data.usage.cache_read_input_tokens,
-              }),
-              ...(response.data.usage.cache_creation_input_tokens > 0 && {
-                cacheWriteTokens: response.data.usage.cache_creation_input_tokens,
-              }),
-            }
-          : undefined,
+        usage: response.data.usage ? anthropicUsage(response.data.usage) : undefined,
       };
     } catch (error) {
       logger.error({ error }, 'Anthropic API error');

@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -54,6 +55,36 @@ warnings: list[str] = []
 def warn(msg: str) -> None:
     warnings.append(msg)
     print(f"  WARN: {msg}", file=sys.stderr)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """tmp + rename: the running server hot-reloads these files on mtime
+    change, and an in-place truncate-then-write could hand it a partial
+    digest mid-turn."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def feed_has_content(name: str, feed: object) -> bool:
+    """Whether a captured feed carries any substantive data (used to refuse
+    replacing a good digest with one built from a degraded crawl)."""
+    if not isinstance(feed, dict) or "_error" in feed:
+        return False
+    keys = {
+        "launches.json": "results",
+        "ufo-cases.json": "cases",
+        "ufo-wire.json": "items",
+        "data-lens-articles.json": "articles",
+        "becker-tour.json": "events",
+        "maxq-podcast.json": "episodes",
+        "ufo-podcast.json": "episodes",
+        "dsn-snapshot.json": "stations",
+    }
+    key = keys.get(name)
+    if key is not None:
+        return bool(feed.get(key))
+    return any(v for v in feed.values() if isinstance(v, (list, dict, str, int, float)))
 
 
 def clean(text: str, limit: int = 220) -> str:
@@ -135,11 +166,16 @@ def render_launches(feed: dict, crawled: datetime | None, limit: int) -> list[st
 
     upcoming: list[dict] = []
     recent: list[dict] = []
+    stale: list[dict] = []
     for r in results:
         abbrev = (r.get("status") or {}).get("abbrev", "")
         net = parse_dt(r.get("net"))
-        if abbrev in FLOWN_STATUSES or (net and crawled and net < crawled):
+        if abbrev in FLOWN_STATUSES:
             recent.append(r)
+        elif net and crawled and net < crawled:
+            # NET passed but status never confirmed flown — scrubs and holds
+            # are common; claiming these "already launched" would be wrong.
+            stale.append(r)
         else:
             upcoming.append(r)
 
@@ -181,6 +217,12 @@ def render_launches(feed: dict, crawled: datetime | None, limit: int) -> list[st
     if recent:
         lines.append("### Recently flown (already launched)")
         lines.extend(line(r) for r in recent)
+    if stale:
+        lines.append(
+            "### Listed NET has passed, outcome not confirmed in this snapshot "
+            "(may have launched, scrubbed, or slipped — do not state these flew)"
+        )
+        lines.extend(line(r) for r in stale)
     lines.append("### Upcoming")
     lines.extend(line(r) for r in upcoming)
     return lines
@@ -345,14 +387,20 @@ DIGEST_LIMIT = 200
 DETAIL_LIMIT = 1200
 
 
+LEGAL_SLUGS = {"terms", "privacy"}
+
+
+def page_slug(page: dict) -> str:
+    return page.get("url", "").rstrip("/").rsplit("/", 1)[-1] or "home"
+
+
 def render_pages(pages: list[dict]) -> list[str]:
     """Homepage → site overview; legal pages → one-line mention."""
     lines: list[str] = []
     for p in pages:
-        path = p.get("url", "").rstrip("/").rsplit("/", 1)[-1] or "home"
-        if path in ("terms", "privacy"):
+        if page_slug(p) in LEGAL_SLUGS:
             continue
-        title = p.get("title") or path
+        title = p.get("title") or page_slug(p)
         lines.append(f"### Page: {title}")
         if p.get("description"):
             lines.append(p["description"])
@@ -361,9 +409,9 @@ def render_pages(pages: list[dict]) -> list[str]:
         if p.get("text"):
             lines.append(clean(p["text"], 900))
         lines.append("")
-    legal = [p for p in pages if p.get("url", "").rstrip("/").endswith(("terms", "privacy"))]
+    legal = [p for p in pages if page_slug(p) in LEGAL_SLUGS]
     if legal:
-        names = " and ".join(p["url"].rstrip("/").rsplit("/", 1)[-1] for p in legal)
+        names = " and ".join(page_slug(p) for p in legal)
         lines.append(f"The site also has {names} pages (legal boilerplate, indexed but omitted here).")
     return lines
 
@@ -398,9 +446,10 @@ def build_site(site_dir: Path) -> bool:
     out.append("")
 
     # Feeds, in stable-first digest order; unknown feeds go last via fallback.
+    # Detail files are buffered and only written once every guard passes —
+    # a failed build must not clobber ANY last-known-good output.
     feeds = index.get("feeds") or {}
-    details_dir = site_dir / "knowledge"
-    details_dir.mkdir(exist_ok=True)
+    details: dict[str, str] = {}
     ordered = sorted(
         feeds.items(),
         key=lambda kv: RENDERERS.get(kv[0].rstrip("/").rsplit("/", 1)[-1], (99, None))[0],
@@ -419,9 +468,7 @@ def build_site(site_dir: Path) -> bool:
             # Fuller detail file — safe for the agent to read on demand,
             # unlike the raw index (which is never LLM input).
             detail = renderer(feed, crawled, DETAIL_LIMIT)
-            (details_dir / f"{name.removesuffix('.json')}.md").write_text(
-                "\n".join(detail).strip() + "\n"
-            )
+            details[f"{name.removesuffix('.json')}.md"] = "\n".join(detail).strip() + "\n"
         else:
             out.extend(render_generic(feed, name))
         out.append("")
@@ -430,6 +477,20 @@ def build_site(site_dir: Path) -> bool:
     out_path = site_dir / "knowledge.md"
 
     # Fail-loud: never replace a good digest with a broken one.
+    substantive = [
+        url.rstrip("/").rsplit("/", 1)[-1]
+        for url, feed in feeds.items()
+        if feed_has_content(url.rstrip("/").rsplit("/", 1)[-1], feed)
+    ]
+    if feeds and not substantive:
+        warn(
+            "every captured feed is errored or empty (degraded crawl?) — "
+            f"keeping existing {out_path.name}"
+        )
+        return False
+    if not index.get("pages") and not substantive:
+        warn(f"index has no pages and no usable feeds — keeping existing {out_path.name}")
+        return False
     if len(text) < MIN_CHARS:
         warn(f"digest suspiciously small ({len(text)} chars) — keeping existing {out_path.name}")
         return False
@@ -439,7 +500,11 @@ def build_site(site_dir: Path) -> bool:
     if len(text) > WARN_CHARS:
         warn(f"digest large ({len(text)} chars); consider tightening renderers")
 
-    out_path.write_text(text)
+    details_dir = site_dir / "knowledge"
+    details_dir.mkdir(exist_ok=True)
+    for fname, content in details.items():
+        write_atomic(details_dir / fname, content)
+    write_atomic(out_path, text)
     print(f"  {out_path}  ({len(text):,} chars ≈ {len(text) // 4:,} tokens)")
     return True
 
@@ -459,7 +524,12 @@ def main() -> int:
                 failed += 1
             continue
         print(f"Building knowledge for {d.name}:")
-        if build_site(d):
+        try:
+            ok = build_site(d)
+        except Exception as exc:  # a corrupt index must not stall other sites
+            print(f"  ERROR: {d.name}: {exc} — keeping existing knowledge.md", file=sys.stderr)
+            ok = False
+        if ok:
             built += 1
         else:
             failed += 1

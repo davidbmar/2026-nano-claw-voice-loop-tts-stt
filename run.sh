@@ -141,10 +141,17 @@ echo ""
 # set in .env. Host data/ is mounted read-only at /app/sites (the /app/data
 # named volume holds runtime state and stays untouched).
 if [ -z "${NANO_CLAW_KNOWLEDGE:-}" ]; then
-  NANO_CLAW_KNOWLEDGE=$(ls data/*/knowledge.md 2>/dev/null \
-    | sed 's|^data/|/app/sites/|' | paste -sd, -)
-  export NANO_CLAW_KNOWLEDGE
+  NANO_CLAW_KNOWLEDGE=$(ls "$SCRIPT_DIR"/data/*/knowledge.md 2>/dev/null \
+    | sed "s|^$SCRIPT_DIR/data/|/app/sites/|" | paste -sd, -)
+else
+  # Users naturally put host paths in .env (data/<site>/knowledge.md or an
+  # absolute path under this repo); rewrite those to the container mount so
+  # the file actually exists inside docker.
+  NANO_CLAW_KNOWLEDGE=$(echo "$NANO_CLAW_KNOWLEDGE" | tr ',' '\n' \
+    | sed -e "s|^$SCRIPT_DIR/data/|/app/sites/|" -e 's|^data/|/app/sites/|' \
+    | paste -sd, -)
 fi
+export NANO_CLAW_KNOWLEDGE
 if [ -n "$NANO_CLAW_KNOWLEDGE" ]; then
   echo "Knowledge: $NANO_CLAW_KNOWLEDGE"
 fi
@@ -166,5 +173,5 @@ docker run -it --rm \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
   -v nano-claw-data:/app/data \
-  -v "$(pwd)/data":/app/sites:ro \
+  -v "$SCRIPT_DIR/data":/app/sites:ro \
   nano-claw-voice

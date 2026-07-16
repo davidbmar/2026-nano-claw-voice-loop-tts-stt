@@ -204,8 +204,19 @@ def main() -> int:
             "total_chars": sum(p["chars"] for p in pages),
         },
     }
+    # Refuse to overwrite a previous index with a completely failed crawl,
+    # and exit nonzero so cron (scripts/refresh_site.sh) surfaces it.
+    feeds_ok = any(not (isinstance(f, dict) and "_error" in f) for f in feeds.values())
+    if not pages and not feeds_ok:
+        print(f"\nFAILED: 0 pages and no usable feeds ({len(errors)} errors) — "
+              f"not writing data/{slug}/site_index.json", file=sys.stderr)
+        return 1
+
+    # Atomic write: build_knowledge.py (and cron) may read this concurrently.
     out_path = out_dir / "site_index.json"
-    out_path.write_text(json.dumps(index, indent=1, ensure_ascii=False))
+    tmp_path = out_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(index, indent=1, ensure_ascii=False))
+    tmp_path.replace(out_path)
 
     print(f"\nDone: {len(pages)} pages, {index['report']['total_chars']:,} chars, "
           f"{len(errors)} errors → {out_path}")
