@@ -18,8 +18,10 @@ df -h / | tail -1 | awk '{
 }'
 echo ""
 
-# Remove old container if running
-OLD=$(docker ps -aq --filter ancestor=nano-claw-voice 2>/dev/null)
+# Remove old container if running. Filter by NAME, not ancestor: after a
+# rebuild the tag points at the new image and ancestor= stops matching the
+# old container — which then wins the port race against the new one.
+OLD=$(docker ps -aq --filter name='^nano-claw-voice$' 2>/dev/null)
 if [ -n "$OLD" ]; then
   echo "Stopping old container(s)..."
   docker rm -f $OLD
@@ -176,6 +178,7 @@ if [ -t 0 ]; then
   TTY_FLAGS="-it"
 fi
 docker run $TTY_FLAGS --rm \
+  --name nano-claw-voice \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e GEMINI_API_KEY \

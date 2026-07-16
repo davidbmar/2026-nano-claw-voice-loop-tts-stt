@@ -216,19 +216,92 @@ class PhoneCall:
             if not text.strip():
                 return
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
-            t0 = time.monotonic()
-            reply = await self._ask_agent(text)
-            log.info(
-                "[phone %s] agent (%.1fs): %s",
-                self.call_id[:8], time.monotonic() - t0, reply[:120],
-            )
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
-            await self.speak(reply)
+            await self._stream_reply(text)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("[phone %s] turn failed", self.call_id[:8])
             await self.speak("Sorry, something went wrong on my end. Try asking again.")
+
+    async def _stream_reply(self, text: str) -> None:
+        """Stream the agent's reply (SSE) and speak each sentence as it
+        completes — the caller hears the first sentence while the model is
+        still writing the rest. Falls back to the non-stream JSON shape when
+        the API has streaming disabled (NANO_CLAW_STREAM=0)."""
+        t0 = time.monotonic()
+        self.speaking = True
+        self.barge.reset()
+        chunker = TextChunker()
+        first_spoken_at: float | None = None
+        try:
+            async with self._http.stream(
+                "POST",
+                f"{NANO_CLAW_URL}/api/chat",
+                json={"message": text, "sessionId": self.session_id},
+                headers={"Accept": "text/event-stream"},
+            ) as resp:
+                if "text/event-stream" not in resp.headers.get("content-type", ""):
+                    body = json.loads(await resp.aread())
+                    reply = body.get("response", "") or "I didn't catch that — could you say it again?"
+                    log.info("[phone %s] agent non-stream (%.1fs)", self.call_id[:8], time.monotonic() - t0)
+                    for chunk in self._sentences(reply):
+                        await self._speak_chunk(chunk)
+                    return
+
+                event = ""
+                data_lines: list[str] = []
+                async for raw in resp.aiter_lines():
+                    if self.closed or not self.speaking:
+                        return  # hangup or barge-in: stop consuming the stream
+                    if raw == "":
+                        payload = "\n".join(data_lines)
+                        data_lines = []
+                        ev, event = event, ""
+                        if not payload:
+                            continue
+                        obj = json.loads(payload)
+                        if ev == "delta":
+                            for chunk in chunker.push(obj.get("text", "")):
+                                if first_spoken_at is None:
+                                    first_spoken_at = time.monotonic()
+                                    log.info(
+                                        "[phone %s] first sentence at %.1fs",
+                                        self.call_id[:8], first_spoken_at - t0,
+                                    )
+                                await self._speak_chunk(chunk)
+                        elif ev == "final":
+                            tail = chunker.flush()
+                            if tail:
+                                await self._speak_chunk(tail)
+                            log.info(
+                                "[phone %s] reply complete (%.1fs total)",
+                                self.call_id[:8], time.monotonic() - t0,
+                            )
+                        elif ev == "tool_pending":
+                            await self._speak_chunk(
+                                "I can't take actions over the phone, but I'm happy to answer questions."
+                            )
+                        elif ev == "error":
+                            await self._speak_chunk("Sorry, something went wrong. Try asking again.")
+                    elif raw.startswith("event:"):
+                        event = raw[6:].strip()
+                    elif raw.startswith("data:"):
+                        data_lines.append(raw[5:].strip())
+        finally:
+            self.speaking = False
+            if not self.interrupted:
+                self.endpointer.reset()
+            self.last_activity = time.monotonic()
+
+    @staticmethod
+    def _sentences(text: str) -> list[str]:
+        chunker = TextChunker()
+        out = chunker.push(text)
+        tail = chunker.flush()
+        if tail:
+            out.append(tail)
+        return out
 
     async def _transcribe(self, pcm8k: bytes) -> str:
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
@@ -244,49 +317,39 @@ class PhoneCall:
         )
         return resp.json().get("text", "")
 
-    async def _ask_agent(self, text: str) -> str:
-        resp = await self._http.post(
-            f"{NANO_CLAW_URL}/api/chat",
-            json={"message": text, "sessionId": self.session_id},
-        )
-        data = resp.json()
-        # Tools are disabled in phone deployments, so responses are final;
-        # if a tool somehow pends, decline rather than dead-air the caller.
-        if data.get("type") == "tool_pending":
-            return "I can't take actions over the phone, but I'm happy to answer questions."
-        return data.get("response", "") or "I didn't catch that — could you say it again?"
-
     # ── Outbound audio ───────────────────────────────────────────
 
+    async def _speak_chunk(self, sentence: str) -> None:
+        """TTS one sentence → paced μ-law frames. Caller manages `speaking`."""
+        if self.closed or not self.speaking or not sentence:
+            return
+        voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+        loop = asyncio.get_running_loop()
+        try:
+            pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, 1.0)
+            for frame in pcm48k_to_ulaw_frames(pcm48k):
+                if self.closed or not self.speaking:
+                    return  # hung up or barged in
+                await self.ws.send_json(
+                    {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
+                )
+                # Pace slightly faster than real time: keeps Telnyx's
+                # jitter buffer fed without flooding it.
+                await asyncio.sleep(FRAME_MS / 1000 * 0.9)
+        except Exception:
+            log.exception("[phone %s] speak failed", self.call_id[:8])
+
     async def speak(self, text: str) -> None:
-        """Sentence-chunked TTS → μ-law frames, paced near real time."""
+        """Speak a complete text (greeting, idle prompts, error lines)."""
         if self.closed or not text:
             return
         self.speaking = True
         self.barge.reset()
-        voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
-        loop = asyncio.get_running_loop()
-        chunker = TextChunker()
-        sentences = chunker.push(text)
-        tail = chunker.flush()
-        if tail:
-            sentences.append(tail)
         try:
-            for sentence in sentences:
+            for sentence in self._sentences(text):
                 if self.closed or not self.speaking:
-                    return  # hung up or barged in
-                pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, 1.0)
-                for frame in pcm48k_to_ulaw_frames(pcm48k):
-                    if self.closed or not self.speaking:
-                        return
-                    await self.ws.send_json(
-                        {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
-                    )
-                    # Pace slightly faster than real time: keeps Telnyx's
-                    # jitter buffer fed without flooding it.
-                    await asyncio.sleep(FRAME_MS / 1000 * 0.9)
-        except Exception:
-            log.exception("[phone %s] speak failed", self.call_id[:8])
+                    return
+                await self._speak_chunk(sentence)
         finally:
             self.speaking = False
             if not self.interrupted:

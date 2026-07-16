@@ -31,7 +31,7 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
 
 docker_up()    { docker info >/dev/null 2>&1; }
-container_up() { [ -n "$(docker ps -q --filter ancestor=nano-claw-voice 2>/dev/null)" ]; }
+container_up() { [ -n "$(docker ps -q --filter name='^nano-claw-voice$' 2>/dev/null)" ]; }
 voice_up()     { curl -sf -m 3 http://localhost:9090/api/models >/dev/null 2>&1; }
 stt_up()       { curl -sf -m 3 http://localhost:8200/health >/dev/null 2>&1; }
 tts_up()       { curl -sf -m 3 http://localhost:8300/health >/dev/null 2>&1; }
@@ -73,7 +73,7 @@ stop_stack() {
   pkill -f "bash $ROOT/run.sh" 2>/dev/null || true
   sleep 2
   local cid
-  cid=$(docker ps -q --filter ancestor=nano-claw-voice 2>/dev/null)
+  cid=$(docker ps -q --filter name='^nano-claw-voice$' 2>/dev/null)
   [ -n "$cid" ] && docker rm -f "$cid" >/dev/null 2>&1
   # Escalate on the service ports per the kill conventions
   for port in 8200 8300; do
