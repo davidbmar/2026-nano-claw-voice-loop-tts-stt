@@ -252,6 +252,31 @@ sentence-first (nano-claw already does this for plain chat). Also fixed
 en route: structured-outputs schemas reject `enum` on a union type — use
 `anyOf` (real-API contract; invisible to fake-client tests).
 
+## Supervisor latency ladder (2026-07-17, live sweeps)
+
+Same 8-scenario eval, four supervisor configs (caller sim on the same
+model; p50 per-turn supervisor latency ranges across scenarios):
+
+| Config | Outcomes | p50/turn | Notes |
+|---|---|---|---|
+| opus-4-8 (thinking omitted = off) | 8/8 | 3.2–5.2 s | flawless |
+| sonnet-5 (thinking omitted = ADAPTIVE ON) | 7/8¹ | 4.5–6.1 s | thinking tax |
+| sonnet-5 (thinking disabled) | 8/8 outcomes² | 3.9–5.7 s | no latency win |
+| haiku-4-5 | 5/8 | 2.1–3.6 s | fast; fails to close negotiations |
+
+¹ harness fragility (empty caller reply), fixed in eval since.
+² scored 7/8 on an exit-type technicality: the impossible ask ended
+  no_booking (correct) via the caller cap rather than a budget exit.
+
+Conclusions: model choice is NOT the phone-latency lever — Opus 4.8 wins
+quality at competitive latency; Haiku's speed costs negotiation-closing
+competence (it fills easy slots but never lands a valid start time).
+The real levers for the phone leg: stream the region reply sentence-first
+(as nano-claw chat already does), cap reply length in the region prompt,
+and test output_config effort=low on Opus. Also note the API contract
+gotcha that skewed round one: omitting `thinking` means OFF on Opus 4.8
+but ADAPTIVE ON on Sonnet 5 (SCHED_EVAL_THINKING=disabled equalizes).
+
 ## Open questions (for the morning)
 
 - Extractor cost/latency budget per turn inside regions (a second small LLM
