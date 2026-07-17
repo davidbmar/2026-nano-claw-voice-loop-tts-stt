@@ -17,6 +17,8 @@ BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_START = wall_time(8, 0)
 BUSINESS_END = wall_time(18, 0)
 DEFAULT_DURATIONS = (30, 60, 120, 240)
+_UNPARSEABLE_REPLY = "Sorry — could you say that again?"
+_UNPARSEABLE_REJECTION = "supervisor: unparseable output (after retry)"
 
 _SUPERVISOR_SCHEMA = {
     "type": "object",
@@ -129,7 +131,7 @@ class GoalRegionRunner:
         started = self.clock()
         request: dict = {
             "model": os.environ.get("SCHED_EVAL_MODEL", "claude-opus-4-8"),
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "system": [{
                 "type": "text",
                 "text": self._system_prompt(),
@@ -145,9 +147,32 @@ class GoalRegionRunner:
         # per-turn latency comparison. (Omitted = off on Opus 4.8/Haiku 4.5.)
         if os.environ.get("SCHED_EVAL_THINKING", "").strip() == "disabled":
             request["thinking"] = {"type": "disabled"}
-        response = self.client.messages.create(**request)
+
+        payload = None
+        for _attempt in range(2):
+            response = self.client.messages.create(**request)
+            if _response_stop_reason(response) == "max_tokens":
+                continue
+            try:
+                payload = _structured_payload(response)
+            except ValueError:
+                continue
+            break
         supervisor_ms = max(0.0, (self.clock() - started) * 1000)
-        payload = _structured_payload(response)
+        if payload is None:
+            self._completed_turns += 1
+            self._transcript.extend([
+                {"role": "user", "content": caller_text},
+                {"role": "assistant", "content": _UNPARSEABLE_REPLY},
+            ])
+            return RegionTurn(
+                reply=_UNPARSEABLE_REPLY,
+                exit=None,
+                slots=dict(self._slots),
+                supervisor_ms=supervisor_ms,
+                rejected=[_UNPARSEABLE_REJECTION],
+            )
+
         reply = payload.get("reply") if isinstance(payload.get("reply"), str) else ""
         candidates = payload.get("slot_candidates")
         if not isinstance(candidates, dict):
@@ -338,3 +363,11 @@ def _structured_payload(response) -> dict:
             if isinstance(payload, dict):
                 return payload
     raise ValueError("supervisor response did not contain a JSON object")
+
+
+def _response_stop_reason(response) -> str | None:
+    if isinstance(response, dict):
+        value = response.get("stop_reason")
+    else:
+        value = getattr(response, "stop_reason", None)
+    return value if isinstance(value, str) else None

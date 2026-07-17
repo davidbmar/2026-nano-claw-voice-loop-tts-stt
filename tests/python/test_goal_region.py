@@ -35,6 +35,28 @@ class FakeClient:
         self.messages = FakeMessages(outputs)
 
 
+class RawMessages:
+    def __init__(self, responses, clock=None):
+        self.responses = list(responses)
+        self.calls = []
+        self.clock = clock
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self.responses:
+            raise AssertionError("supervisor should not have been called")
+        if self.clock is not None:
+            self.clock.value += 0.25
+        return self.responses.pop(0)
+
+
+def raw_response(text, *, stop_reason="end_turn"):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason=stop_reason,
+    )
+
+
 def response(
     *,
     reply="What time works for you?",
@@ -280,7 +302,7 @@ def test_transcript_and_structured_api_shape_grow_across_turns(monkeypatch):
 
     first_call, second_call = client.messages.calls
     assert first_call["model"] == "test-supervisor-model"
-    assert first_call["max_tokens"] == 2048
+    assert first_call["max_tokens"] == 4096
     assert first_call["system"][0]["cache_control"] == {"type": "ephemeral"}
     schema = first_call["output_config"]["format"]["schema"]
     assert schema["additionalProperties"] is False
@@ -299,3 +321,73 @@ def test_transcript_and_structured_api_shape_grow_across_turns(monkeypatch):
         {"role": "user", "content": "It should take an hour."},
         {"role": "assistant", "content": "Which day works?"},
     ]
+
+
+def test_truncated_supervisor_output_retries_once_then_succeeds():
+    recovered = response(reply="Which day works?", job="leak repair")
+    messages = RawMessages([
+        raw_response('{"reply": "cut off'),
+        raw_response(json.dumps(recovered)),
+    ])
+    runner = GoalRegionRunner(
+        config(), [], client=SimpleNamespace(messages=messages)
+    )
+
+    turn = runner.turn("I have a leaking pipe.")
+
+    assert len(messages.calls) == 2
+    assert messages.calls[0] == messages.calls[1]
+    assert turn.reply == "Which day works?"
+    assert turn.slots == {"job": "leak repair"}
+    assert turn.rejected == []
+    assert runner.turns_used == 1
+
+
+def test_two_truncated_supervisor_outputs_return_safe_generic_turn():
+    clock = FrozenClock()
+    messages = RawMessages(
+        [
+            raw_response('{"reply": "cut off'),
+            raw_response('{"reply": "still cut off'),
+        ],
+        clock=clock,
+    )
+    runner = GoalRegionRunner(
+        config(), [], clock=clock, client=SimpleNamespace(messages=messages)
+    )
+    slots_before = runner.slots
+
+    turn = runner.turn("How about Tuesday?")
+
+    assert len(messages.calls) == 2
+    assert messages.calls[0] == messages.calls[1]
+    assert turn.reply == "Sorry — could you say that again?"
+    assert turn.exit is None
+    assert turn.slots == slots_before
+    assert runner.slots == slots_before
+    assert turn.rejected == ["supervisor: unparseable output (after retry)"]
+    assert turn.supervisor_ms == 500.0
+    assert runner.turns_used == 1
+    assert runner.transcript == [
+        {"role": "user", "content": "How about Tuesday?"},
+        {"role": "assistant", "content": "Sorry — could you say that again?"},
+    ]
+
+
+def test_max_tokens_stop_reason_retries_even_with_valid_json():
+    ignored = response(reply="Ignore this truncated response.")
+    recovered = response(reply="What time works for you?")
+    messages = RawMessages([
+        raw_response(json.dumps(ignored), stop_reason="max_tokens"),
+        raw_response(json.dumps(recovered)),
+    ])
+    runner = GoalRegionRunner(
+        config(), [], client=SimpleNamespace(messages=messages)
+    )
+
+    turn = runner.turn("I need a plumber.")
+
+    assert len(messages.calls) == 2
+    assert messages.calls[0] == messages.calls[1]
+    assert turn.reply == "What time works for you?"
+    assert turn.rejected == []
