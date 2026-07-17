@@ -16,7 +16,7 @@ from aiohttp import web
 
 from voice import metrics_db
 from voice import voice_catalog
-from voice.flow_session import FlowSession, scheduler_flow_enabled
+from voice.flow_session import FLOW_MODES, FlowSession, get_flow_mode, set_flow_mode
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
@@ -113,7 +113,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 session = Session()
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
-                session._scheduler_flow_enabled = scheduler_flow_enabled()
+                session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
                 session._scheduler_flow_attempted = False
                 session._scheduler_flow = None
                 # Apply any settings the browser pushed before the session existed.
@@ -325,6 +325,7 @@ async def _handle_scheduler_request(
         # One audio gate covers both the greeting and the pending first reply;
         # otherwise the greeting's audio_end rearms hands-free VAD too early.
         await ws.send_json({"type": "agent_audio_start"})
+        await ws.send_json(_flow_state_message(flow))
 
     try:
         if greeting is not None:
@@ -341,6 +342,7 @@ async def _handle_scheduler_request(
             # Revert before either so a completed flow cannot be stranded.
             session._scheduler_flow = None
             session._scheduler_flow_enabled = False
+        await ws.send_json(_flow_state_message(flow, reply))
         await ws.send_json({"type": "agent_reply", "text": reply.text})
         if greeting is not None:
             await session.speak_text(reply.text, session.voice_id, session.speed)
@@ -350,6 +352,48 @@ async def _handle_scheduler_request(
     finally:
         if greeting is not None and not ws.closed:
             await ws.send_json({"type": "agent_audio_end"})
+
+
+def _flow_state_message(flow, reply=None) -> dict:
+    """Build the browser's defensive, read-only goal-region snapshot."""
+
+    slots = getattr(reply, "slots", None) if reply is not None else None
+    if not isinstance(slots, dict):
+        slots = getattr(flow, "slots", {})
+    if not isinstance(slots, dict):
+        slots = {}
+
+    rejected = getattr(reply, "rejected", []) if reply is not None else []
+    if not isinstance(rejected, (list, tuple)):
+        rejected = []
+
+    turns_used = getattr(reply, "turns_used", None) if reply is not None else None
+    if not isinstance(turns_used, int) or isinstance(turns_used, bool):
+        turns_used = getattr(flow, "turns_used", 0)
+    if not isinstance(turns_used, int) or isinstance(turns_used, bool):
+        turns_used = 0
+    max_turns = getattr(reply, "max_turns", None) if reply is not None else None
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        max_turns = getattr(flow, "max_turns", 0)
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        max_turns = 0
+
+    supervisor_ms = (
+        getattr(reply, "supervisor_ms", None) if reply is not None else None
+    )
+    if not isinstance(supervisor_ms, (int, float)) or isinstance(supervisor_ms, bool):
+        supervisor_ms = None
+
+    return {
+        "type": "flow_state",
+        "goal": str(getattr(flow, "goal", "") or ""),
+        "outcome": getattr(reply, "outcome", None) if reply is not None else None,
+        "slots": dict(slots),
+        "rejected": [str(item) for item in rejected],
+        "turns_used": int(turns_used),
+        "max_turns": int(max_turns),
+        "supervisor_ms": supervisor_ms,
+    }
 
 
 async def _consume_sse(
@@ -649,6 +693,35 @@ async def metrics_handler(request: web.Request) -> web.Response:
     })
 
 
+def _flow_api_payload() -> dict:
+    return {
+        "active": get_flow_mode(),
+        "options": list(FLOW_MODES),
+        "availability_ok": FlowSession.availability_ok(),
+    }
+
+
+async def flow_get_handler(request: web.Request) -> web.Response:
+    """Report the flow used for new browser sessions and phone calls."""
+
+    return web.json_response(_flow_api_payload())
+
+
+async def flow_set_handler(request: web.Request) -> web.Response:
+    """Set the flow used for new browser sessions and phone calls."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.Response(status=400, text="bad json")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="bad json")
+    mode = str(body.get("mode", "")).lower()
+    if not set_flow_mode(mode):
+        return web.Response(status=400, text=f"unknown mode: {mode}")
+    return web.json_response(_flow_api_payload())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -671,6 +744,8 @@ def create_app() -> web.Application:
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
     app.router.add_get("/api/metrics", metrics_handler)
+    app.router.add_get("/api/voice/flow", flow_get_handler)
+    app.router.add_post("/api/voice/flow", flow_set_handler)
     register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
     app.router.add_get("/{filename}", static_handler)
     return app

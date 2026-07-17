@@ -20,6 +20,21 @@ const speedValue = document.getElementById("speed-value");
 const modelSelect = document.getElementById("model-select");
 const sttSelect = document.getElementById("stt-select");
 const vadSelect = document.getElementById("vad-select");
+const flowSelect = document.getElementById("flow-select");
+const flowWarning = document.getElementById("flow-warning");
+const goalRegionCard = document.getElementById("goal-region-card");
+const flowGoal = document.getElementById("flow-goal");
+const flowOutcome = document.getElementById("flow-outcome");
+const flowSlotJob = document.getElementById("flow-slot-job");
+const flowSlotJobValue = document.getElementById("flow-slot-job-value");
+const flowSlotStart = document.getElementById("flow-slot-start");
+const flowSlotStartValue = document.getElementById("flow-slot-start-value");
+const flowSlotDuration = document.getElementById("flow-slot-duration");
+const flowSlotDurationValue = document.getElementById("flow-slot-duration-value");
+const flowBudget = document.getElementById("flow-budget");
+const flowLatency = document.getElementById("flow-latency");
+const flowRejections = document.getElementById("flow-rejections");
+const flowRejectionsList = document.getElementById("flow-rejections-list");
 
 // VAD dropdown (phone line): mirrors the STT/LLM/Voice pipeline selectors.
 // Applies to NEW phone calls; served by GET/POST /api/phone/vad.
@@ -47,6 +62,54 @@ vadSelect.addEventListener("change", function () {
         body: JSON.stringify({ mode: vadSelect.value }),
     });
 });
+
+function renderFlowConfig(config) {
+    var options = Array.isArray(config.options) ? config.options : ["off", "scheduler"];
+    flowSelect.innerHTML = "";
+    options.forEach(function (mode) {
+        var o = document.createElement("option");
+        o.value = mode;
+        o.textContent = mode === "scheduler" ? "Plumber scheduler" : "Off";
+        flowSelect.appendChild(o);
+    });
+    flowSelect.value = options.indexOf(config.active) >= 0 ? config.active : "off";
+    flowWarning.textContent = "Scheduler availability is unavailable";
+    flowWarning.classList.toggle("hidden", config.availability_ok === true);
+}
+
+function loadFlowConfig() {
+    return fetch("/api/voice/flow").then(function (r) { return r.json(); }).then(function (config) {
+        renderFlowConfig(config || {});
+        flowSelect.disabled = false;
+    }).catch(function () {
+        flowSelect.innerHTML = "";
+        var o = document.createElement("option");
+        o.textContent = "n/a";
+        flowSelect.appendChild(o);
+        flowSelect.disabled = true;
+        flowWarning.classList.remove("hidden");
+        flowWarning.textContent = "Could not load flow settings";
+    });
+}
+
+flowSelect.addEventListener("change", function () {
+    flowSelect.disabled = true;
+    fetch("/api/voice/flow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: flowSelect.value }),
+    }).then(function (r) {
+        if (!r.ok) throw new Error("flow update failed");
+        return r.json();
+    }).then(function (config) {
+        renderFlowConfig(config || {});
+        statusText.textContent = "Flow updated — applies to new sessions and calls";
+    }).catch(loadFlowConfig).finally(function () {
+        flowSelect.disabled = false;
+    });
+});
+
+loadFlowConfig();
 const settingsBtn = document.getElementById("settings-btn");
 const pipelinePanel = document.getElementById("pipeline-panel");
 
@@ -190,6 +253,93 @@ function finalizeAgentBubble() {
 function clearThinking() {
     const el = chatLog.querySelector(".thinking");
     if (el) el.remove();
+}
+
+function formatFlowStart(value) {
+    if (typeof value !== "string" || !value) return "empty";
+    var parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    try {
+        return new Intl.DateTimeFormat(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+        }).format(parsed);
+    } catch (_e) {
+        return value;
+    }
+}
+
+function setFlowSlot(chip, valueEl, rawValue, displayValue) {
+    var filled = rawValue !== null && rawValue !== undefined && rawValue !== "";
+    chip.classList.toggle("flow-slot-empty", !filled);
+    chip.classList.toggle("flow-slot-filled", filled);
+    valueEl.textContent = filled ? String(displayValue) : "empty";
+}
+
+function renderFlowState(state) {
+    state = state && typeof state === "object" ? state : {};
+    goalRegionCard.classList.remove("hidden");
+    flowGoal.textContent = typeof state.goal === "string" ? state.goal : "";
+
+    var slots = state.slots && typeof state.slots === "object" ? state.slots : {};
+    setFlowSlot(flowSlotJob, flowSlotJobValue, slots.job, slots.job);
+    setFlowSlot(
+        flowSlotStart,
+        flowSlotStartValue,
+        slots.slot_start,
+        formatFlowStart(slots.slot_start)
+    );
+    var duration = typeof slots.duration_minutes === "number"
+        ? slots.duration_minutes + " minutes"
+        : slots.duration_minutes;
+    setFlowSlot(
+        flowSlotDuration,
+        flowSlotDurationValue,
+        slots.duration_minutes,
+        duration
+    );
+
+    var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
+    var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
+    flowBudget.textContent = "turn " + turnsUsed + " / " + maxTurns;
+    flowLatency.textContent = typeof state.supervisor_ms === "number"
+        ? "supervisor " + Math.round(state.supervisor_ms) + " ms"
+        : "supervisor —";
+
+    var rejected = Array.isArray(state.rejected) ? state.rejected : [];
+    while (flowRejectionsList.firstChild) {
+        flowRejectionsList.removeChild(flowRejectionsList.firstChild);
+    }
+    rejected.forEach(function (item) {
+        var li = document.createElement("li");
+        li.textContent = String(item);
+        flowRejectionsList.appendChild(li);
+    });
+    flowRejections.classList.toggle("hidden", rejected.length === 0);
+
+    var outcome = typeof state.outcome === "string" ? state.outcome.toLowerCase() : "";
+    flowOutcome.className = "flow-outcome hidden";
+    flowOutcome.textContent = "";
+    if (outcome === "booked") {
+        var readback = [
+            slots.job,
+            formatFlowStart(slots.slot_start),
+            typeof slots.duration_minutes === "number"
+                ? slots.duration_minutes + " minutes"
+                : slots.duration_minutes,
+        ].filter(function (value) { return value && value !== "empty"; });
+        flowOutcome.textContent = "BOOKED" + (readback.length ? " — " + readback.join(" · ") : "");
+    } else if (outcome === "escape") {
+        flowOutcome.textContent = "ESCAPE";
+    } else if (outcome === "budget") {
+        flowOutcome.textContent = "BUDGET";
+    }
+    if (flowOutcome.textContent) {
+        flowOutcome.className = "flow-outcome flow-outcome-" + outcome;
+    }
 }
 
 // ── Tool approval card ───────────────────────────────────────
@@ -620,6 +770,10 @@ function handleMessage(msg) {
 
         case "debug":
             addDebugEntry(msg);
+            break;
+
+        case "flow_state":
+            renderFlowState(msg);
             break;
 
         case "voice_notice":

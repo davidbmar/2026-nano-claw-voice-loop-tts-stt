@@ -42,7 +42,7 @@ import numpy as np
 from aiohttp import web
 
 from voice import metrics_db, silero_vad
-from voice.flow_session import FlowSession, scheduler_flow_enabled
+from voice.flow_session import FlowSession, get_flow_mode
 from voice.phone_audio import (
     FRAME_MS,
     TELNYX_RATE,
@@ -175,7 +175,7 @@ class PhoneCall:
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
-        self.flow = FlowSession.create() if scheduler_flow_enabled() else None
+        self.flow = FlowSession.create() if get_flow_mode() == "scheduler" else None
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         # Idle policy: clock runs from the last time the caller spoke or the
         # agent finished speaking; one "are you still there?" per stretch.

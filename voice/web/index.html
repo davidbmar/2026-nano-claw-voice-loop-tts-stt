@@ -17,6 +17,36 @@
       <div id="debug-content"></div>
     </div>
 
+    <section id="goal-region-card" class="hidden" aria-live="polite">
+      <div class="flow-card-header">
+        <span>Goal region</span>
+        <span id="flow-outcome" class="flow-outcome hidden"></span>
+      </div>
+      <p id="flow-goal" class="flow-goal"></p>
+      <div class="flow-slots" aria-label="Scheduler slots">
+        <div id="flow-slot-job" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Job</span>
+          <span id="flow-slot-job-value" class="flow-slot-value">empty</span>
+        </div>
+        <div id="flow-slot-start" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Start</span>
+          <span id="flow-slot-start-value" class="flow-slot-value">empty</span>
+        </div>
+        <div id="flow-slot-duration" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Duration</span>
+          <span id="flow-slot-duration-value" class="flow-slot-value">empty</span>
+        </div>
+      </div>
+      <div class="flow-meta">
+        <span id="flow-budget">turn 0 / 0</span>
+        <span id="flow-latency">supervisor —</span>
+      </div>
+      <div id="flow-rejections" class="flow-rejections hidden">
+        <div class="flow-rejections-title">Validator rejected</div>
+        <ul id="flow-rejections-list"></ul>
+      </div>
+    </section>
+
     <main id="chat-log"></main>
 
     <footer id="controls">
@@ -35,6 +65,11 @@
           <select id="model-select"></select></div>
         <div class="pipe-row"><label for="vad-select" title="Speech detection on the phone line (new calls)">VAD (phone)</label>
           <select id="vad-select"></select></div>
+        <div class="pipe-row"><label for="flow-select" title="Goal flow for new browser sessions and phone calls">Flow</label>
+          <div class="pipe-control-stack">
+            <select id="flow-select"></select>
+            <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
+          </div></div>
         <div id="voice-row">
           <label for="voice-select">Voice</label>
           <select id="voice-select" disabled></select>

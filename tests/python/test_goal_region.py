@@ -94,9 +94,12 @@ def test_exact_free_window_books_and_drops_supervisor_reply():
         [window("2026-07-22T08:00:00", "2026-07-22T12:00:00")],
         client=client,
     )
+    assert runner.turns_used == 0
+    assert runner.max_turns == 6
 
     turn = runner.turn("Wednesday morning works. Book it.")
 
+    assert runner.turns_used == 1
     assert turn.exit == "booked"
     assert turn.reply == ""
     assert turn.rejected == []

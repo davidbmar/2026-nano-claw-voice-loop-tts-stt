@@ -1,10 +1,14 @@
 import asyncio
 import json
 import logging
+import threading
 from types import SimpleNamespace
 
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
 from scripts.scheduling_eval import run_eval
-from voice import phone, server
+from voice import flow_session, phone, server
 from voice.flow_session import (
     FlowReply,
     FlowSession,
@@ -12,6 +16,11 @@ from voice.flow_session import (
     scheduler_region_config,
 )
 from voice.goal_region import RegionTurn
+
+
+@pytest.fixture(autouse=True)
+def reset_flow_mode(monkeypatch):
+    monkeypatch.setattr(flow_session, "_flow_mode", None)
 
 
 def run(coro):
@@ -102,6 +111,7 @@ def test_booked_terminal_is_speech_friendly():
         done=True,
         outcome="booked",
         slots=slots,
+        supervisor_ms=5.0,
     )
     assert "2026-07-20" not in reply.text
 
@@ -291,7 +301,7 @@ def test_browser_missing_availability_falls_back_and_logs(
     caplog.set_level(logging.ERROR, logger="nano-claw.flow")
     ws = FakeWebSocket()
     session = FakeBrowserSession()
-    session._scheduler_flow_enabled = server.scheduler_flow_enabled()
+    session._scheduler_flow_enabled = server.get_flow_mode() == "scheduler"
     session._scheduler_flow_attempted = False
     session._scheduler_flow = None
     client = FakeHttpClient()
@@ -464,3 +474,248 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
         assert session.spoken[-1] == "normal API reply"
 
     run(exercise())
+
+
+def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_path):
+    availability = tmp_path / "availability.json"
+    availability.write_text(json.dumps({
+        "timezone": "America/Chicago",
+        "days": {},
+    }))
+    monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "scheduler")
+    monkeypatch.setenv("NANO_CLAW_FLOW_AVAILABILITY", str(availability))
+    monkeypatch.setenv("NANO_CLAW_PHONE", "0")
+
+    async def exercise():
+        client = TestClient(TestServer(server.create_app()))
+        await client.start_server()
+        try:
+            response = await client.get("/api/voice/flow")
+            assert response.status == 200
+            assert await response.json() == {
+                "active": "scheduler",
+                "options": ["off", "scheduler"],
+                "availability_ok": True,
+            }
+
+            response = await client.post(
+                "/api/voice/flow", json={"mode": "off"}
+            )
+            assert response.status == 200
+            assert (await response.json())["active"] == "off"
+
+            response = await client.post(
+                "/api/voice/flow", json={"mode": "not-a-flow"}
+            )
+            assert response.status == 400
+
+            monkeypatch.setenv(
+                "NANO_CLAW_FLOW_AVAILABILITY", str(tmp_path / "missing.json")
+            )
+            response = await client.get("/api/voice/flow")
+            assert (await response.json())["availability_ok"] is False
+        finally:
+            await client.close()
+
+    run(exercise())
+
+
+def test_browser_flow_turn_emits_live_flow_state(monkeypatch):
+    expected_slots = {
+        "job": "drain repair",
+        "slot_start": "2026-07-21T10:30:00",
+        "duration_minutes": 60,
+    }
+
+    class FakeFlow:
+        goal = "Book one grounded plumbing appointment."
+        slots = {"job": "drain repair"}
+        turns_used = 2
+        max_turns = 12
+
+        async def reply(self, text):
+            assert text == "Tuesday morning"
+            return FlowReply(
+                text="That time crosses a busy window. How about 10:30?",
+                done=False,
+                outcome=None,
+                slots=expected_slots,
+                rejected=["slot_start: interval does not fit one free window"],
+                turns_used=3,
+                max_turns=12,
+                supervisor_ms=42.5,
+            )
+
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._scheduler_flow_enabled = True
+    session._scheduler_flow_attempted = True
+    session._scheduler_flow = FakeFlow()
+    client = FakeHttpClient()
+
+    run(server._handle_agent_request(ws, session, client, "Tuesday morning"))
+
+    states = [message for message in ws.messages if message["type"] == "flow_state"]
+    assert states == [{
+        "type": "flow_state",
+        "goal": "Book one grounded plumbing appointment.",
+        "outcome": None,
+        "slots": expected_slots,
+        "rejected": ["slot_start: interval does not fit one free window"],
+        "turns_used": 3,
+        "max_turns": 12,
+        "supervisor_ms": 42.5,
+    }]
+    assert client.calls == []
+
+
+def test_cancelled_flow_reply_serializes_next_runner_turn(monkeypatch):
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        first_started = asyncio.Event()
+        release_first = threading.Event()
+        calls = []
+
+        class SlowRunner:
+            config = SimpleNamespace(goal="Book the appointment.")
+            slots = {}
+            max_turns = 12
+
+            @property
+            def turns_used(self):
+                return len(calls)
+
+            def turn(self, text):
+                calls.append(text)
+                if text == "first turn":
+                    loop.call_soon_threadsafe(first_started.set)
+                    if not release_first.wait(timeout=2):
+                        raise AssertionError("test did not release first turn")
+                    return RegionTurn(
+                        reply="orphaned answer",
+                        exit=None,
+                        slots={},
+                        supervisor_ms=10.0,
+                        rejected=[],
+                    )
+                return RegionTurn(
+                    reply="second answer",
+                    exit=None,
+                    slots={"job": "drain repair"},
+                    supervisor_ms=12.0,
+                    rejected=[],
+                )
+
+        monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+        ws = FakeWebSocket()
+        browser_session = FakeBrowserSession()
+        browser_session._scheduler_flow_enabled = True
+        browser_session._scheduler_flow_attempted = True
+        browser_session._scheduler_flow = FlowSession(SlowRunner())
+        client = FakeHttpClient()
+
+        first_task = asyncio.create_task(
+            server._handle_agent_request(
+                ws, browser_session, client, "first turn"
+            )
+        )
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        first_task.cancel()
+        try:
+            await first_task
+        except asyncio.CancelledError:
+            pass
+
+        second_task = asyncio.create_task(
+            server._handle_agent_request(
+                ws, browser_session, client, "second turn"
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            assert calls == ["first turn"]
+            assert all(
+                message.get("text") != "orphaned answer"
+                for message in ws.messages
+            )
+
+            release_first.set()
+            await asyncio.wait_for(second_task, timeout=1)
+        finally:
+            release_first.set()
+            if not second_task.done():
+                second_task.cancel()
+
+        assert calls == ["first turn", "second turn"]
+        spoken_replies = [
+            message["text"]
+            for message in ws.messages
+            if message["type"] == "agent_reply"
+        ]
+        assert spoken_replies == ["second answer"]
+        assert browser_session.spoken == ["second answer"]
+        assert client.calls == []
+
+    run(exercise())
+
+
+def test_orphaned_flow_exception_does_not_break_next_turn(caplog):
+    caplog.set_level(logging.ERROR, logger="nano-claw.flow")
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        first_started = asyncio.Event()
+        release_first = threading.Event()
+        calls = []
+
+        class RaisingRunner:
+            config = SimpleNamespace(goal="Book the appointment.")
+            slots = {}
+            max_turns = 12
+
+            @property
+            def turns_used(self):
+                return len(calls)
+
+            def turn(self, text):
+                calls.append(text)
+                if text == "first turn":
+                    loop.call_soon_threadsafe(first_started.set)
+                    if not release_first.wait(timeout=2):
+                        raise AssertionError("test did not release first turn")
+                    raise RuntimeError("orphan failed")
+                return RegionTurn(
+                    reply="recovered answer",
+                    exit=None,
+                    slots={},
+                    supervisor_ms=8.0,
+                    rejected=[],
+                )
+
+        flow = FlowSession(RaisingRunner())
+        first_task = asyncio.create_task(flow.reply("first turn"))
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        first_task.cancel()
+        try:
+            await first_task
+        except asyncio.CancelledError:
+            pass
+
+        second_task = asyncio.create_task(flow.reply("second turn"))
+        try:
+            await asyncio.sleep(0.05)
+            assert calls == ["first turn"]
+            release_first.set()
+            reply = await asyncio.wait_for(second_task, timeout=1)
+        finally:
+            release_first.set()
+            if not second_task.done():
+                second_task.cancel()
+
+        assert calls == ["first turn", "second turn"]
+        assert reply.text == "recovered answer"
+
+    run(exercise())
+    assert "Discarded scheduler flow turn failed" in caplog.text
+    assert "orphan failed" in caplog.text

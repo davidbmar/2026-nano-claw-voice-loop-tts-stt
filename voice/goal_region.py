@@ -108,6 +108,14 @@ class GoalRegionRunner:
     def transcript(self) -> list[dict[str, str]]:
         return [dict(message) for message in self._transcript]
 
+    @property
+    def turns_used(self) -> int:
+        return self._completed_turns
+
+    @property
+    def max_turns(self) -> int:
+        return self.config.max_turns
+
     def turn(self, caller_text: str) -> RegionTurn:
         if self._matches_escape(caller_text):
             return self._short_circuit("escape")
