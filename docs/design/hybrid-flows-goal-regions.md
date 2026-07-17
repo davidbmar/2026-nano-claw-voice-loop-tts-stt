@@ -216,6 +216,42 @@ The pre-implementation Codex pass reshaped the design. Decisions:
 9. Deferred (tracked, not in v1): smart-turn integration (15), 16k Silero
    path, cost/latency SLOs for the supervisor call (18), multi-language.
 
+## Scheduling-eval verdict (2026-07-16, live run)
+
+The hybrid was tested end-to-end on the plumber-booking benchmark:
+`GoalRegionRunner` (voice/goal_region.py, the design's semantics exactly)
+against a real Google Calendar week seeded with FAKE fixtures
+(scripts/scheduling_eval/), eight LLM-simulated caller scenarios, scored
+against ground-truth free windows — never against the transcript.
+
+**Result: 8/8 scenarios passed. Zero invalid slot nominations.**
+
+- Duration-aware booking worked at every size: 30 m landed in a fragment
+  gap on the hardest day; 2 h and 4 h bookings ended flush against real
+  appointments; the exact-fit boundaries held.
+- The impossible ask (4 h, Friday-only) produced 7 turns of honest
+  negotiation and **no booking** — the free-form agent could not improvise
+  a phantom appointment because the validator is the only write path.
+- Ambiguity resolved correctly ("Thursday-ish" 1 h → Thursday can't hold
+  an hour → booked Wednesday). Change-of-mind rebooked cleanly. The
+  human-escape fired deterministically before any LLM call.
+- With the availability digest in the prompt, the supervisor never even
+  nominated an invalid slot (0 validator rejections) — the trust boundary
+  was load-bearing in design but untouched in practice.
+
+**Verdict: the hybrid is a good path.** Goal regions deliver both halves:
+free conversation absorbs fragments/digressions/negotiation, and the
+business keeps guarantees (typed slots, validated writes, bounded budgets,
+deterministic escapes). Proceed to riff (pilot steps 2–3).
+
+**The open cost is latency**: supervisor p50 3.2–5.2 s/turn on
+claude-opus-4-8 — acceptable for text, too slow for a phone turn. Before
+the phone leg ships regions: sweep smaller/faster models
+(SCHED_EVAL_MODEL), measure quality at lower effort, and stream the reply
+sentence-first (nano-claw already does this for plain chat). Also fixed
+en route: structured-outputs schemas reject `enum` on a union type — use
+`anyOf` (real-API contract; invisible to fake-client tests).
+
 ## Open questions (for the morning)
 
 - Extractor cost/latency budget per turn inside regions (a second small LLM
