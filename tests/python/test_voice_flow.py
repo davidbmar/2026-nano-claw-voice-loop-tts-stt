@@ -346,3 +346,121 @@ def test_browser_flow_greets_speaks_and_reverts_to_normal_api(monkeypatch):
 
     assert len(client.calls) == 1
     assert session.spoken[-1] == "normal API reply"
+
+
+def test_browser_first_flow_reply_keeps_audio_gate_closed(monkeypatch):
+    async def exercise():
+        reply_started = asyncio.Event()
+        release_reply = asyncio.Event()
+
+        class PendingFlow:
+            greeting = SCHEDULER_GREETING
+
+            async def reply(self, text):
+                assert text == "I need a plumber"
+                reply_started.set()
+                await release_reply.wait()
+                return FlowReply(
+                    text="What day works for you?",
+                    done=False,
+                    outcome=None,
+                    slots={"job": "plumbing"},
+                )
+
+        flow = PendingFlow()
+
+        class FakeFlowSession:
+            @classmethod
+            def create(cls):
+                return flow
+
+        monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
+        ws = FakeWebSocket()
+        session = FakeBrowserSession()
+        session._scheduler_flow_enabled = True
+        session._scheduler_flow_attempted = False
+        session._scheduler_flow = None
+        client = FakeHttpClient()
+
+        task = asyncio.create_task(
+            server._handle_agent_request(
+                ws, session, client, "I need a plumber"
+            )
+        )
+        await asyncio.wait_for(reply_started.wait(), timeout=1)
+        try:
+            event_types = [message["type"] for message in ws.messages]
+            assert event_types.count("agent_audio_start") == 1
+            assert "agent_audio_end" not in event_types
+            assert session.spoken == [SCHEDULER_GREETING]
+        finally:
+            release_reply.set()
+            await task
+
+        event_types = [message["type"] for message in ws.messages]
+        assert event_types.count("agent_audio_start") == 1
+        assert event_types.count("agent_audio_end") == 1
+        assert session.spoken == [
+            SCHEDULER_GREETING,
+            "What day works for you?",
+        ]
+        assert client.calls == []
+
+    run(exercise())
+
+
+def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
+    terminal = FlowReply(
+        text="You're booked. Goodbye!",
+        done=True,
+        outcome="booked",
+        slots={"job": "drain repair"},
+    )
+
+    async def exercise():
+        playback_started = asyncio.Event()
+        flow_calls = []
+
+        class TerminalFlow:
+            async def reply(self, text):
+                flow_calls.append(text)
+                return terminal
+
+        class BlockingSession(FakeBrowserSession):
+            async def speak_text(self, text, voice_id, speed):
+                self.spoken.append(text)
+                if text == terminal.text:
+                    playback_started.set()
+                    await asyncio.Event().wait()
+                return None
+
+        monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+        ws = FakeWebSocket()
+        session = BlockingSession()
+        session._scheduler_flow_enabled = True
+        session._scheduler_flow_attempted = True
+        session._scheduler_flow = TerminalFlow()
+        client = FakeHttpClient()
+
+        task = asyncio.create_task(
+            server._handle_agent_request(ws, session, client, "book it")
+        )
+        await asyncio.wait_for(playback_started.wait(), timeout=1)
+        assert session._scheduler_flow is None
+        assert session._scheduler_flow_enabled is False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        await server._handle_agent_request(
+            ws, session, client, "what launches are next"
+        )
+
+        assert flow_calls == ["book it"]
+        assert len(client.calls) == 1
+        assert session.spoken[-1] == "normal API reply"
+
+    run(exercise())

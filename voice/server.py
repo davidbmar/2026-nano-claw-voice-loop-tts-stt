@@ -310,6 +310,7 @@ async def _handle_scheduler_request(
         return False
 
     flow = getattr(session, "_scheduler_flow", None)
+    greeting = None
     if flow is None:
         if getattr(session, "_scheduler_flow_attempted", False):
             return False
@@ -319,21 +320,36 @@ async def _handle_scheduler_request(
             session._scheduler_flow_enabled = False
             return False
         session._scheduler_flow = flow
-        await ws.send_json({"type": "agent_reply", "text": flow.greeting})
-        await _speak_with_events(ws, session, flow.greeting)
+        greeting = flow.greeting
+        await ws.send_json({"type": "agent_reply", "text": greeting})
+        # One audio gate covers both the greeting and the pending first reply;
+        # otherwise the greeting's audio_end rearms hands-free VAD too early.
+        await ws.send_json({"type": "agent_audio_start"})
 
-    reply = await flow.reply(text)
-    log.info(
-        "Scheduler flow outcome=%s slots=%s",
-        reply.outcome or "continue",
-        reply.slots,
-    )
-    await ws.send_json({"type": "agent_reply", "text": reply.text})
-    await _speak_with_events(ws, session, reply.text)
-    if reply.done:
-        session._scheduler_flow = None
-        session._scheduler_flow_enabled = False
-    return True
+    try:
+        if greeting is not None:
+            await session.speak_text(greeting, session.voice_id, session.speed)
+
+        reply = await flow.reply(text)
+        log.info(
+            "Scheduler flow outcome=%s slots=%s",
+            reply.outcome or "continue",
+            reply.slots,
+        )
+        if reply.done:
+            # WebSocket sends and playback are cancellable during barge-in.
+            # Revert before either so a completed flow cannot be stranded.
+            session._scheduler_flow = None
+            session._scheduler_flow_enabled = False
+        await ws.send_json({"type": "agent_reply", "text": reply.text})
+        if greeting is not None:
+            await session.speak_text(reply.text, session.voice_id, session.speed)
+        else:
+            await _speak_with_events(ws, session, reply.text)
+        return True
+    finally:
+        if greeting is not None and not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
 
 
 async def _consume_sse(
