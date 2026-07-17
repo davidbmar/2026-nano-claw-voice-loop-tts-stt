@@ -1,11 +1,15 @@
 import asyncio
+import base64
 import json
+import logging
 
+import numpy as np
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from voice import phone
+from voice.phone_audio import FRAME_SAMPLES, ulaw_decode, ulaw_encode
 
 
 @pytest.fixture(autouse=True)
@@ -14,6 +18,10 @@ def phone_env(monkeypatch):
     monkeypatch.setenv("TELNYX_API_KEY", "test-key")
     monkeypatch.setenv("NANO_CLAW_PHONE_WEBHOOK_BASE", "https://nano.example.com")
     monkeypatch.setenv("NANO_CLAW_PHONE_TOKEN", "sekrit")
+    monkeypatch.setenv("NANO_CLAW_PHONE_BARGE_IN", "0")
+    monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "0")
+    monkeypatch.setenv("NANO_CLAW_PHONE_VAD", "energy")
+    monkeypatch.setattr(phone, "_vad_mode", None)
     phone._answered.clear()
 
 
@@ -34,6 +42,25 @@ def initiated_event(cid="cc-123"):
             "payload": {"call_control_id": cid, "from": "+15550001111", "to": "+15123569101"},
         }
     }
+
+
+def tone(freq_hz: float, ms: int, amp: int = 8000) -> np.ndarray:
+    t = np.arange(8000 * ms // 1000) / 8000
+    return (amp * np.sin(2 * np.pi * freq_hz * t)).astype(np.int16)
+
+
+def silence(ms: int) -> np.ndarray:
+    return np.zeros(8000 * ms // 1000, dtype=np.int16)
+
+
+def feed_pcm(call: phone.PhoneCall, pcm: np.ndarray) -> list[np.ndarray]:
+    decoded = []
+    for i in range(0, len(pcm), FRAME_SAMPLES):
+        encoded = ulaw_encode(pcm[i : i + FRAME_SAMPLES])
+        decoded_frame = ulaw_decode(encoded)
+        decoded.append(decoded_frame)
+        call.feed_media(base64.b64encode(encoded).decode())
+    return decoded
 
 
 def test_webhook_rejects_bad_token(monkeypatch):
@@ -108,3 +135,140 @@ def test_routes_not_registered_when_env_incomplete(monkeypatch):
     app = make_app()
     paths = [r.resource.canonical for r in app.router.routes()]
     assert "/api/phone/incoming" not in paths
+
+
+def test_audio_during_running_turn_replays_as_next_turn():
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-buffered")
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        turns = []
+
+        async def fake_turn(pcm):
+            turns.append(pcm)
+            if len(turns) == 1:
+                await release_first.wait()
+            else:
+                second_started.set()
+                await asyncio.Event().wait()
+
+        call._run_turn = fake_turn
+        try:
+            call._start_turn(b"first turn")
+            await asyncio.sleep(0)
+            frames = feed_pcm(
+                call, np.concatenate([tone(300, 300), silence(700)])
+            )
+
+            assert len(turns) == 1
+            assert len(call._inbound_buffer) == len(frames)
+            assert call.endpointer._frames == []
+
+            release_first.set()
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+
+            assert turns[0] == b"first turn"
+            assert turns[1] == b"".join(frame.tobytes() for frame in frames)
+            assert not call._inbound_buffer
+        finally:
+            await call.close()
+            await asyncio.sleep(0)
+
+    run(_run())
+
+
+def test_tail_prime_merges_buffered_continuation(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "1")
+    monkeypatch.setattr(phone.metrics_db, "bump_call_turns", lambda *args: None)
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-tail")
+        first_transcribing = asyncio.Event()
+        release_first = asyncio.Event()
+        second_transcribing = asyncio.Event()
+        transcribed = []
+
+        async def fake_transcribe(pcm):
+            transcribed.append(pcm)
+            if len(transcribed) == 1:
+                first_transcribing.set()
+                await release_first.wait()
+                return "tell me about"
+            second_transcribing.set()
+            return "Mars"
+
+        async def fake_stream_reply(text):
+            return None
+
+        call._transcribe = fake_transcribe
+        call._stream_reply = fake_stream_reply
+        initial = np.concatenate([tone(300, 300), silence(450)]).tobytes()
+        try:
+            call._start_turn(initial)
+            await asyncio.wait_for(first_transcribing.wait(), timeout=1)
+            continuation = feed_pcm(
+                call, np.concatenate([tone(500, 300), silence(450)])
+            )
+
+            release_first.set()
+            await asyncio.wait_for(second_transcribing.wait(), timeout=1)
+
+            expected = initial + b"".join(frame.tobytes() for frame in continuation)
+            assert transcribed == [initial, expected]
+        finally:
+            await call.close()
+            await asyncio.sleep(0)
+
+    run(_run())
+
+
+def test_audio_while_speaking_without_barge_in_is_dropped():
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-speaking")
+        try:
+            call.speaking = True
+            feed_pcm(call, np.concatenate([tone(300, 300), silence(700)]))
+
+            assert not call._inbound_buffer
+            assert call.endpointer._frames == []
+            assert call.endpointer._preroll == []
+        finally:
+            call.speaking = False
+            await call.close()
+
+    run(_run())
+
+
+def test_inbound_buffer_cap_trims_oldest(monkeypatch, caplog):
+    monkeypatch.setattr(phone, "MAX_BUFFERED_INBOUND_FRAMES", 3)
+    caplog.set_level(logging.WARNING, logger="nano-claw.phone")
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-cap")
+        keep_running = asyncio.Event()
+
+        async def fake_turn(pcm):
+            await keep_running.wait()
+
+        call._run_turn = fake_turn
+        try:
+            call._start_turn(b"first turn")
+            await asyncio.sleep(0)
+            decoded = []
+            for amplitude in (1000, 2000, 3000, 4000):
+                decoded.extend(
+                    feed_pcm(
+                        call,
+                        np.full(FRAME_SAMPLES, amplitude, dtype=np.int16),
+                    )
+                )
+
+            assert len(call._inbound_buffer) == 3
+            assert np.array_equal(call._inbound_buffer[0][0], decoded[1])
+            assert np.array_equal(call._inbound_buffer[-1][0], decoded[-1])
+            assert "inbound buffer capped at 3 frames" in caplog.text
+        finally:
+            await call.close()
+            await asyncio.sleep(0)
+
+    run(_run())

@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 
 import httpx
 import numpy as np
@@ -64,6 +65,7 @@ DEFAULT_GREETING = (
 )
 IDLE_PROMPT_TEXT = "Hi — are you still there?"
 IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling Space Channel — goodbye!"
+MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
 
 
 def idle_action(idle_s: float, prompted: bool, prompt_after_s: float) -> str:
@@ -169,6 +171,8 @@ class PhoneCall:
         self.interrupted = False
         self.closed = False
         self._turn_task: asyncio.Task | None = None
+        self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
+        self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
         # Idle policy: clock runs from the last time the caller spoke or the
         # agent finished speaking; one "are you still there?" per stretch.
@@ -178,6 +182,7 @@ class PhoneCall:
 
     async def close(self) -> None:
         self.closed = True
+        self._inbound_buffer.clear()
         if self._turn_task and not self._turn_task.done():
             self._turn_task.cancel()
         if self._idle_task and not self._idle_task.done():
@@ -237,9 +242,16 @@ class PhoneCall:
                 self._interrupt()
             return
 
-        # While a turn is still thinking (STT/LLM), ignore audio — unless we
-        # just interrupted, in which case the caller's speech IS the new turn.
+        # A completed task's callback normally replays first, but finish it
+        # here too so a newly arrived frame can never overtake older audio.
+        if self._turn_task and self._turn_task.done():
+            self._turn_finished(self._turn_task)
+
+        # While a turn is still thinking (STT/LLM), hold audio for ordered
+        # replay — unless we just interrupted, in which case the caller's
+        # speech is already feeding the barge-in-primed endpointer.
         if self._turn_task and not self._turn_task.done() and not self.interrupted:
+            self._buffer_inbound(pcm, is_speech)
             return
 
         utterance = self.endpointer.feed(pcm, is_speech=is_speech)
@@ -247,8 +259,45 @@ class PhoneCall:
             self._mark_activity()
             if self._turn_task and not self._turn_task.done():
                 self._turn_task.cancel()  # interrupted turn still unwinding
+                self._inbound_buffer.clear()
             self.interrupted = False
-            self._turn_task = asyncio.create_task(self._run_turn(utterance))
+            self._start_turn(utterance)
+
+    def _buffer_inbound(self, pcm: np.ndarray, is_speech: bool | None) -> None:
+        if len(self._inbound_buffer) >= MAX_BUFFERED_INBOUND_FRAMES:
+            self._inbound_buffer.popleft()
+            self._inbound_buffer_drops += 1
+            if self._inbound_buffer_drops == 1 or self._inbound_buffer_drops % 250 == 0:
+                log.warning(
+                    "[phone %s] inbound buffer capped at %d frames — dropped %d oldest",
+                    self.call_id[:8], MAX_BUFFERED_INBOUND_FRAMES, self._inbound_buffer_drops,
+                )
+        self._inbound_buffer.append((pcm, is_speech))
+
+    def _start_turn(self, utterance: bytes) -> None:
+        task = asyncio.create_task(self._run_turn(utterance))
+        self._turn_task = task
+        task.add_done_callback(self._turn_finished)
+
+    def _turn_finished(self, task: asyncio.Task) -> None:
+        if task is not self._turn_task:
+            return
+        self._turn_task = None
+        if self.closed or task.cancelled() or self.interrupted:
+            # Barge-in has already primed the endpointer; stale thinking audio
+            # must neither precede that interruption nor reset it via replay.
+            self._inbound_buffer.clear()
+            return
+        self._replay_inbound()
+
+    def _replay_inbound(self) -> None:
+        while self._inbound_buffer and not self.closed:
+            pcm, is_speech = self._inbound_buffer.popleft()
+            utterance = self.endpointer.feed(pcm, is_speech=is_speech)
+            if utterance:
+                self._mark_activity()
+                self._start_turn(utterance)
+                return
 
     def _interrupt(self) -> None:
         """Caller talked over the agent: flush Telnyx's audio buffer, stop
