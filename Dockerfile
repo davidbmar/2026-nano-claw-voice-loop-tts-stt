@@ -21,6 +21,10 @@ COPY package.json ./
 COPY voice/ voice/
 RUN pip install --no-cache-dir -r voice/requirements.txt
 
+# Scheduler flow data: voice/flow_session.py's default availability path
+# resolves here — without it NANO_CLAW_VOICE_FLOW=scheduler silently no-ops.
+COPY scripts/scheduling_eval/ scripts/scheduling_eval/
+
 # Create dirs for runtime data
 RUN mkdir -p /root/.nano-claw/memory /app/voice/models
 RUN mkdir -p /app/data

@@ -42,6 +42,7 @@ import numpy as np
 from aiohttp import web
 
 from voice import metrics_db, silero_vad
+from voice.flow_session import FlowSession, scheduler_flow_enabled
 from voice.phone_audio import (
     FRAME_MS,
     TELNYX_RATE,
@@ -174,6 +175,8 @@ class PhoneCall:
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
+        self.flow = FlowSession.create() if scheduler_flow_enabled() else None
+        self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         # Idle policy: clock runs from the last time the caller spoke or the
         # agent finished speaking; one "are you still there?" per stretch.
         self.last_activity = time.monotonic()
@@ -360,6 +363,19 @@ class PhoneCall:
             self._tail_extensions = 0
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
+            if self.flow:
+                reply = await self.flow.reply(text)
+                log.info(
+                    "[phone %s] flow outcome=%s slots=%s",
+                    self.call_id[:8],
+                    reply.outcome or "continue",
+                    reply.slots,
+                )
+                await self.speak(reply.text)
+                if reply.done:
+                    await _telnyx_cmd(self._http, self.call_id, "hangup", {})
+                    self.closed = True
+                return
             await self._stream_reply(text)
         except asyncio.CancelledError:
             raise
@@ -591,7 +607,7 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 cid = meta.get("call_control_id") or msg.get("stream_id") or "unknown"
                 call = PhoneCall(ws, cid)
                 log.info("[phone %s] media stream started", cid[:8])
-                greeting = _cfg("NANO_CLAW_PHONE_GREETING") or DEFAULT_GREETING
+                greeting = _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
                 asyncio.create_task(call.speak(greeting))
             elif event == "media" and call:
                 call.feed_media((msg.get("media") or {}).get("payload", ""))

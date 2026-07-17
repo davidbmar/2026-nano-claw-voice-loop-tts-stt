@@ -1,5 +1,7 @@
 """Voice server — aiohttp + WebSocket bridge between browser and nano-claw API."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -7,18 +9,22 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from aiohttp import web
 
-from voice.webrtc import Session
 from voice import metrics_db
 from voice import voice_catalog
+from voice.flow_session import FlowSession, scheduler_flow_enabled
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
 from voice.backoff import Backoff
+
+if TYPE_CHECKING:
+    from voice.webrtc import Session
 
 log = logging.getLogger("voice-server")
 
@@ -101,9 +107,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"type": "hello_ack", "bargeIn": BARGE_IN_ENABLED})
 
             elif msg_type == "webrtc_offer":
+                # aiortc is only needed once a browser actually starts WebRTC.
+                from voice.webrtc import Session
+
                 session = Session()
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
+                session._scheduler_flow_enabled = scheduler_flow_enabled()
+                session._scheduler_flow_attempted = False
+                session._scheduler_flow = None
                 # Apply any settings the browser pushed before the session existed.
                 if "voice" in pending_settings:
                     v = pending_settings["voice"]
@@ -265,6 +277,8 @@ async def _handle_agent_request(
 ) -> None:
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     try:
+        if await _handle_scheduler_request(ws, session, text):
+            return
         req_start = time.monotonic()
         async with client.stream(
             "POST",
@@ -283,6 +297,43 @@ async def _handle_agent_request(
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+async def _handle_scheduler_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    text: str,
+) -> bool:
+    """Handle an enabled scheduler turn before the normal API route."""
+
+    if not getattr(session, "_scheduler_flow_enabled", False):
+        return False
+
+    flow = getattr(session, "_scheduler_flow", None)
+    if flow is None:
+        if getattr(session, "_scheduler_flow_attempted", False):
+            return False
+        session._scheduler_flow_attempted = True
+        flow = FlowSession.create()
+        if flow is None:
+            session._scheduler_flow_enabled = False
+            return False
+        session._scheduler_flow = flow
+        await ws.send_json({"type": "agent_reply", "text": flow.greeting})
+        await _speak_with_events(ws, session, flow.greeting)
+
+    reply = await flow.reply(text)
+    log.info(
+        "Scheduler flow outcome=%s slots=%s",
+        reply.outcome or "continue",
+        reply.slots,
+    )
+    await ws.send_json({"type": "agent_reply", "text": reply.text})
+    await _speak_with_events(ws, session, reply.text)
+    if reply.done:
+        session._scheduler_flow = None
+        session._scheduler_flow_enabled = False
+    return True
 
 
 async def _consume_sse(

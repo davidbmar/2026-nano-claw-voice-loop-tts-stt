@@ -23,7 +23,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from voice.goal_region import FreeWindow, GoalRegionRunner, RegionConfig
+from voice.flow_session import (
+    SCHEDULER_GREETING as GREETING,
+    availability_digest as _availability_digest,
+    load_free_windows as _load_windows,
+    scheduler_region_config,
+)
+from voice.goal_region import GoalRegionRunner
 
 HERE = Path(__file__).resolve().parent
 AVAILABILITY_PATH = HERE / "availability.json"
@@ -31,7 +37,6 @@ GROUND_TRUTH_PATH = HERE / "ground_truth.json"
 SCENARIOS_PATH = HERE / "scenarios.json"
 RESULTS_PATH = HERE / "results.json"
 
-GREETING = "Thanks for calling Lakeside Plumbing. What can I help you schedule?"
 CONFIRMATION = "You're all set. We'll send the appointment details shortly."
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -69,32 +74,6 @@ def _caller_turn(client, scenario: dict, messages: list[dict], agent_text: str) 
         {"role": "assistant", "content": caller_text},
     ])
     return caller_text
-
-
-def _load_windows(availability: dict) -> list[FreeWindow]:
-    return [
-        FreeWindow(
-            start=datetime.fromisoformat(window["start"]),
-            end=datetime.fromisoformat(window["end"]),
-        )
-        for windows in availability["days"].values()
-        for window in windows
-    ]
-
-
-def _availability_digest(availability: dict) -> str:
-    lines = [
-        f"All times are {availability['timezone']}; business hours are 08:00–18:00.",
-        "A visit must fit inside one listed half-open free window:",
-    ]
-    for day, windows in availability["days"].items():
-        parsed_day = datetime.fromisoformat(day)
-        label = f"{parsed_day:%A %B} {parsed_day.day}"
-        rendered = ", ".join(
-            f"{window['start'][11:16]}–{window['end'][11:16]}" for window in windows
-        )
-        lines.append(f"- {label} ({day}): {rendered or 'no availability'}")
-    return "\n".join(lines)
 
 
 def _percentile(values: list[float], quantile: float) -> float | None:
@@ -164,29 +143,7 @@ def _score(scenario: dict, outcome: str, raw_exit: str, slots: dict) -> dict:
 
 def run_scenario(client, availability: dict, scenario: dict) -> dict:
     runner = GoalRegionRunner(
-        RegionConfig(
-            goal=(
-                "Book one plumbing appointment that satisfies the caller and fits "
-                "the grounded availability. Never shorten the requested duration."
-            ),
-            persona=(
-                "You are a concise, warm plumbing scheduler. Offer concrete available "
-                "times, clarify constraints, and never claim a time outside the digest."
-            ),
-            digest=_availability_digest(availability),
-            slots={
-                "job": {"type": "text", "required": True},
-                "slot_start": {"type": "datetime", "required": True},
-                "duration_minutes": {
-                    "type": "minutes",
-                    "values": [30, 60, 120, 240],
-                    "required": True,
-                },
-            },
-            escape_phrases=("operator", "human", "goodbye"),
-            max_turns=scenario.get("max_turns", 9),
-            deadline_s=180,
-        ),
+        scheduler_region_config(_availability_digest(availability)),
         _load_windows(availability),
         client=client,
     )

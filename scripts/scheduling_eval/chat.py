@@ -29,35 +29,14 @@ from run_eval import (  # noqa: E402
     _truth_slot_valid,
     GROUND_TRUTH_PATH,
 )
-from voice.goal_region import GoalRegionRunner, RegionConfig  # noqa: E402
+from voice.flow_session import scheduler_region_config  # noqa: E402
+from voice.goal_region import GoalRegionRunner  # noqa: E402
 
 
 def main() -> None:
     availability = json.loads(AVAILABILITY_PATH.read_text())
     runner = GoalRegionRunner(
-        RegionConfig(
-            goal=(
-                "Book one plumbing appointment that satisfies the caller and fits "
-                "the grounded availability. Never shorten the requested duration."
-            ),
-            persona=(
-                "You are a concise, warm plumbing scheduler. Offer concrete available "
-                "times, clarify constraints, and never claim a time outside the digest."
-            ),
-            digest=_availability_digest(availability),
-            slots={
-                "job": {"type": "text", "required": True},
-                "slot_start": {"type": "datetime", "required": True},
-                "duration_minutes": {
-                    "type": "minutes",
-                    "values": [30, 60, 120, 240],
-                    "required": True,
-                },
-            },
-            escape_phrases=("operator", "human", "goodbye"),
-            max_turns=12,
-            deadline_s=600,
-        ),
+        scheduler_region_config(_availability_digest(availability)),
         _load_windows(availability),
     )
 
