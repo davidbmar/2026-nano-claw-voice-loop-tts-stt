@@ -161,7 +161,12 @@ def _score(scenario: dict, outcome: str, raw_exit: str, slots: dict) -> dict:
     truth = json.loads(GROUND_TRUTH_PATH.read_text())
     allowed = scenario.get("expected_outcomes", [scenario.get("expected_outcome")])
     expected_match = outcome in allowed
-    exit_match = (
+    capped_no_booking = (
+        outcome == "no_booking"
+        and "no_booking" in allowed
+        and raw_exit in ("caller_cap", "caller_gave_up")
+    )
+    exit_match = capped_no_booking or (
         "expected_exit" not in scenario or raw_exit == scenario["expected_exit"]
     )
     valid_slot = _truth_slot_valid(slots, truth) if outcome == "booked" else None

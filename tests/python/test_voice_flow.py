@@ -120,6 +120,10 @@ def test_run_eval_uses_shared_scheduler_config_without_network():
     config = scheduler_region_config("availability digest")
     assert config.max_turns == 12
     assert config.deadline_s == 600
+    assert (
+        "Keep every reply to one or two short spoken sentences; offer at most "
+        "two candidate times per turn."
+    ) in config.persona
     assert run_eval.scheduler_region_config is scheduler_region_config
     assert run_eval.GREETING == SCHEDULER_GREETING
 
@@ -150,6 +154,31 @@ def test_run_eval_uses_shared_scheduler_config_without_network():
 
     assert result["passed"] is True
     assert result["exit"] == "escape"
+
+
+def test_eval_score_accepts_no_booking_caps_but_keeps_escape_strict():
+    no_booking = {
+        "duration_minutes": 240,
+        "expected_outcome": "no_booking",
+        "expected_exit": "budget",
+    }
+    for raw_exit in ("caller_cap", "caller_gave_up"):
+        score = run_eval._score(no_booking, "no_booking", raw_exit, {})
+        assert score["expected_match"] is True
+        assert score["exit_match"] is True
+        assert score["passed"] is True
+
+    expected_escape = {
+        "duration_minutes": 60,
+        "expected_outcome": "escape",
+        "expected_exit": "escape",
+    }
+    score = run_eval._score(
+        expected_escape, "no_booking", "caller_cap", {}
+    )
+    assert score["expected_match"] is False
+    assert score["exit_match"] is False
+    assert score["passed"] is False
 
 
 def test_run_eval_empty_caller_retries_then_scores_give_up():

@@ -91,7 +91,9 @@ def scheduler_region_config(digest: str) -> RegionConfig:
         ),
         persona=(
             "You are a concise, warm plumbing scheduler. Offer concrete available "
-            "times, clarify constraints, and never claim a time outside the digest."
+            "times, clarify constraints, and never claim a time outside the digest. "
+            "Keep every reply to one or two short spoken sentences; offer at most "
+            "two candidate times per turn."
         ),
         digest=digest,
         slots={
