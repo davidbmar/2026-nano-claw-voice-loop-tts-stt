@@ -127,19 +127,25 @@ class GoalRegionRunner:
 
         messages = [*self._transcript, {"role": "user", "content": caller_text}]
         started = self.clock()
-        response = self.client.messages.create(
-            model=os.environ.get("SCHED_EVAL_MODEL", "claude-opus-4-8"),
-            max_tokens=2048,
-            system=[{
+        request: dict = {
+            "model": os.environ.get("SCHED_EVAL_MODEL", "claude-opus-4-8"),
+            "max_tokens": 2048,
+            "system": [{
                 "type": "text",
                 "text": self._system_prompt(),
                 "cache_control": {"type": "ephemeral"},
             }],
-            messages=messages,
-            output_config={
+            "messages": messages,
+            "output_config": {
                 "format": {"type": "json_schema", "schema": _SUPERVISOR_SCHEMA}
             },
-        )
+        }
+        # Latency knob: Sonnet 5 runs adaptive thinking when the field is
+        # omitted; SCHED_EVAL_THINKING=disabled turns it off for a fair
+        # per-turn latency comparison. (Omitted = off on Opus 4.8/Haiku 4.5.)
+        if os.environ.get("SCHED_EVAL_THINKING", "").strip() == "disabled":
+            request["thinking"] = {"type": "disabled"}
+        response = self.client.messages.create(**request)
         supervisor_ms = max(0.0, (self.clock() - started) * 1000)
         payload = _structured_payload(response)
         reply = payload.get("reply") if isinstance(payload.get("reply"), str) else ""
