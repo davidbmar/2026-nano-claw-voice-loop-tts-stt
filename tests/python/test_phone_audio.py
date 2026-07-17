@@ -115,12 +115,17 @@ class TestTranscriptTailCheck:
         for text in (
             "Hi, can you tell me about the latest launches?",
             "What is the next rocket launch?",
+            "tell me more",
+            "what is this",
             "Mars",
             "Yes.",
             "No thanks, goodbye.",
             "Tell me about the U F O cases.",
         ):
             assert not transcript_looks_incomplete(text), text
+
+    def test_genuine_tail_fragment_still_extends(self):
+        assert transcript_looks_incomplete("tell me about")
 
     def test_trailing_comma_and_empty(self):
         assert transcript_looks_incomplete("So I was thinking,")

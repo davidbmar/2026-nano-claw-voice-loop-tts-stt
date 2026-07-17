@@ -197,6 +197,8 @@ class UtteranceEndpointer:
 # conjunctions, articles, fillers, and dangling verbs. Derived from riff's
 # observed fragmented turns ("...like tell me about", "What is the next",
 # "...hear about, um,") — a transcript ending here means "keep listening".
+# "more" and "this" are excluded because they often finish a thought cleanly
+# ("tell me more", "what is this").
 _INCOMPLETE_TAIL_WORDS = {
     # prepositions / particles
     "about", "with", "for", "of", "to", "in", "on", "at", "by", "from",
@@ -206,7 +208,7 @@ _INCOMPLETE_TAIL_WORDS = {
     "that", "which", "whose", "where",
     # articles / determiners / possessives
     "the", "a", "an", "my", "your", "our", "their", "his", "her", "its",
-    "this", "these", "those", "some", "any", "every", "each",
+    "these", "those", "some", "any", "every", "each",
     # fillers / hesitations
     "um", "uh", "umm", "uhh", "er", "ah", "hmm", "like", "you know",
     # dangling verbs / auxiliaries
@@ -215,7 +217,7 @@ _INCOMPLETE_TAIL_WORDS = {
     "want", "need", "gonna", "wanna", "let", "tell", "give", "show",
     # dangling adjectives/ordinals before an elided noun ("the next…")
     "next", "last", "latest", "first", "second", "other", "another",
-    "more", "most", "best", "new",
+    "most", "best", "new",
 }
 
 
