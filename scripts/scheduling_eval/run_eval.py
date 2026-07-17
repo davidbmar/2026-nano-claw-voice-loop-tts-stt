@@ -38,7 +38,7 @@ SCENARIOS_PATH = HERE / "scenarios.json"
 RESULTS_PATH = HERE / "results.json"
 
 CONFIRMATION = "You're all set. We'll send the appointment details shortly."
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-haiku-4-5"
 
 
 def _response_text(response) -> str:

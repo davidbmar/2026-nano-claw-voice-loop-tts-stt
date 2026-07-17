@@ -130,7 +130,7 @@ class GoalRegionRunner:
         messages = [*self._transcript, {"role": "user", "content": caller_text}]
         started = self.clock()
         request: dict = {
-            "model": os.environ.get("SCHED_EVAL_MODEL", "claude-opus-4-8"),
+            "model": os.environ.get("SCHED_EVAL_MODEL", "claude-haiku-4-5"),
             "max_tokens": 4096,
             "system": [{
                 "type": "text",
