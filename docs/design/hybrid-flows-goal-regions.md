@@ -181,6 +181,41 @@ Same for the other observed fragments ("What is the next…" — article;
 This mirrors where the industry actually went — LiveKit's v1 fuses
 semantic + acoustic precisely because neither is enough alone.
 
+## Codex review revisions (2026-07-16, 18 findings, 8 P1 — accepted changes)
+
+The pre-implementation Codex pass reshaped the design. Decisions:
+
+1. **One supervisor call per caller turn, not agent+extractor** (finding 16):
+   the region LLM call returns `{reply, slot_candidates, exit_candidate,
+   evidence}` in one shot; **deterministic validators** (typed enums, regex,
+   global commands) accept/reject candidates and choose transitions. No
+   second extractor, no agent/extractor race, defined ordering (finding 2):
+   a validated exit wins and the region reply is dropped in favor of the
+   next state's entry line.
+2. **Trust boundary restated** (finding 3): validators + explicit scripted
+   confirmation states establish consequential facts; the LLM only
+   nominates candidates. Consent/identity/payment fields always confirm.
+3. **Budgets are wall-clock deadlines** (finding 5): an asyncio timer per
+   goal state fires the timeout transition even if the caller never speaks
+   again; turn budgets count *completed logical turns*.
+4. **Deterministic global escapes** (finding 9): operator/human/goodbye
+   keywords, DTMF, hangup, and deadlines are code-level checks that run
+   before the LLM sees the turn; the extractor is a fallback nominator only.
+5. **Dead-air is a watchdog property** (finding 6): the existing idle
+   watchdog stays authoritative; regions add nothing magical.
+6. **Flow state lives in the gateway** (finding 8): the FlowRun is owned by
+   the PhoneCall (single-writer), persisted as append-only `flow_events`
+   rows (finding 12) with state/enter/exit/slot/budget records. The TS chat
+   memory is NOT used for region turns — regions keep their own transcript.
+7. **Fix lossless inbound buffering first** (finding 1): audio arriving
+   while STT/LLM runs must keep feeding the endpointer and queue the next
+   utterance; today it is dropped — which also eats tail-extension
+   continuations.
+8. Tail-heuristic softened (finding 14): "more"/"this" removed from the
+   dangling set; treated as one vote, not an oracle.
+9. Deferred (tracked, not in v1): smart-turn integration (15), 16k Silero
+   path, cost/latency SLOs for the supervisor call (18), multi-language.
+
 ## Open questions (for the morning)
 
 - Extractor cost/latency budget per turn inside regions (a second small LLM
