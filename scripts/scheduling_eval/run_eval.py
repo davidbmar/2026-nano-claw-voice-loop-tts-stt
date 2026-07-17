@@ -14,7 +14,7 @@ import json
 import os
 import statistics
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
@@ -45,11 +45,15 @@ def _response_text(response) -> str:
     for block in response.content:
         text = getattr(block, "text", None)
         if isinstance(text, str):
-            return text.strip().strip('"')
-    raise ValueError("caller simulator returned no text")
+            cleaned = text.strip().strip('"')
+            if cleaned:
+                return cleaned
+    return ""
 
 
-def _caller_turn(client, scenario: dict, messages: list[dict], agent_text: str) -> str:
+def _caller_turn(
+    client, scenario: dict, messages: list[dict], agent_text: str
+) -> str | None:
     prompt = (
         "You are simulating a caller in a phone scheduling test. Speak only as "
         "the caller: short, casual, and occasionally fragmented. Do not narrate "
@@ -58,22 +62,72 @@ def _caller_turn(client, scenario: dict, messages: list[dict], agent_text: str) 
         f"Scenario brief: {scenario['brief']}"
     )
     next_messages = [*messages, {"role": "user", "content": agent_text}]
-    response = client.messages.create(
-        model=os.environ.get("SCHED_EVAL_CALLER_MODEL", DEFAULT_MODEL),
-        max_tokens=160,
-        system=[{
-            "type": "text",
-            "text": prompt,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=next_messages,
-    )
-    caller_text = _response_text(response)
+    caller_text = ""
+    for _attempt in range(2):
+        response = client.messages.create(
+            model=os.environ.get("SCHED_EVAL_CALLER_MODEL", DEFAULT_MODEL),
+            max_tokens=160,
+            system=[{
+                "type": "text",
+                "text": prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=next_messages,
+        )
+        caller_text = _response_text(response)
+        if caller_text:
+            break
+    if not caller_text:
+        return None
+
     messages.extend([
         {"role": "user", "content": agent_text},
         {"role": "assistant", "content": caller_text},
     ])
     return caller_text
+
+
+def _resolve_scenarios(scenarios: list[dict], week_start: str) -> list[dict]:
+    """Resolve fixture-relative scenario text and dates for one eval week."""
+
+    base = date.fromisoformat(week_start)
+    template_values = {}
+    for offset in range(7):
+        fixture_day = base + timedelta(days=offset)
+        template_values[f"day_{offset}_name"] = fixture_day.strftime("%A")
+        template_values[f"day_{offset}_label"] = (
+            f"{fixture_day:%A %B} {fixture_day.day}"
+        )
+
+    resolved = []
+    for raw_scenario in scenarios:
+        scenario = dict(raw_scenario)
+        name_template = scenario.pop("name_template", None)
+        if name_template is not None:
+            scenario["name"] = name_template.format_map(template_values)
+
+        brief_template = scenario.pop("brief_template", None)
+        if brief_template is not None:
+            scenario["brief"] = brief_template.format_map(template_values)
+
+        required_day_offset = scenario.pop("required_day_offset", None)
+        if required_day_offset is not None:
+            if (
+                not isinstance(required_day_offset, int)
+                or not 0 <= required_day_offset < 7
+            ):
+                raise ValueError("required_day_offset must be an integer from 0 to 6")
+            scenario["required_date"] = str(
+                base + timedelta(days=required_day_offset)
+            )
+        resolved.append(scenario)
+    return resolved
+
+
+def _load_scenarios() -> list[dict]:
+    truth = json.loads(GROUND_TRUTH_PATH.read_text())
+    scenarios = json.loads(SCENARIOS_PATH.read_text())
+    return _resolve_scenarios(scenarios, truth["week_start"])
 
 
 def _percentile(values: list[float], quantile: float) -> float | None:
@@ -155,9 +209,15 @@ def run_scenario(client, availability: dict, scenario: dict) -> dict:
     raw_exit = "caller_cap"
     confirmation = ""
     caller_turns = 0
+    caller_gave_up = False
 
     for caller_turns in range(1, 11):
         caller_text = _caller_turn(client, scenario, caller_messages, agent_text)
+        if caller_text is None:
+            caller_gave_up = True
+            if raw_exit != "booked":
+                raw_exit = "caller_gave_up"
+            break
         turn = runner.turn(caller_text)
         slots = turn.slots
         rejections.extend(turn.rejected)
@@ -175,6 +235,7 @@ def run_scenario(client, availability: dict, scenario: dict) -> dict:
         "escape": "escape",
         "budget": "no_booking",
         "caller_cap": "no_booking",
+        "caller_gave_up": "no_booking",
     }[raw_exit]
     score = _score(scenario, outcome, raw_exit, slots)
     return {
@@ -188,6 +249,7 @@ def run_scenario(client, availability: dict, scenario: dict) -> dict:
         "slots": slots,
         "scripted_confirmation": confirmation,
         "caller_turns": caller_turns,
+        "caller_gave_up": caller_gave_up,
         "supervisor_latency_ms": {
             "p50": round(statistics.median(latencies), 1) if latencies else None,
             "p95": round(_percentile(latencies, 0.95), 1) if latencies else None,
@@ -225,7 +287,7 @@ def main() -> None:
             "availability.json is missing; run fetch_availability.py with riff's venv first"
         )
     availability = json.loads(AVAILABILITY_PATH.read_text())
-    scenarios = json.loads(SCENARIOS_PATH.read_text())
+    scenarios = _load_scenarios()
     client = anthropic.Anthropic()
     results = []
     for scenario in scenarios:

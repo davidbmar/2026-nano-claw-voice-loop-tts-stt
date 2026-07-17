@@ -21,7 +21,7 @@
     "job": "drain repair",
     "duration_minutes": 120,
     "expected_outcome": "booked",
-    "brief": "You need a two-hour drain repair this week. Monday late afternoon is ideal, but Tuesday or Wednesday also works. Accept a time that fits."
+    "brief_template": "You need a two-hour drain repair this week. {day_3_name} late afternoon is ideal, but {day_4_name} or {day_5_name} also works. Accept a time that fits."
   },
   {
     "id": "four-hour-flexible",
@@ -29,35 +29,35 @@
     "job": "water heater installation",
     "duration_minutes": 240,
     "expected_outcome": "booked",
-    "brief": "You need a four-hour water-heater installation. Tuesday afternoon or Wednesday morning works, and you will accept either valid opening."
+    "brief_template": "You need a four-hour water-heater installation. {day_4_name} afternoon or {day_5_name} morning works, and you will accept either valid opening."
   },
   {
     "id": "four-hour-friday-impossible",
-    "name": "4h, Friday only",
+    "name_template": "4h, {day_0_name} only",
     "job": "sewer line repair",
     "duration_minutes": 240,
-    "required_date": "2026-07-17",
+    "required_day_offset": 0,
     "expected_outcome": "no_booking",
     "expected_exit": "budget",
     "max_turns": 6,
-    "brief": "You need a four-hour sewer-line repair, but Friday July 17 is absolutely the only day you can do. Politely refuse every alternative and do not accept a shorter visit."
+    "brief_template": "You need a four-hour sewer-line repair, but {day_0_label} is absolutely the only day you can do. Politely refuse every alternative and do not accept a shorter visit."
   },
   {
     "id": "ambiguous-thursday",
-    "name": "1h, Thursday-ish",
+    "name_template": "1h, {day_6_name}-ish",
     "job": "pipe inspection",
     "duration_minutes": 60,
     "expected_outcomes": ["booked", "no_booking"],
-    "brief": "You need a one-hour pipe inspection, sometime Thursday-ish, whenever. If Thursday cannot fit a full hour, you are open to another day but may also decide not to book."
+    "brief_template": "You need a one-hour pipe inspection, sometime {day_6_name}-ish, whenever. If {day_6_name} cannot fit a full hour, you are open to another day but may also decide not to book."
   },
   {
     "id": "change-of-mind",
     "name": "Change day before confirm",
     "job": "garbage disposal replacement",
     "duration_minutes": 60,
-    "required_date": "2026-07-22",
+    "required_day_offset": 5,
     "expected_outcome": "booked",
-    "brief": "You need a one-hour garbage-disposal replacement. If offered Tuesday, first acknowledge it, then immediately correct yourself in the same response: you need Wednesday July 22 instead. Never finalize Tuesday; accept a valid Wednesday time."
+    "brief_template": "You need a one-hour garbage-disposal replacement. If offered {day_4_name}, first acknowledge it, then immediately correct yourself in the same response: you need {day_5_label} instead. Never finalize {day_4_name}; accept a valid {day_5_name} time."
   },
   {
     "id": "human-escape",

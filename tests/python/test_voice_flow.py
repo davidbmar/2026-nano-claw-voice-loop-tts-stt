@@ -152,6 +152,85 @@ def test_run_eval_uses_shared_scheduler_config_without_network():
     assert result["exit"] == "escape"
 
 
+def test_run_eval_empty_caller_retries_then_scores_give_up():
+    class EmptyMessages:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=[SimpleNamespace(text="")])
+
+    messages = EmptyMessages()
+    availability = {
+        "timezone": "America/Chicago",
+        "days": {},
+    }
+    scenario = {
+        "id": "empty-caller",
+        "name": "Empty caller",
+        "brief": "End the call",
+        "duration_minutes": 30,
+        "expected_outcome": "no_booking",
+    }
+
+    result = run_eval.run_scenario(
+        SimpleNamespace(messages=messages), availability, scenario
+    )
+
+    assert messages.calls == 2
+    assert result["outcome"] == "no_booking"
+    assert result["exit"] == "caller_gave_up"
+    assert result["caller_gave_up"] is True
+    assert result["passed"] is True
+
+
+def test_eval_scenarios_resolve_against_shifted_fixture_week(
+    monkeypatch, tmp_path
+):
+    raw_scenarios = json.loads(run_eval.SCENARIOS_PATH.read_text())
+    scenarios = run_eval._resolve_scenarios(raw_scenarios, "2030-02-04")
+    by_id = {scenario["id"]: scenario for scenario in scenarios}
+
+    friday_only = by_id["four-hour-friday-impossible"]
+    assert friday_only["name"] == "4h, Monday only"
+    assert friday_only["required_date"] == "2030-02-04"
+    assert "Monday February 4" in friday_only["brief"]
+
+    changed = by_id["change-of-mind"]
+    assert changed["required_date"] == "2030-02-09"
+    assert "Friday" in changed["brief"]
+    assert "Saturday February 9" in changed["brief"]
+
+    truth_path = tmp_path / "ground_truth.json"
+    truth_path.write_text(json.dumps({
+        "week_start": "2030-02-04",
+        "days": {
+            "2030-02-09": {
+                "free_windows": [{
+                    "start": "2030-02-09T10:00:00",
+                    "end": "2030-02-09T11:00:00",
+                }],
+            },
+        },
+    }))
+    monkeypatch.setattr(run_eval, "GROUND_TRUTH_PATH", truth_path)
+
+    score = run_eval._score(
+        changed,
+        "booked",
+        "booked",
+        {
+            "slot_start": "2030-02-09T10:00:00",
+            "duration_minutes": 60,
+        },
+    )
+
+    assert score["valid_against_ground_truth"] is True
+    assert score["preference_honored"] is True
+    assert score["passed"] is True
+
+
 def test_phone_flag_off_keeps_normal_defaults(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "other-flow")
     monkeypatch.setattr(phone, "get_vad_mode", lambda: "energy")
