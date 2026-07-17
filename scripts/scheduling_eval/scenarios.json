@@ -1,0 +1,71 @@
+[
+  {
+    "id": "thirty-minute-flexible",
+    "name": "30m, no day preference",
+    "job": "leaking kitchen faucet",
+    "duration_minutes": 30,
+    "expected_outcome": "booked",
+    "brief": "You need a 30-minute leaking-faucet visit this week. You have no day preference and will accept the first genuinely available time."
+  },
+  {
+    "id": "one-hour-flexible",
+    "name": "1h, no day preference",
+    "job": "toilet repair",
+    "duration_minutes": 60,
+    "expected_outcome": "booked",
+    "brief": "You need a one-hour toilet repair this week. Any day and time are fine; accept a real opening."
+  },
+  {
+    "id": "two-hour-repair",
+    "name": "2h drain repair",
+    "job": "drain repair",
+    "duration_minutes": 120,
+    "expected_outcome": "booked",
+    "brief": "You need a two-hour drain repair this week. Monday late afternoon is ideal, but Tuesday or Wednesday also works. Accept a time that fits."
+  },
+  {
+    "id": "four-hour-flexible",
+    "name": "4h installation",
+    "job": "water heater installation",
+    "duration_minutes": 240,
+    "expected_outcome": "booked",
+    "brief": "You need a four-hour water-heater installation. Tuesday afternoon or Wednesday morning works, and you will accept either valid opening."
+  },
+  {
+    "id": "four-hour-friday-impossible",
+    "name": "4h, Friday only",
+    "job": "sewer line repair",
+    "duration_minutes": 240,
+    "required_date": "2026-07-17",
+    "expected_outcome": "no_booking",
+    "expected_exit": "budget",
+    "max_turns": 6,
+    "brief": "You need a four-hour sewer-line repair, but Friday July 17 is absolutely the only day you can do. Politely refuse every alternative and do not accept a shorter visit."
+  },
+  {
+    "id": "ambiguous-thursday",
+    "name": "1h, Thursday-ish",
+    "job": "pipe inspection",
+    "duration_minutes": 60,
+    "expected_outcomes": ["booked", "no_booking"],
+    "brief": "You need a one-hour pipe inspection, sometime Thursday-ish, whenever. If Thursday cannot fit a full hour, you are open to another day but may also decide not to book."
+  },
+  {
+    "id": "change-of-mind",
+    "name": "Change day before confirm",
+    "job": "garbage disposal replacement",
+    "duration_minutes": 60,
+    "required_date": "2026-07-22",
+    "expected_outcome": "booked",
+    "brief": "You need a one-hour garbage-disposal replacement. If offered Tuesday, first acknowledge it, then immediately correct yourself in the same response: you need Wednesday July 22 instead. Never finalize Tuesday; accept a valid Wednesday time."
+  },
+  {
+    "id": "human-escape",
+    "name": "Ask for a human",
+    "job": "unknown plumbing issue",
+    "duration_minutes": 60,
+    "expected_outcome": "escape",
+    "expected_exit": "escape",
+    "brief": "On your first response, ask to speak to a human operator. Do not discuss appointment times first."
+  }
+]
