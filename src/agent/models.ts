@@ -9,7 +9,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
   { id: 'anthropic/claude-sonnet-4-5', label: 'Claude Sonnet 4.5', provider: 'anthropic' },
   { id: 'gemini/gemini-flash-lite-latest', label: 'Gemini Flash-Lite (fast/cheap)', provider: 'gemini' },
   { id: 'gemini/gemini-flash-latest', label: 'Gemini Flash', provider: 'gemini' },
-  { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek' },
+  { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', provider: 'deepseek' },
   { id: 'groq/llama-3.3-70b-versatile', label: 'Groq Llama 3.3 70B', provider: 'groq' },
   { id: 'dashscope/qwen-plus', label: 'Qwen Plus (Alibaba)', provider: 'dashscope' },
   { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini', provider: 'openai' },
