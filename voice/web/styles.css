@@ -31,6 +31,7 @@
   --accent: #ff775f;
   --accent-rgb: 255, 119, 95;
   --accent-2: #ffca5c;
+  --heading: #ff9e8c; /* soft coral — display headings; lighter kin of --accent so headings don't impersonate controls */
   --panel-width: 324px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -355,10 +356,11 @@ summary:focus-visible {
 
 .stage-copy h1 {
   margin: 0;
-  font-size: clamp(28px, 3.1vw, 50px);
+  color: var(--heading);
+  font-size: clamp(32px, 3.5vw, 56px);
   font-weight: 400;
   letter-spacing: -0.045em;
-  line-height: 0.96;
+  line-height: 0.98;
 }
 
 .stage-description {
@@ -438,8 +440,8 @@ summary:focus-visible {
 
 .panel-head h1 {
   margin: 0;
-  color: #e3e7e5;
-  font-size: 18px;
+  color: var(--heading);
+  font-size: 20px;
   font-weight: 480;
   letter-spacing: -0.02em;
 }
@@ -1244,9 +1246,9 @@ input[type="range"]::-moz-range-thumb {
 
 .transcription-header h1 {
   margin: 0;
-  color: #e3e7e5;
+  color: var(--heading);
   font-family: var(--sans);
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 480;
   letter-spacing: -0.02em;
   text-transform: none;
