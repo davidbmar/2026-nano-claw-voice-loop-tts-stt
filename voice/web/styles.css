@@ -578,6 +578,48 @@ summary:focus-visible {
   opacity: 0.38;
 }
 
+.pipe-toggle {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  appearance: none;
+  justify-self: end;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  transition: 160ms var(--ease);
+}
+
+.pipe-toggle::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  content: "";
+  transition: 160ms var(--ease);
+}
+
+.pipe-toggle:checked {
+  border-color: rgba(var(--accent-rgb), 0.48);
+  background: rgba(var(--accent-rgb), 0.13);
+}
+
+.pipe-toggle:checked::after {
+  background: var(--accent);
+  box-shadow: 0 0 9px rgba(var(--accent-rgb), 0.45);
+  transform: translateX(14px);
+}
+
+.pipe-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 .pipe-row select option,
 .pipe-row select optgroup {
   color: var(--text);
@@ -920,6 +962,15 @@ input[type="range"]::-moz-range-thumb {
 
 .debug-collapsed #debug-content {
   display: none;
+}
+
+.debug-stats {
+  padding: 1px 0 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
 }
 
 .debug-row {

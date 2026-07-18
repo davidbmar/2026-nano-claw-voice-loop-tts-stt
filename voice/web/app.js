@@ -26,6 +26,10 @@ const debugContent = document.getElementById("debug-content");
 const debugModalOverlay = document.getElementById("debug-modal-overlay");
 const debugModalBody = document.getElementById("debug-modal-body");
 const debugModalClose = document.getElementById("debug-modal-close");
+const bargeInToggle = document.getElementById("barge-in-toggle");
+const bargeInSensitivitySelect = document.getElementById("barge-in-sensitivity");
+const bargeInAdaptiveToggle = document.getElementById("barge-in-adaptive");
+const bargeInDebug = document.getElementById("barge-in-debug");
 const voiceSelect = document.getElementById("voice-select");
 const voicePreviewBtn = document.getElementById("voice-preview-btn");
 const speedSlider = document.getElementById("speed-slider");
@@ -1033,13 +1037,148 @@ let vadCalibration = [];
 let vadCalibrationUntil = 0;
 let vadRearmAt = 0;
 let bargeInEnabled = false;
+let bargeInServerAvailable = null;
 let bargeDetector = null;
+let bargeInController = null;
+let bargeInFlashTimer = null;
 let activeTurnStartedAt = null;
 let sttRequestStartedAt = null;
 let firstAgentTextAt = null;
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
+const LS_BARGE_IN_ENABLED = "nanoclaw.bargeIn.enabled";
+const LS_BARGE_IN_SENSITIVITY = "nanoclaw.bargeIn.sensitivity";
+const LS_BARGE_IN_ADAPTIVE = "nanoclaw.bargeIn.adaptive";
+const BARGE_IN_LEVELS = window.BargeInSensitivityLevels || {
+    low: { startThreshold: 0.09, sustainThreshold: 0.054 },
+    medium: { startThreshold: 0.05, sustainThreshold: 0.03 },
+    high: { startThreshold: 0.03, sustainThreshold: 0.018 },
+};
+
+let bargeInUserEnabled = localStorage.getItem(LS_BARGE_IN_ENABLED) !== "false";
+let bargeInSensitivity = localStorage.getItem(LS_BARGE_IN_SENSITIVITY) || "medium";
+let bargeInAdaptiveEnabled = localStorage.getItem(LS_BARGE_IN_ADAPTIVE) !== "false";
+if (!Object.prototype.hasOwnProperty.call(BARGE_IN_LEVELS, bargeInSensitivity)) {
+    bargeInSensitivity = "medium";
+}
+
+function syncBargeInControls() {
+    const available = bargeInServerAvailable === true;
+    bargeInEnabled = available && bargeInUserEnabled;
+    bargeInToggle.checked = bargeInUserEnabled;
+    bargeInToggle.disabled = !available;
+    bargeInSensitivitySelect.value = bargeInSensitivity;
+    bargeInSensitivitySelect.disabled = !available || !bargeInUserEnabled;
+    bargeInAdaptiveToggle.checked = bargeInAdaptiveEnabled;
+    bargeInAdaptiveToggle.disabled = !available || !bargeInUserEnabled;
+}
+
+function renderBargeInStats() {
+    if (bargeInServerAvailable === null) {
+        bargeInDebug.textContent = "barge-in · awaiting server capability";
+        return;
+    }
+    if (!bargeInServerAvailable) {
+        bargeInDebug.textContent = "barge-in · disabled by server";
+        return;
+    }
+    if (!bargeInController) {
+        bargeInDebug.textContent = "barge-in · adaptive controller unavailable";
+        return;
+    }
+    const stats = bargeInController.stats();
+    bargeInDebug.textContent = "barge-in · " + (bargeInEnabled ? "on" : "off") +
+        " · " + (bargeInAdaptiveEnabled ? "adaptive" : "manual") +
+        " · threshold " + stats.currentThreshold.toFixed(3) +
+        " / base " + stats.baseThreshold.toFixed(3) +
+        " · commits " + stats.commits +
+        " · falses " + stats.falses +
+        " · adjustments " + stats.adjustments;
+}
+
+function createBargeInController() {
+    if (typeof window.BargeInDetector !== "function" ||
+            typeof window.AdaptiveBargeInController !== "function") {
+        bargeDetector = null;
+        bargeInController = null;
+        renderBargeInStats();
+        return;
+    }
+    const thresholds = BARGE_IN_LEVELS[bargeInSensitivity];
+    bargeDetector = new window.BargeInDetector({
+        startThreshold: thresholds.startThreshold,
+        sustainThreshold: thresholds.sustainThreshold,
+    });
+    bargeInController = new window.AdaptiveBargeInController(bargeDetector, {
+        baseStartThreshold: thresholds.startThreshold,
+        baseSustainThreshold: thresholds.sustainThreshold,
+        adaptive: bargeInAdaptiveEnabled,
+    });
+    if (window.BargeIn) window.BargeIn.controller = bargeInController;
+    renderBargeInStats();
+}
+
+function resetBargeInDetector() {
+    if (bargeInController) bargeInController.reset();
+    else if (bargeDetector) bargeDetector.reset();
+}
+
+function flashBargeInAdjustment(message) {
+    const previous = statusText.textContent;
+    if (bargeInFlashTimer) clearTimeout(bargeInFlashTimer);
+    statusText.textContent = message;
+    bargeInFlashTimer = setTimeout(function () {
+        if (statusText.textContent === message) statusText.textContent = previous;
+        bargeInFlashTimer = null;
+    }, 3500);
+}
+
+function sampleBargeIn(rms, now) {
+    if (!bargeInController) return { event: null, adjustmentMessage: null };
+    const before = bargeInController.stats();
+    const event = bargeInController.sample(rms, now);
+    const after = bargeInController.stats();
+    const outcome = event && (event.type === "barge_in_commit" || event.type === "barge_in_false");
+    if (outcome || after.adjustments !== before.adjustments) renderBargeInStats();
+
+    let adjustmentMessage = null;
+    if (after.adjustments !== before.adjustments) {
+        adjustmentMessage = after.currentThreshold > before.currentThreshold
+            ? "Barge-in sensitivity auto-raised (" + bargeInController.minFalses + " false alarms)"
+            : "Barge-in sensitivity auto-recovered toward " + bargeInSensitivity;
+    }
+    return { event: event, adjustmentMessage: adjustmentMessage };
+}
+
+bargeInToggle.addEventListener("change", function () {
+    const wasEnabled = bargeInEnabled;
+    bargeInUserEnabled = bargeInToggle.checked;
+    localStorage.setItem(LS_BARGE_IN_ENABLED, String(bargeInUserEnabled));
+    syncBargeInControls();
+    if (wasEnabled && !bargeInEnabled && bargeDetector && bargeDetector.pending) {
+        sendMsg("barge_in_false");
+    }
+    resetBargeInDetector();
+    renderBargeInStats();
+});
+
+bargeInSensitivitySelect.addEventListener("change", function () {
+    bargeInSensitivity = bargeInSensitivitySelect.value;
+    localStorage.setItem(LS_BARGE_IN_SENSITIVITY, bargeInSensitivity);
+    if (bargeInController) bargeInController.setSensitivity(bargeInSensitivity);
+    renderBargeInStats();
+});
+
+bargeInAdaptiveToggle.addEventListener("change", function () {
+    bargeInAdaptiveEnabled = bargeInAdaptiveToggle.checked;
+    localStorage.setItem(LS_BARGE_IN_ADAPTIVE, String(bargeInAdaptiveEnabled));
+    if (bargeInController) bargeInController.setAdaptiveEnabled(bargeInAdaptiveEnabled);
+    renderBargeInStats();
+});
+
+syncBargeInControls();
+renderBargeInStats();
 
 function resetTurnLatency() {
     latencyStt.textContent = "–";
@@ -1795,10 +1934,9 @@ function connect() {
 function handleMessage(msg) {
     switch (msg.type) {
         case "hello_ack":
-            bargeInEnabled = !!msg.bargeIn;
-            if (bargeInEnabled && typeof BargeInDetector !== "undefined") {
-                bargeDetector = new BargeInDetector({});
-            }
+            bargeInServerAvailable = !!msg.bargeIn;
+            syncBargeInControls();
+            createBargeInController();
             startWebRTC();
             break;
 
@@ -1854,7 +1992,7 @@ function handleMessage(msg) {
             setAgentSpeaking(false);
             setVisualizationSpeaking(false);
             setVisualPresence("idle");
-            if (bargeDetector) bargeDetector.reset();
+            resetBargeInDetector();
             rearmPhoneMode("Waiting for the phone side...");
             break;
 
@@ -2043,8 +2181,9 @@ function monitorPhoneAudio(timestamp) {
         console.info("Phone VAD calibrated", thresholds);
         setPhoneStatus("Waiting for the phone side...");
     } else if (agentSpeaking) {
-        if (bargeInEnabled && bargeDetector) {
-            const evt = bargeDetector.sample(rms, timestamp);
+        if (bargeInEnabled && bargeInController) {
+            const observation = sampleBargeIn(rms, timestamp);
+            const evt = observation.event;
             if (evt && evt.type === "barge_in") {
                 sendMsg("barge_in");
                 setPhoneStatus("Heard you — pausing...");
@@ -2055,6 +2194,9 @@ function monitorPhoneAudio(timestamp) {
             } else if (evt && evt.type === "barge_in_false") {
                 sendMsg("barge_in_false");
                 setPhoneStatus("False alarm — resuming...");
+            }
+            if (observation.adjustmentMessage) {
+                flashBargeInAdjustment(observation.adjustmentMessage);
             }
         }
         vadGate.reset();  // don't let the normal turn-VAD fire while agent speaks
@@ -2071,7 +2213,7 @@ function monitorPhoneAudio(timestamp) {
 
 function rearmPhoneMode(message) {
     autoTurnPending = false;
-    if (bargeDetector) bargeDetector.reset();
+    resetBargeInDetector();
     if (!phoneModeEnabled || !vadGate) return;
     vadGate.reset();
     vadRearmAt = performance.now() + PHONE_REARM_MS;
@@ -2153,6 +2295,7 @@ stopBtn.addEventListener("click", function () {
 
 window.addEventListener("beforeunload", function () {
     if (visualizationMomentTimer) clearTimeout(visualizationMomentTimer);
+    if (bargeInFlashTimer) clearTimeout(bargeInFlashTimer);
     if (phonePollTimer) clearInterval(phonePollTimer);
     teardownAgentAudioAnalyser();
     talkingCube.destroy();

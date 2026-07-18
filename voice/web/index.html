@@ -74,6 +74,26 @@
           </div>
 
           <div class="config-stage">
+            <div class="config-stage-name">BARGE-IN</div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="barge-in-toggle" title="Allow speech to interrupt browser playback">ENABLED</label>
+              <input id="barge-in-toggle" class="pipe-toggle" type="checkbox" aria-label="Enable barge-in" checked disabled>
+            </div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="barge-in-sensitivity" title="Low is least likely to react to room noise">SENSITIVITY</label>
+              <select id="barge-in-sensitivity" aria-label="Barge-in sensitivity" disabled>
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="barge-in-adaptive" title="Raise the threshold automatically after repeated false alarms">ADAPTIVE</label>
+              <input id="barge-in-adaptive" class="pipe-toggle" type="checkbox" aria-label="Enable adaptive barge-in sensitivity" checked disabled>
+            </div>
+          </div>
+
+          <div class="config-stage">
             <div class="config-stage-name">SPEECH-TO-TEXT</div>
             <div class="pipe-row pipe-row-nested">
               <label for="stt-select">MODEL</label>
@@ -318,7 +338,9 @@
 
         <div id="debug-panel" class="debug-collapsed">
           <button id="debug-toggle" type="button" aria-expanded="false">Iteration log</button>
-          <div id="debug-content"></div>
+          <div id="debug-content">
+            <div id="barge-in-debug" class="debug-stats">barge-in · awaiting server capability</div>
+          </div>
         </div>
       </div>
     </aside>
