@@ -85,6 +85,12 @@ const cubeImportProfile = document.getElementById("cube-import-profile");
 const cubeProfileFile = document.getElementById("cube-profile-file");
 const cubeProfileStatus = document.getElementById("cube-profile-status");
 
+function setTalkButtonLabel(label) {
+    const labelNode = talkBtn.querySelector(".talk-button-label");
+    if (labelNode) labelNode.textContent = label;
+    else talkBtn.textContent = label;
+}
+
 // ── Talking Cube visualization ───────────────────────────────
 // The renderer calls its sphere-like shallow constellation a "focus" field,
 // and its ripple animation a "wave". Keep those source API names here while
@@ -182,9 +188,14 @@ const VISUALIZATION_SCENES = Object.freeze({
     },
 });
 
+const CONSOLE_ACCENT = getComputedStyle(document.documentElement)
+    .getPropertyValue("--accent").trim() || "#ff775f";
+const CONSOLE_ACCENT_SECONDARY = getComputedStyle(document.documentElement)
+    .getPropertyValue("--accent-2").trim() || "#ffca5c";
+
 const VISUALIZATION_PALETTES = Object.freeze({
     nanoclaw: ["#2563eb", "#60a5fa"],
-    electric: ["#43e7ff", "#169fdf"],
+    electric: [CONSOLE_ACCENT, CONSOLE_ACCENT_SECONDARY],
     aurora: ["#52f5a8", "#31d7ff"],
     violet: ["#d86cff", "#715cff"],
     sunset: ["#ff775f", "#ffca5c"],
@@ -1964,7 +1975,7 @@ function cleanupWebRTC() {
     }
     audioConnected = false;
     isRecording = false;
-    talkBtn.textContent = "Start mic";
+    setTalkButtonLabel("Start mic");
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
     talkBtn.disabled = true;
@@ -2082,7 +2093,7 @@ async function startPhoneMode() {
     vadRearmAt = vadCalibrationUntil;
     talkBtn.classList.add("phone-active");
     talkBtn.setAttribute("aria-pressed", "true");
-    talkBtn.textContent = "Stop mic";
+    setTalkButtonLabel("Stop mic");
     statusText.textContent = "Calibrating room noise...";
     if (vadFrameRequest !== null) window.cancelAnimationFrame(vadFrameRequest);
     vadFrameRequest = window.requestAnimationFrame(monitorPhoneAudio);
@@ -2103,7 +2114,7 @@ function stopPhoneMode(options) {
     stopCallerVisualization();
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
-    talkBtn.textContent = "Start mic";
+    setTalkButtonLabel("Start mic");
     if (config.status !== false && audioConnected) statusText.textContent = "Phone mode stopped";
 }
 
