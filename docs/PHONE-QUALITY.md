@@ -22,6 +22,8 @@ the call.
        │                     │
        │                     ├──► tts_48k.wav
        │                     ▼
+       │                sentence peak normalization
+       │                     ▼
        │                FIR resample to 8 or 16 kHz
        │                     ▼
        │                L16 or PCMU 20 ms frames
@@ -42,6 +44,11 @@ agent completion, synthesis, one aggregate frame-pacing record per sentence,
 and barge-in. `utterance_start` and `utterance_end` include the frame's current
 int16 RMS and the rolling noise `floor`. It intentionally does not write a JSON
 record per audio frame.
+
+Each played sentence also records `gain_applied`, with its `sentence_index`,
+source `measured_peak_dbfs`, and `applied_gain_db`. The `tts_48k.wav` tap stays
+before normalization, so the event explains the gain between that source and
+the resampler rather than hiding the original TTS level.
 
 ## Enable and report a tap
 
@@ -209,6 +216,29 @@ still update the floor reported by the tap.
 | `NANO_CLAW_PHONE_VAD` | `energy` | `silero` enables neural VAD for new calls when available; `energy` uses RMS endpointing. The current container configuration explicitly selects `energy`. |
 | `NANO_CLAW_PHONE_RMS_MIN` | PCMU: `350`; L16: `120` | Minimum speech boundary in linear int16 RMS units. |
 | `NANO_CLAW_PHONE_RMS_RATIO` | PCMU: `0.0`; L16: `3.0` | Noise-floor multiplier. PCMU's zero preserves its fixed-threshold compatibility default; setting a positive value opts it into adaptation. |
+| `NANO_CLAW_PHONE_GAIN` | on | Exact value `off` (case-insensitive) bypasses phone gain processing with byte-identical 48 kHz PCM. |
+| `NANO_CLAW_PHONE_GAIN_TARGET_DB` | `-3` | Per-sentence target peak in dBFS. Invalid or non-finite values fall back to `-3`. |
+
+## Outbound gain normalization
+
+The phone speak path peak-normalizes each synthesized sentence while it is
+still 48 kHz PCM16, immediately before the FIR resampler. The web TTS path is
+unchanged. PCM16 peak level is calculated as
+`20 × log10(max(abs(sample)) / 32768)` dBFS, so full scale is 0 dBFS and
+digital silence is negative infinity.
+
+The desired gain moves that measured peak toward
+`NANO_CLAW_PHONE_GAIN_TARGET_DB` (`-3` dBFS by default). Amplification is
+capped at +12 dB so a very quiet sentence or background noise cannot be lifted
+all the way to full scale. Within one reply, gain may move by at most 3 dB from
+one sentence to the next; the history resets at the next reply. Gain
+is applied in float64, clamped to the exact PCM16 bounds as a final true-peak
+guard, and only then converted back to int16. This prevents integer wrap even
+when smoothing temporarily asks for more gain than a hot sentence can hold.
+
+Set `NANO_CLAW_PHONE_GAIN=off` to compare against the prior path. Bypass returns
+the original 48 kHz bytes unchanged; with the tap enabled, `gain_applied` then
+reports 0 dB while retaining the measured source peak.
 
 ## Barge-in buffer flush
 

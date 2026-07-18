@@ -13,6 +13,7 @@ have carried live PSTN traffic on this exact number.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -29,6 +30,127 @@ PCMU_RMS_RATIO = 0.0
 L16_RMS_MIN = 120.0
 L16_RMS_RATIO = 3.0
 NOISE_FLOOR_ALPHA = 0.05
+
+PCM16_FULL_SCALE = 32768.0
+PCM16_MIN = -32768.0
+PCM16_MAX = 32767.0
+DEFAULT_PHONE_GAIN_TARGET_DBFS = -3.0
+MAX_PHONE_GAIN_DB = 12.0
+MAX_PHONE_GAIN_STEP_DB = 3.0
+
+
+@dataclass(frozen=True)
+class GainAdjustment:
+    """One sentence's normalized PCM and the decision that produced it."""
+
+    pcm16: bytes
+    measured_peak_dbfs: float
+    applied_gain_db: float
+
+
+class SentencePeakNormalizer:
+    """Measure, decide, and apply bounded peak gain to PCM16 sentences.
+
+    PCM16 dBFS uses ``20 * log10(peak / 32768)``: an absolute sample peak of
+    32768 is 0 dBFS, and digital silence is ``-inf`` dBFS. For each audible
+    sentence, :meth:`decide` moves its measured peak toward ``target_dbfs``,
+    caps amplification at ``max_gain_db``, then limits the change from the
+    preceding sentence to ``max_step_db``. Call :meth:`reset` at a reply
+    boundary so smoothing never depends on module-global state.
+
+    Gain is applied in float64. A final clamp to the exact PCM16 bounds is a
+    true full-scale guard before conversion, so an aggressive smoothed gain
+    cannot wrap around on ``astype(np.int16)``. Disabled and zero-gain paths
+    return the original bytes, which makes bypass bit-exact.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_dbfs: float = DEFAULT_PHONE_GAIN_TARGET_DBFS,
+        max_gain_db: float = MAX_PHONE_GAIN_DB,
+        max_step_db: float = MAX_PHONE_GAIN_STEP_DB,
+        enabled: bool = True,
+    ) -> None:
+        if not np.isfinite(target_dbfs):
+            raise ValueError("target_dbfs must be finite")
+        if not np.isfinite(max_gain_db) or max_gain_db < 0.0:
+            raise ValueError("max_gain_db must be finite and non-negative")
+        if not np.isfinite(max_step_db) or max_step_db < 0.0:
+            raise ValueError("max_step_db must be finite and non-negative")
+        self.target_dbfs = float(target_dbfs)
+        self.max_gain_db = float(max_gain_db)
+        self.max_step_db = float(max_step_db)
+        self.enabled = bool(enabled)
+        self.reset()
+
+    @property
+    def previous_gain_db(self) -> float | None:
+        """Gain used for the preceding sentence in this reply."""
+        return self._previous_gain_db
+
+    def reset(self) -> None:
+        """Start a reply with no gain-smoothing history."""
+        self._previous_gain_db: float | None = None
+
+    @staticmethod
+    def measure(pcm16: bytes) -> float:
+        """Return the absolute sample peak in dBFS; silence is ``-inf``."""
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        if not len(samples):
+            return float("-inf")
+        peak = float(np.max(np.abs(samples.astype(np.float64))))
+        if peak == 0.0:
+            return float("-inf")
+        return float(20.0 * np.log10(peak / PCM16_FULL_SCALE))
+
+    def decide(self, measured_peak_dbfs: float) -> float:
+        """Choose this sentence's gain and advance reply-local smoothing."""
+        if not self.enabled:
+            return 0.0
+        if np.isfinite(measured_peak_dbfs):
+            desired_gain_db = min(
+                self.target_dbfs - float(measured_peak_dbfs),
+                self.max_gain_db,
+            )
+        else:
+            # Silence stays byte-identical, but a zero-gain decision still
+            # advances smoothing so every consecutive sentence obeys the
+            # same maximum step.
+            desired_gain_db = 0.0
+        if self._previous_gain_db is None:
+            applied_gain_db = desired_gain_db
+        else:
+            applied_gain_db = float(
+                np.clip(
+                    desired_gain_db,
+                    self._previous_gain_db - self.max_step_db,
+                    self._previous_gain_db + self.max_step_db,
+                )
+            )
+        self._previous_gain_db = applied_gain_db
+        return applied_gain_db
+
+    @staticmethod
+    def apply(pcm16: bytes, gain_db: float) -> bytes:
+        """Apply ``gain_db`` in float, guard PCM16 full scale, and convert."""
+        if gain_db == 0.0 or not pcm16:
+            return pcm16
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        scale = 10.0 ** (float(gain_db) / 20.0)
+        gained = samples.astype(np.float64) * scale
+        guarded = np.clip(gained, PCM16_MIN, PCM16_MAX)
+        return guarded.astype(np.int16).tobytes()
+
+    def normalize(self, pcm16: bytes) -> GainAdjustment:
+        """Run measure → decide → apply for one PCM16 sentence."""
+        measured_peak_dbfs = self.measure(pcm16)
+        applied_gain_db = self.decide(measured_peak_dbfs)
+        return GainAdjustment(
+            pcm16=self.apply(pcm16, applied_gain_db),
+            measured_peak_dbfs=measured_peak_dbfs,
+            applied_gain_db=applied_gain_db,
+        )
 
 
 def ulaw_encode(pcm16: np.ndarray) -> bytes:

@@ -25,6 +25,8 @@ Optional:
     NANO_CLAW_PHONE_CODEC           pcmu (default) or l16 (16 kHz wideband)
     NANO_CLAW_PHONE_RMS_MIN         minimum energy endpoint threshold
     NANO_CLAW_PHONE_RMS_RATIO       noise-floor multiplier for endpointing
+    NANO_CLAW_PHONE_GAIN            off = bypass outbound peak normalization
+    NANO_CLAW_PHONE_GAIN_TARGET_DB  target peak dBFS (default -3)
     NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
                                     mid-speech (buffer-flush via Telnyx
                                     "clear"); unset = half-duplex
@@ -50,6 +52,8 @@ from voice.flow_session import FlowSession, get_flow_mode
 from voice.phone_audio import (
     FRAME_MS,
     BargeInDetector,
+    DEFAULT_PHONE_GAIN_TARGET_DBFS,
+    SentencePeakNormalizer,
     UtteranceEndpointer,
     pcm48k_to_l16_frames,
     pcm48k_to_ulaw_frames,
@@ -124,6 +128,24 @@ def barge_in_enabled() -> bool:
     """Caller can interrupt the agent mid-speech (NANO_CLAW_PHONE_BARGE_IN=1).
     Off by default: the phone leg is half-duplex unless opted in."""
     return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
+
+
+def _phone_gain_normalizer() -> SentencePeakNormalizer:
+    """Build one call-owned normalizer from the phone gain environment."""
+    raw_target = _cfg(
+        "NANO_CLAW_PHONE_GAIN_TARGET_DB",
+        str(DEFAULT_PHONE_GAIN_TARGET_DBFS),
+    )
+    try:
+        target_dbfs = float(raw_target)
+    except ValueError:
+        target_dbfs = DEFAULT_PHONE_GAIN_TARGET_DBFS
+    if not np.isfinite(target_dbfs):
+        target_dbfs = DEFAULT_PHONE_GAIN_TARGET_DBFS
+    return SentencePeakNormalizer(
+        target_dbfs=target_dbfs,
+        enabled=_cfg("NANO_CLAW_PHONE_GAIN", "on").lower() != "off",
+    )
 
 
 VAD_MODES = ("energy", "silero")
@@ -232,6 +254,7 @@ class PhoneCall:
         self._playback_flush_sent = False
         self._turn_task: asyncio.Task | None = None
         self._sentence_pipelines: set[SentencePipeline] = set()
+        self._gain_normalizer = _phone_gain_normalizer()
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
@@ -717,10 +740,18 @@ class PhoneCall:
             self._active_tap_sentence_index = sentence_index
         try:
             codec = phone_codec()
+            gain = self._gain_normalizer.normalize(speech.pcm48k)
+            if tap:
+                tap.event(
+                    "gain_applied",
+                    sentence_index=sentence_index,
+                    measured_peak_dbfs=gain.measured_peak_dbfs,
+                    applied_gain_db=gain.applied_gain_db,
+                )
             frames = (
-                pcm48k_to_l16_frames(speech.pcm48k)
+                pcm48k_to_l16_frames(gain.pcm16)
                 if codec == "l16"
-                else pcm48k_to_ulaw_frames(speech.pcm48k)
+                else pcm48k_to_ulaw_frames(gain.pcm16)
             )
             if tap:
                 outbound_rate = 16000 if codec == "l16" else 8000
@@ -781,6 +812,7 @@ class PhoneCall:
         """Synthesize and play a sync or async sentence source in order."""
         if self.closed or not self.speaking:
             return
+        self._gain_normalizer.reset()
         pipeline = SentencePipeline(
             sentences,
             self._synthesize_sentence,
