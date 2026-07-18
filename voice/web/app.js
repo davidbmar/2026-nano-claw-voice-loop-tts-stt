@@ -10,6 +10,7 @@ import {
     applyEmotionLayer,
     inferEmotion,
 } from "./emotion-layer.js";
+import { createAuthHistoryUI } from "./auth.js";
 
 "use strict";
 
@@ -1044,6 +1045,8 @@ let bargeInFlashTimer = null;
 let activeTurnStartedAt = null;
 let sttRequestStartedAt = null;
 let firstAgentTextAt = null;
+let authHistory = null;
+let connectionGeneration = 0;
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
@@ -1903,41 +1906,70 @@ sttSelect.addEventListener("change", function () {
 });
 
 function connect() {
+    const generation = ++connectionGeneration;
     statusText.textContent = "Connecting...";
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/ws");
+    const socket = new WebSocket(proto + "//" + location.host + "/ws");
+    ws = socket;
 
-    ws.onopen = function () {
+    socket.onopen = function () {
+        if (socket !== ws || generation !== connectionGeneration) return;
         statusText.textContent = "Authenticating...";
         sendMsg("hello");
         loadVoices();
         loadModels();
     };
 
-    ws.onmessage = function (ev) {
+    socket.onmessage = function (ev) {
+        if (socket !== ws || generation !== connectionGeneration) return;
         var msg;
         try { msg = JSON.parse(ev.data); } catch (_e) { return; }
-        handleMessage(msg);
+        handleMessage(msg, generation);
     };
 
-    ws.onerror = function () {
+    socket.onerror = function () {
+        if (socket !== ws || generation !== connectionGeneration) return;
         statusText.textContent = "Connection failed";
     };
 
-    ws.onclose = function () {
+    socket.onclose = function () {
+        if (socket !== ws || generation !== connectionGeneration) return;
+        ws = null;
+        connectionGeneration += 1;
         statusText.textContent = "Disconnected";
         talkBtn.disabled = true;
         cleanupWebRTC();
     };
 }
 
-function handleMessage(msg) {
+function reconnectForIdentityChange() {
+    const previous = ws;
+    connectionGeneration += 1;
+    ws = null;
+    if (previous) {
+        previous.onopen = null;
+        previous.onmessage = null;
+        previous.onerror = null;
+        previous.onclose = null;
+        if (previous.readyState < WebSocket.CLOSING) {
+            previous.close(1000, "identity changed");
+        }
+    }
+    cleanupWebRTC();
+    connect();
+}
+
+function handleMessage(msg, generation) {
     switch (msg.type) {
         case "hello_ack":
             bargeInServerAvailable = !!msg.bargeIn;
             syncBargeInControls();
             createBargeInController();
-            startWebRTC();
+            startWebRTC(generation).catch(function () {
+                if (generation === connectionGeneration) {
+                    statusText.textContent = "Audio connection failed";
+                }
+            });
             break;
 
         case "webrtc_answer":
@@ -1951,6 +1983,7 @@ function handleMessage(msg) {
                 showThinking();
                 setVisualPresence("thinking");
                 setPhoneStatus("Thinking...");
+                if (authHistory) authHistory.notifyHistoryChanged();
             } else {
                 clearThinking();
                 setVisualPresence("idle");
@@ -1979,6 +2012,7 @@ function handleMessage(msg) {
         case "agent_reply_done":
             if (streamingBubble) inferEmotionFromReply(streamingBubble.textContent);
             finalizeAgentBubble();
+            if (authHistory) authHistory.notifyHistoryChanged();
             break;
 
         case "agent_audio_start":
@@ -1994,6 +2028,12 @@ function handleMessage(msg) {
             setVisualPresence("idle");
             resetBargeInDetector();
             rearmPhoneMode("Waiting for the phone side...");
+            if (authHistory) authHistory.notifyHistoryChanged();
+            break;
+
+        case "history_error":
+            appendSystemLine(msg.text || "This conversation's saved history may be incomplete.");
+            if (authHistory) authHistory.notifyHistoryChanged();
             break;
 
         case "tool_pending":
@@ -2028,11 +2068,12 @@ function handleMessage(msg) {
 }
 
 // ── WebRTC ───────────────────────────────────────────────────
-async function startWebRTC() {
+async function startWebRTC(generation) {
     statusText.textContent = "Requesting mic...";
 
+    let requestedStream;
     try {
-        micStream = await navigator.mediaDevices.getUserMedia({
+        requestedStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
@@ -2040,17 +2081,25 @@ async function startWebRTC() {
             },
         });
     } catch (_e) {
-        statusText.textContent = "Mic access denied";
+        if (generation === connectionGeneration) statusText.textContent = "Mic access denied";
         return;
     }
 
+    if (generation !== connectionGeneration) {
+        requestedStream.getTracks().forEach(function (track) { track.stop(); });
+        return;
+    }
+    micStream = requestedStream;
+
     statusText.textContent = "Connecting audio...";
 
-    pc = new RTCPeerConnection();
-    pc.addTrack(micStream.getAudioTracks()[0], micStream);
+    const peerConnection = new RTCPeerConnection();
+    pc = peerConnection;
+    peerConnection.addTrack(micStream.getAudioTracks()[0], micStream);
 
-    pc.oniceconnectionstatechange = function () {
-        var state = pc.iceConnectionState;
+    peerConnection.oniceconnectionstatechange = function () {
+        if (generation !== connectionGeneration || pc !== peerConnection) return;
+        var state = peerConnection.iceConnectionState;
         if (state === "connected" || state === "completed") {
             audioConnected = true;
             statusText.textContent = "Connected";
@@ -2065,7 +2114,8 @@ async function startWebRTC() {
         }
     };
 
-    pc.ontrack = function (ev) {
+    peerConnection.ontrack = function (ev) {
+        if (generation !== connectionGeneration || pc !== peerConnection) return;
         if (audioEl) { audioEl.srcObject = null; audioEl.remove(); }
         audioEl = document.createElement("audio");
         audioEl.autoplay = true;
@@ -2076,10 +2126,12 @@ async function startWebRTC() {
         setupAgentAudioAnalyser(agentStream);
     };
 
-    var offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitForIceGathering(pc);
-    sendMsg("webrtc_offer", { sdp: pc.localDescription.sdp });
+    var offer = await peerConnection.createOffer();
+    if (generation !== connectionGeneration || pc !== peerConnection) return;
+    await peerConnection.setLocalDescription(offer);
+    await waitForIceGathering(peerConnection);
+    if (generation !== connectionGeneration || pc !== peerConnection) return;
+    sendMsg("webrtc_offer", { sdp: peerConnection.localDescription.sdp });
 }
 
 function waitForIceGathering(peerConn) {
@@ -2297,6 +2349,7 @@ window.addEventListener("beforeunload", function () {
     if (visualizationMomentTimer) clearTimeout(visualizationMomentTimer);
     if (bargeInFlashTimer) clearTimeout(bargeInFlashTimer);
     if (phonePollTimer) clearInterval(phonePollTimer);
+    if (authHistory) authHistory.destroy();
     teardownAgentAudioAnalyser();
     talkingCube.destroy();
 });
@@ -2305,4 +2358,12 @@ window.addEventListener("beforeunload", function () {
 setInterval(function () { sendMsg("ping"); }, 15000);
 
 // Auto-connect
+try {
+    authHistory = createAuthHistoryUI({
+        onIdentityChange: reconnectForIdentityChange,
+    });
+    authHistory.initialize().catch(function () {});
+} catch (_error) {
+    // Optional auth must never prevent the voice console from starting.
+}
 connect();

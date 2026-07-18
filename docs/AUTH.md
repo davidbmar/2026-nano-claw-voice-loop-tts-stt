@@ -6,7 +6,7 @@ database. `NANO_CLAW_AUTH_DB` selects the file and defaults to
 
 The same database backs the owner-scoped conversation-history API. Google
 sign-in and HTTP adaptation remain separate from the portable session policy;
-there is no history UI until the console layer consumes this API.
+the voice console consumes the API without exposing tenant or subject selectors.
 
 ## Tenant and store contract
 
@@ -322,6 +322,65 @@ both prevents expired rows from accumulating and closes a socket at absolute
 expiry without waiting for its 24-hour idle watcher. Failures are logged and a
 later cadence retries; application cleanup cancels the task before closing the
 adapter.
+
+## Console sign-in and history UI
+
+The browser treats `GET /api/auth/config` as the only switch for Google sign-in.
+It requests the config during console startup. When the response is
+`{"mode":"off"}` or has no nonempty `clientId`, the header remains the existing
+`FULL DUPLEX / LOCAL WEB` display, the history surface stays absent, and no GIS
+resource is requested. With a client ID, the console resolves `/api/me`; an
+existing session gets a compact local-initials account control, while a signed-
+out session dynamically loads GIS and renders Google's standard button in that
+same header position.
+
+The JavaScript GIS callback sends only `{credential}` to `/api/auth/google`,
+with `X-NC-Auth: 1`. Its `initialize` configuration includes the nonce returned
+by the config endpoint, so the resulting ID token carries the server challenge.
+After login, logout, session expiry, or a deletion that may close the active
+history socket, the console tears down the old WebRTC/WebSocket state and opens
+a new WebSocket. Identity therefore changes only at the server's next-socket
+binding boundary. Logout is posted before the anonymous reconnect.
+
+Signed-in users see `PAST CONVERSATIONS` below the live transcription. The list
+uses the API's opaque cursor, shows title and relative start time, and offers a
+per-item delete. Selecting an item replaces the live area with a read-only,
+cursor-paginated transcript and an explicit back control. The account menu also
+links to History, deletes all history with confirmation, and signs out. Signed-
+out copy explicitly says that login grants saved history only; voice sessions
+remain usable without it.
+
+Names, titles, and turn text are untrusted stored data. The console creates DOM
+nodes and assigns these values only through `textContent`; historical turns are
+plain text, not Markdown. It never uses the Google `picture` claim, creates an
+avatar URL, or renders a remote profile image. The avatar consists solely of
+initials derived locally from the bounded name/email display claims. The GIS
+control is deliberately `medium` and 184 pixels wide; both settings suppress
+GIS's personalized account button under Google's
+[personalized-button rules](https://developers.google.com/identity/gsi/web/guides/personalized-button#button_rendering),
+so it cannot become a Google profile-name/photo surface either.
+
+GIS failure does not block console startup or an established local application
+session. A config failure, blocked or slow script, invalid GIS setup, or login
+verification/JWKS outage produces a bounded `LOGIN UNAVAILABLE` state with a
+retry control. Voice and text controls continue following their independent
+WebSocket lifecycle.
+
+## Browser external-fetch exception
+
+The general voice-console rule remains that application assets make no
+undeclared external browser fetches. Google sign-in is the one narrow exception:
+only when `/api/auth/config` supplies a client ID may the page dynamically load
+`https://accounts.google.com/gsi/client`. The library may then use the GIS
+`https://accounts.google.com/gsi/` frame and connection parent and
+`https://accounts.google.com/gsi/style` stylesheet documented in Google's
+[GIS setup and CSP guidance](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid#content_security_policy).
+
+Those four declarations are the complete Google allowlist in the console CSP.
+`img-src` remains limited to `'self' data:` and intentionally excludes every
+Google/`googleusercontent.com` image origin. No analytics, avatar, font, or
+other third-party origin is part of this exception. When auth is off, even the
+GIS script request is absent.
 
 ## Deployment boundary
 

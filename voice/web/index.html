@@ -26,9 +26,27 @@
       <span>REALTIME SIGNAL</span>
     </div>
 
-    <div class="header-channel" aria-label="Console channel">
+    <div id="header-channel" class="header-channel" aria-label="Console channel">
       <span>FULL DUPLEX</span>
       <strong>LOCAL / WEB</strong>
+    </div>
+
+    <div id="auth-root" class="auth-root" aria-label="Account" hidden>
+      <div id="google-signin-button" class="google-signin-mount" aria-label="Sign in with Google"></div>
+      <button id="auth-user-button" class="auth-user-button" type="button" aria-haspopup="menu" aria-expanded="false" hidden>
+        <span id="auth-avatar" class="auth-avatar" aria-hidden="true">NC</span>
+        <span id="auth-user-name" class="auth-user-name">Signed in</span>
+        <span class="auth-menu-caret" aria-hidden="true">⌄</span>
+      </button>
+      <div id="auth-menu" class="auth-menu glass" role="menu" hidden>
+        <button id="auth-history-button" type="button" role="menuitem">History</button>
+        <button id="auth-delete-all-button" class="auth-menu-danger" type="button" role="menuitem">Delete all history</button>
+        <button id="auth-signout-button" type="button" role="menuitem">Sign out</button>
+      </div>
+      <div id="auth-status-wrap" class="auth-status-wrap" hidden>
+        <span id="auth-status" role="status">SIGN-IN LOADING</span>
+        <button id="auth-retry-button" type="button" hidden>Retry</button>
+      </div>
     </div>
   </header>
 
@@ -392,12 +410,39 @@
     <aside id="transcription-panel" class="glass" aria-labelledby="transcription-heading">
       <header class="transcription-header">
         <div>
-          <p class="eyebrow">LIVE SESSION</p>
+          <p id="transcription-eyebrow" class="eyebrow">LIVE SESSION</p>
           <h1 id="transcription-heading">Transcription</h1>
         </div>
-        <span class="transcription-live"><span aria-hidden="true"></span>LIVE</span>
+        <span id="transcription-live" class="transcription-live"><span aria-hidden="true"></span>LIVE</span>
       </header>
       <main id="chat-log" role="log" aria-live="polite" aria-relevant="additions text"></main>
+
+      <section id="past-conversations" aria-labelledby="history-heading" hidden>
+        <header class="history-header">
+          <div>
+            <p class="eyebrow">YOUR ARCHIVE</p>
+            <h2 id="history-heading" tabindex="-1">Past conversations</h2>
+          </div>
+          <button id="history-refresh-button" class="history-icon-button" type="button" aria-label="Refresh conversation history" disabled>↻</button>
+        </header>
+
+        <div id="history-list-view" class="history-view">
+          <p id="history-status" class="history-status" role="status">Sign in to save and revisit conversations. Live voice works without an account.</p>
+          <div id="history-list" class="history-list"></div>
+          <button id="history-more-button" class="history-more-button" type="button" hidden>Load more</button>
+        </div>
+
+        <div id="history-detail-view" class="history-view history-detail-view" hidden>
+          <header class="history-detail-header">
+            <button id="history-back-button" class="history-back-button" type="button">← Back</button>
+            <h3 id="history-detail-title">Conversation</h3>
+            <p id="history-detail-meta"></p>
+          </header>
+          <div id="history-transcript" class="history-transcript" role="log" aria-label="Saved conversation transcript"></div>
+          <p id="history-detail-status" class="history-status" role="status"></p>
+          <button id="history-turns-more-button" class="history-more-button" type="button" hidden>Load more turns</button>
+        </div>
+      </section>
 
       <section id="goal-region-card" class="hidden" aria-hidden="true">
         <div class="flow-card-header">
