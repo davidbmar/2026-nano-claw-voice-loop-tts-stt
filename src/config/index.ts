@@ -121,9 +121,16 @@ export function mergeEnvConfig(config: Config): Config {
     } as never;
   }
 
+  // Knowledge-only mode: disable every tool so the agent answers purely
+  // from its prompt (used by voice personas grounded on a site digest).
+  const disableTools = ['1', 'true', 'yes'].includes(
+    (process.env.NANO_CLAW_DISABLE_TOOLS || '').toLowerCase()
+  );
+
   return {
     ...config,
     providers: mergedProviders,
+    ...(disableTools && { tools: { ...config.tools, enabled: false } }),
   };
 }
 

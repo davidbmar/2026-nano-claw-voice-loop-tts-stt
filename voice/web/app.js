@@ -19,6 +19,180 @@ const speedSlider = document.getElementById("speed-slider");
 const speedValue = document.getElementById("speed-value");
 const modelSelect = document.getElementById("model-select");
 const sttSelect = document.getElementById("stt-select");
+const vadSelect = document.getElementById("vad-select");
+const phoneVoiceSelect = document.getElementById("phone-voice-select");
+const phoneModelSelect = document.getElementById("phone-model-select");
+const phoneSttSelect = document.getElementById("phone-stt-select");
+const phoneSpeedSlider = document.getElementById("phone-speed-slider");
+const phoneSpeedValue = document.getElementById("phone-speed-value");
+const phoneCallStatus = document.getElementById("phone-call-status");
+const flowSelect = document.getElementById("flow-select");
+const flowWarning = document.getElementById("flow-warning");
+const goalRegionCard = document.getElementById("goal-region-card");
+const flowGoal = document.getElementById("flow-goal");
+const flowOutcome = document.getElementById("flow-outcome");
+const flowSlotJob = document.getElementById("flow-slot-job");
+const flowSlotJobValue = document.getElementById("flow-slot-job-value");
+const flowSlotStart = document.getElementById("flow-slot-start");
+const flowSlotStartValue = document.getElementById("flow-slot-start-value");
+const flowSlotDuration = document.getElementById("flow-slot-duration");
+const flowSlotDurationValue = document.getElementById("flow-slot-duration-value");
+const flowBudget = document.getElementById("flow-budget");
+const flowLatency = document.getElementById("flow-latency");
+const flowRejections = document.getElementById("flow-rejections");
+const flowRejectionsList = document.getElementById("flow-rejections-list");
+
+// VAD dropdown (phone line): mirrors the STT/LLM/Voice pipeline selectors.
+// Applies to NEW phone calls; served by GET/POST /api/phone/vad.
+fetch("/api/phone/vad").then(function (r) { return r.json(); }).then(function (v) {
+    v.options.forEach(function (mode) {
+        var o = document.createElement("option");
+        o.value = mode;
+        o.textContent = mode === "silero"
+            ? "silero (neural)" + (v.silero_available ? "" : " — unavailable")
+            : "energy (threshold)";
+        o.disabled = mode === "silero" && !v.silero_available;
+        vadSelect.appendChild(o);
+    });
+    vadSelect.value = v.active;
+}).catch(function () {
+    var o = document.createElement("option");
+    o.textContent = "n/a (phone disabled)";
+    vadSelect.appendChild(o);
+    vadSelect.disabled = true;
+});
+vadSelect.addEventListener("change", function () {
+    fetch("/api/phone/vad", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: vadSelect.value }),
+    });
+});
+
+// ── Phone line controls (voice/model/speed) ──────────────────
+// Served by GET/POST /api/phone/config. Voice + speed apply live (next
+// spoken sentence, even mid-call); model applies on the next agent turn.
+var phonePendingModel = null; // config may load before the models list
+
+function applyPhoneConfig(cfg) {
+    // Don't yank a control out from under the user mid-edit (the 5s poll
+    // would otherwise snap an open dropdown back); the lamp always updates.
+    var editing = [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider]
+        .indexOf(document.activeElement) >= 0;
+    if (!editing) {
+        phoneVoiceSelect.value = cfg.voice;
+        if (phoneModelSelect.options.length > 0) {
+            phoneModelSelect.value = cfg.model || "";
+        } else {
+            phonePendingModel = cfg.model || "";
+        }
+        phoneSttSelect.value = cfg.stt_size;
+        phoneSpeedSlider.value = String(cfg.speed);
+        phoneSpeedValue.textContent = cfg.speed.toFixed(1) + "×";
+    }
+    phoneCallStatus.classList.remove("offline");
+    if (cfg.active_calls > 0) {
+        phoneCallStatus.textContent = "● live · " + cfg.active_calls +
+            (cfg.active_calls === 1 ? " caller" : " callers");
+        phoneCallStatus.title = "A call is up — voice, STT, speed, and flow changes apply mid-call";
+        phoneCallStatus.classList.add("live");
+    } else {
+        phoneCallStatus.textContent = "● idle";
+        phoneCallStatus.title = "No call in progress";
+        phoneCallStatus.classList.remove("live");
+    }
+}
+
+function phoneControlsUnavailable() {
+    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider].forEach(function (el) { el.disabled = true; });
+    var o = document.createElement("option");
+    o.textContent = "n/a (phone disabled)";
+    phoneVoiceSelect.appendChild(o);
+    phoneCallStatus.textContent = "● offline";
+    phoneCallStatus.title = "Phone gateway is not enabled on this node";
+    phoneCallStatus.classList.remove("live");
+    phoneCallStatus.classList.add("offline");
+}
+
+function loadPhoneConfig() {
+    fetch("/api/phone/config").then(function (r) {
+        if (!r.ok) { throw new Error("phone disabled"); }
+        return r.json();
+    }).then(applyPhoneConfig).catch(phoneControlsUnavailable);
+}
+
+function pushPhoneConfig(partial) {
+    fetch("/api/phone/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial),
+    }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) { if (cfg) { applyPhoneConfig(cfg); } });
+}
+
+phoneVoiceSelect.addEventListener("change", function () {
+    pushPhoneConfig({ voice: phoneVoiceSelect.value });
+});
+phoneModelSelect.addEventListener("change", function () {
+    pushPhoneConfig({ model: phoneModelSelect.value });
+});
+phoneSttSelect.addEventListener("change", function () {
+    pushPhoneConfig({ stt_size: phoneSttSelect.value });
+});
+phoneSpeedSlider.addEventListener("input", function () {
+    phoneSpeedValue.textContent = parseFloat(phoneSpeedSlider.value).toFixed(1) + "×";
+});
+phoneSpeedSlider.addEventListener("change", function () {
+    pushPhoneConfig({ speed: parseFloat(phoneSpeedSlider.value) });
+});
+
+function renderFlowConfig(config) {
+    var options = Array.isArray(config.options) ? config.options : ["off", "scheduler"];
+    flowSelect.innerHTML = "";
+    options.forEach(function (mode) {
+        var o = document.createElement("option");
+        o.value = mode;
+        o.textContent = mode === "scheduler" ? "Plumber scheduler" : "Off";
+        flowSelect.appendChild(o);
+    });
+    flowSelect.value = options.indexOf(config.active) >= 0 ? config.active : "off";
+    flowWarning.textContent = "Scheduler availability is unavailable";
+    flowWarning.classList.toggle("hidden", config.availability_ok === true);
+}
+
+function loadFlowConfig() {
+    return fetch("/api/voice/flow").then(function (r) { return r.json(); }).then(function (config) {
+        renderFlowConfig(config || {});
+        flowSelect.disabled = false;
+    }).catch(function () {
+        flowSelect.innerHTML = "";
+        var o = document.createElement("option");
+        o.textContent = "n/a";
+        flowSelect.appendChild(o);
+        flowSelect.disabled = true;
+        flowWarning.classList.remove("hidden");
+        flowWarning.textContent = "Could not load flow settings";
+    });
+}
+
+flowSelect.addEventListener("change", function () {
+    flowSelect.disabled = true;
+    fetch("/api/voice/flow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: flowSelect.value }),
+    }).then(function (r) {
+        if (!r.ok) throw new Error("flow update failed");
+        return r.json();
+    }).then(function (config) {
+        renderFlowConfig(config || {});
+        statusText.textContent = "Flow updated — phone applies it on the caller's next utterance";
+    }).catch(loadFlowConfig).finally(function () {
+        flowSelect.disabled = false;
+    });
+});
+
+loadFlowConfig();
 const settingsBtn = document.getElementById("settings-btn");
 const pipelinePanel = document.getElementById("pipeline-panel");
 
@@ -162,6 +336,93 @@ function finalizeAgentBubble() {
 function clearThinking() {
     const el = chatLog.querySelector(".thinking");
     if (el) el.remove();
+}
+
+function formatFlowStart(value) {
+    if (typeof value !== "string" || !value) return "empty";
+    var parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    try {
+        return new Intl.DateTimeFormat(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+        }).format(parsed);
+    } catch (_e) {
+        return value;
+    }
+}
+
+function setFlowSlot(chip, valueEl, rawValue, displayValue) {
+    var filled = rawValue !== null && rawValue !== undefined && rawValue !== "";
+    chip.classList.toggle("flow-slot-empty", !filled);
+    chip.classList.toggle("flow-slot-filled", filled);
+    valueEl.textContent = filled ? String(displayValue) : "empty";
+}
+
+function renderFlowState(state) {
+    state = state && typeof state === "object" ? state : {};
+    goalRegionCard.classList.remove("hidden");
+    flowGoal.textContent = typeof state.goal === "string" ? state.goal : "";
+
+    var slots = state.slots && typeof state.slots === "object" ? state.slots : {};
+    setFlowSlot(flowSlotJob, flowSlotJobValue, slots.job, slots.job);
+    setFlowSlot(
+        flowSlotStart,
+        flowSlotStartValue,
+        slots.slot_start,
+        formatFlowStart(slots.slot_start)
+    );
+    var duration = typeof slots.duration_minutes === "number"
+        ? slots.duration_minutes + " minutes"
+        : slots.duration_minutes;
+    setFlowSlot(
+        flowSlotDuration,
+        flowSlotDurationValue,
+        slots.duration_minutes,
+        duration
+    );
+
+    var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
+    var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
+    flowBudget.textContent = "turn " + turnsUsed + " / " + maxTurns;
+    flowLatency.textContent = typeof state.supervisor_ms === "number"
+        ? "supervisor " + Math.round(state.supervisor_ms) + " ms"
+        : "supervisor —";
+
+    var rejected = Array.isArray(state.rejected) ? state.rejected : [];
+    while (flowRejectionsList.firstChild) {
+        flowRejectionsList.removeChild(flowRejectionsList.firstChild);
+    }
+    rejected.forEach(function (item) {
+        var li = document.createElement("li");
+        li.textContent = String(item);
+        flowRejectionsList.appendChild(li);
+    });
+    flowRejections.classList.toggle("hidden", rejected.length === 0);
+
+    var outcome = typeof state.outcome === "string" ? state.outcome.toLowerCase() : "";
+    flowOutcome.className = "flow-outcome hidden";
+    flowOutcome.textContent = "";
+    if (outcome === "booked") {
+        var readback = [
+            slots.job,
+            formatFlowStart(slots.slot_start),
+            typeof slots.duration_minutes === "number"
+                ? slots.duration_minutes + " minutes"
+                : slots.duration_minutes,
+        ].filter(function (value) { return value && value !== "empty"; });
+        flowOutcome.textContent = "BOOKED" + (readback.length ? " — " + readback.join(" · ") : "");
+    } else if (outcome === "escape") {
+        flowOutcome.textContent = "ESCAPE";
+    } else if (outcome === "budget") {
+        flowOutcome.textContent = "BUDGET";
+    }
+    if (flowOutcome.textContent) {
+        flowOutcome.className = "flow-outcome flow-outcome-" + outcome;
+    }
 }
 
 // ── Tool approval card ───────────────────────────────────────
@@ -317,6 +578,14 @@ function showDebugDetail(info) {
             desc: "Prompt + completion. This determines API cost.",
         },
         {
+            key: "Cache read/write",
+            value: info.tokenUsage && (info.tokenUsage.cacheRead || info.tokenUsage.cacheWrite)
+                ? (info.tokenUsage.cacheRead || 0) + "/" + (info.tokenUsage.cacheWrite || 0)
+                : "—",
+            cls: "tok",
+            desc: "Prompt tokens served from / written to the provider's prompt cache. A large read count means the stable prefix (persona + site knowledge) was cached — those tokens cost ~10% and skip prefill.",
+        },
+        {
             key: "Duration",
             value: info.durationMs + " ms",
             cls: "dur",
@@ -393,17 +662,23 @@ var previewAudio = new Audio();
 
 function renderVoiceOptions(uiCatalog) {
     voiceSelect.innerHTML = "";
+    phoneVoiceSelect.innerHTML = "";
     VoiceUI.groupVoices(uiCatalog).forEach(function (group) {
         var og = document.createElement("optgroup");
         og.label = group.label;
+        var ogPhone = document.createElement("optgroup");
+        ogPhone.label = group.label;
         group.options.forEach(function (opt) {
             var o = document.createElement("option");
             o.value = opt.id;
             o.textContent = opt.label;
             og.appendChild(o);
+            ogPhone.appendChild(o.cloneNode(true));
         });
         voiceSelect.appendChild(og);
+        phoneVoiceSelect.appendChild(ogPhone);
     });
+    loadPhoneConfig();
     voiceSelect.value = currentVoiceId;
     if (!voiceSelect.value) {
         currentVoiceId = uiCatalog.default;
@@ -463,7 +738,17 @@ var LS_MODEL = "nanoclaw.model", LS_STT = "nanoclaw.stt";
 var currentModel = localStorage.getItem(LS_MODEL) || "anthropic/claude-haiku-4-5";
 var currentStt = localStorage.getItem(LS_STT) || "base";
 
-settingsBtn.addEventListener("click", function () { pipelinePanel.classList.toggle("hidden"); });
+// While the panel is open, refresh phone state every 5s so the live-call
+// lamp and any changes made from other tabs/calls stay truthful.
+var phonePollTimer = null;
+settingsBtn.addEventListener("click", function () {
+    pipelinePanel.classList.toggle("hidden");
+    if (phonePollTimer) { clearInterval(phonePollTimer); phonePollTimer = null; }
+    if (!pipelinePanel.classList.contains("hidden") && !phoneVoiceSelect.disabled) {
+        loadPhoneConfig();
+        phonePollTimer = setInterval(loadPhoneConfig, 5000);
+    }
+});
 
 function loadModels() {
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
@@ -473,6 +758,17 @@ function loadModels() {
             el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
             modelSelect.appendChild(el);
         });
+        // Phone LLM mirror: "(server default)" + every available model.
+        phoneModelSelect.innerHTML = "";
+        var def = document.createElement("option");
+        def.value = ""; def.textContent = "server default (" + data.default + ")";
+        phoneModelSelect.appendChild(def);
+        Pipeline.buildModelOptions(data.models).forEach(function (o) {
+            var el = document.createElement("option");
+            el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
+            phoneModelSelect.appendChild(el);
+        });
+        if (phonePendingModel !== null) { phoneModelSelect.value = phonePendingModel; phonePendingModel = null; }
         // keep stored model if still available, else fall back to default
         var chosen = data.models.find(function (m) { return m.id === currentModel && m.available; });
         currentModel = chosen ? currentModel : data.default;
@@ -539,7 +835,7 @@ function handleMessage(msg) {
             if (msg.text) {
                 addBubble(msg.text, "user");
                 showThinking();
-                setPhoneStatus("Claude is thinking...");
+                setPhoneStatus("Thinking...");
             } else {
                 clearThinking();
                 rearmPhoneMode("No speech detected; listening again...");
@@ -550,14 +846,14 @@ function handleMessage(msg) {
             clearThinking();
             addBubble(msg.text, "agent");
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_reply_delta":
             clearThinking();
             appendAgentDelta(msg.text);
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_reply_done":
@@ -566,7 +862,7 @@ function handleMessage(msg) {
 
         case "agent_audio_start":
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_audio_end":
@@ -584,6 +880,10 @@ function handleMessage(msg) {
 
         case "debug":
             addDebugEntry(msg);
+            break;
+
+        case "flow_state":
+            renderFlowState(msg);
             break;
 
         case "voice_notice":
@@ -834,7 +1134,7 @@ function sendTextMessage() {
     textInput.value = "";
     if (phoneModeEnabled) {
         autoTurnPending = true;
-        setPhoneStatus("Claude is thinking...");
+        setPhoneStatus("Thinking...");
     }
     sendMsg("text_message", { text: text });
 }

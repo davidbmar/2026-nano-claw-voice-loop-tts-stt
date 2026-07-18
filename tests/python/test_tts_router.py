@@ -1,6 +1,6 @@
 import numpy as np
 
-from voice import tts, kokoro_client
+from voice import tts, kokoro_client, lux_client
 
 
 def _pcm(n, rate):
@@ -63,6 +63,33 @@ def test_unknown_voice_uses_piper_default(monkeypatch):
     monkeypatch.setattr(tts, "_synthesize_piper", _fake_piper)
     tts.synthesize("hi", "totally-unknown-voice", 1.0)
     assert called["voice_id"] == tts.DEFAULT_VOICE
+
+
+def test_lux_voice_48k_passes_through(monkeypatch):
+    # LuxTTS already returns 48kHz — no resampling, byte length preserved.
+    monkeypatch.setattr(
+        lux_client, "synthesize", lambda text, voice, speed: (_pcm(4800, 48000), 48000)
+    )
+    out = tts.synthesize("hello", "lux_heart", 1.0)
+    assert len(out) // 2 == 4800
+
+
+def test_lux_failure_falls_back_to_piper(monkeypatch):
+    def _boom(text, voice, speed):
+        raise lux_client.LuxUnavailable("down")
+
+    monkeypatch.setattr(lux_client, "synthesize", _boom)
+
+    called = {}
+
+    def _fake_piper(text, voice_id):
+        called["voice_id"] = voice_id
+        return _pcm(4800, 48000)
+
+    monkeypatch.setattr(tts, "_synthesize_piper", _fake_piper)
+    out = tts.synthesize("hello", "lux_heart", 1.0)
+    assert called["voice_id"] == tts.DEFAULT_VOICE
+    assert len(out) // 2 == 4800
 
 
 def test_piper_voice_ignores_speed(monkeypatch):

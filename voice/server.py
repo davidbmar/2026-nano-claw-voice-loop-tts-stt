@@ -1,5 +1,7 @@
 """Voice server — aiohttp + WebSocket bridge between browser and nano-claw API."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -7,18 +9,23 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from aiohttp import web
 
-from voice.webrtc import Session
 from voice import metrics_db
 from voice import voice_catalog
+from voice.flow_session import FLOW_MODES, FlowSession, get_flow_mode, set_flow_mode
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
+from voice import lux_client
 from voice.backoff import Backoff
+
+if TYPE_CHECKING:
+    from voice.webrtc import Session
 
 log = logging.getLogger("voice-server")
 
@@ -44,8 +51,14 @@ BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false
 METRICS = metrics_db.init_db()
 
 
+# no-cache: browsers must revalidate the UI on every load, otherwise tabs
+# opened before a deploy keep running the old app.js (stale controls that
+# silently do nothing). FileResponse still serves 304s when unchanged.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 async def index_handler(request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "index.html")
+    return web.FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 async def static_handler(request: web.Request) -> web.FileResponse:
@@ -53,7 +66,7 @@ async def static_handler(request: web.Request) -> web.FileResponse:
     path = (STATIC_DIR / filename).resolve()
     if not path.is_relative_to(STATIC_DIR.resolve()) or not path.is_file():
         raise web.HTTPNotFound()
-    return web.FileResponse(path)
+    return web.FileResponse(path, headers=_NO_CACHE)
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -101,9 +114,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"type": "hello_ack", "bargeIn": BARGE_IN_ENABLED})
 
             elif msg_type == "webrtc_offer":
+                # aiortc is only needed once a browser actually starts WebRTC.
+                from voice.webrtc import Session
+
                 session = Session()
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
+                session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
+                session._scheduler_flow_attempted = False
+                session._scheduler_flow = None
                 # Apply any settings the browser pushed before the session existed.
                 if "voice" in pending_settings:
                     v = pending_settings["voice"]
@@ -177,16 +196,19 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     continue
                 voice_id = msg.get("voiceId", "")
                 session.set_voice(voice_id, msg.get("speed", 1.0))
-                # Proactively warn if a Kokoro voice was picked but the service
-                # is down — the reply will still work (Piper fallback).
+                # Proactively warn if a native-service voice was picked but the
+                # service is down — the reply will still work (Piper fallback).
                 entry = voice_catalog.lookup(voice_id)
-                if entry and entry["engine"] == "kokoro":
+                if entry and entry["engine"] in ("kokoro", "luxtts"):
+                    probe = (kokoro_client.is_healthy if entry["engine"] == "kokoro"
+                             else lux_client.is_healthy)
+                    label = "Kokoro" if entry["engine"] == "kokoro" else "LuxTTS"
                     loop = asyncio.get_running_loop()
-                    healthy = await loop.run_in_executor(None, kokoro_client.is_healthy)
+                    healthy = await loop.run_in_executor(None, probe)
                     if not healthy:
                         await ws.send_json({
                             "type": "voice_notice",
-                            "text": "Kokoro voice unavailable — using the fast voice.",
+                            "text": f"{label} voice unavailable — using the fast voice.",
                         })
 
             elif msg_type == "tool_approve":
@@ -265,6 +287,8 @@ async def _handle_agent_request(
 ) -> None:
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     try:
+        if await _handle_scheduler_request(ws, session, text):
+            return
         req_start = time.monotonic()
         async with client.stream(
             "POST",
@@ -283,6 +307,103 @@ async def _handle_agent_request(
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+async def _handle_scheduler_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    text: str,
+) -> bool:
+    """Handle an enabled scheduler turn before the normal API route."""
+
+    if not getattr(session, "_scheduler_flow_enabled", False):
+        return False
+
+    flow = getattr(session, "_scheduler_flow", None)
+    greeting = None
+    if flow is None:
+        if getattr(session, "_scheduler_flow_attempted", False):
+            return False
+        session._scheduler_flow_attempted = True
+        flow = FlowSession.create()
+        if flow is None:
+            session._scheduler_flow_enabled = False
+            return False
+        session._scheduler_flow = flow
+        greeting = flow.greeting
+        await ws.send_json({"type": "agent_reply", "text": greeting})
+        # One audio gate covers both the greeting and the pending first reply;
+        # otherwise the greeting's audio_end rearms hands-free VAD too early.
+        await ws.send_json({"type": "agent_audio_start"})
+        await ws.send_json(_flow_state_message(flow))
+
+    try:
+        if greeting is not None:
+            await session.speak_text(greeting, session.voice_id, session.speed)
+
+        reply = await flow.reply(text)
+        log.info(
+            "Scheduler flow outcome=%s slots=%s",
+            reply.outcome or "continue",
+            reply.slots,
+        )
+        if reply.done:
+            # WebSocket sends and playback are cancellable during barge-in.
+            # Revert before either so a completed flow cannot be stranded.
+            session._scheduler_flow = None
+            session._scheduler_flow_enabled = False
+        await ws.send_json(_flow_state_message(flow, reply))
+        await ws.send_json({"type": "agent_reply", "text": reply.text})
+        if greeting is not None:
+            await session.speak_text(reply.text, session.voice_id, session.speed)
+        else:
+            await _speak_with_events(ws, session, reply.text)
+        return True
+    finally:
+        if greeting is not None and not ws.closed:
+            await ws.send_json({"type": "agent_audio_end"})
+
+
+def _flow_state_message(flow, reply=None) -> dict:
+    """Build the browser's defensive, read-only goal-region snapshot."""
+
+    slots = getattr(reply, "slots", None) if reply is not None else None
+    if not isinstance(slots, dict):
+        slots = getattr(flow, "slots", {})
+    if not isinstance(slots, dict):
+        slots = {}
+
+    rejected = getattr(reply, "rejected", []) if reply is not None else []
+    if not isinstance(rejected, (list, tuple)):
+        rejected = []
+
+    turns_used = getattr(reply, "turns_used", None) if reply is not None else None
+    if not isinstance(turns_used, int) or isinstance(turns_used, bool):
+        turns_used = getattr(flow, "turns_used", 0)
+    if not isinstance(turns_used, int) or isinstance(turns_used, bool):
+        turns_used = 0
+    max_turns = getattr(reply, "max_turns", None) if reply is not None else None
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        max_turns = getattr(flow, "max_turns", 0)
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        max_turns = 0
+
+    supervisor_ms = (
+        getattr(reply, "supervisor_ms", None) if reply is not None else None
+    )
+    if not isinstance(supervisor_ms, (int, float)) or isinstance(supervisor_ms, bool):
+        supervisor_ms = None
+
+    return {
+        "type": "flow_state",
+        "goal": str(getattr(flow, "goal", "") or ""),
+        "outcome": getattr(reply, "outcome", None) if reply is not None else None,
+        "slots": dict(slots),
+        "rejected": [str(item) for item in rejected],
+        "turns_used": int(turns_used),
+        "max_turns": int(max_turns),
+        "supervisor_ms": supervisor_ms,
+    }
 
 
 async def _consume_sse(
@@ -582,6 +703,35 @@ async def metrics_handler(request: web.Request) -> web.Response:
     })
 
 
+def _flow_api_payload() -> dict:
+    return {
+        "active": get_flow_mode(),
+        "options": list(FLOW_MODES),
+        "availability_ok": FlowSession.availability_ok(),
+    }
+
+
+async def flow_get_handler(request: web.Request) -> web.Response:
+    """Report the flow used for new browser sessions and phone calls."""
+
+    return web.json_response(_flow_api_payload())
+
+
+async def flow_set_handler(request: web.Request) -> web.Response:
+    """Set the flow used for new browser sessions and phone calls."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.Response(status=400, text="bad json")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="bad json")
+    mode = str(body.get("mode", "")).lower()
+    if not set_flow_mode(mode):
+        return web.Response(status=400, text=f"unknown mode: {mode}")
+    return web.json_response(_flow_api_payload())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -596,6 +746,7 @@ async def preview_handler(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
+    from voice.phone import register_phone_routes
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/ws", websocket_handler)
@@ -603,6 +754,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
     app.router.add_get("/api/metrics", metrics_handler)
+    app.router.add_get("/api/voice/flow", flow_get_handler)
+    app.router.add_post("/api/voice/flow", flow_set_handler)
+    register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
     app.router.add_get("/{filename}", static_handler)
     return app
 

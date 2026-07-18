@@ -119,10 +119,28 @@ def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
+def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
+    """LuxTTS path: fetch from the native cloning service, resample if needed.
+
+    Falls back to the Piper default voice if the service is unavailable so the
+    voice loop is never silent (degraded-mode convention).
+    """
+    from voice import lux_client
+
+    try:
+        pcm, rate = lux_client.synthesize(text, voice_id, speed)
+        return _resample_to_48k(pcm, rate)
+    except (lux_client.LuxUnavailable, ValueError) as exc:
+        log.warning("LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE)
+        return _synthesize_piper(text, DEFAULT_VOICE)
+
+
 def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
     """Route to the right engine and return 48kHz mono int16 PCM.
 
     - Kokoro voices → native TTS service (uses `speed`).
+    - LuxTTS voices → native voice-cloning service (48kHz, uses `speed`).
     - Piper voices  → local Piper (ignores `speed`; it is the fast option).
     - Unknown id    → Piper default.
     """
@@ -131,6 +149,8 @@ def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
     entry = voice_catalog.lookup(voice_id) if voice_id else None
     if entry and entry["engine"] == "kokoro":
         return _synthesize_kokoro(text, voice_id, speed)
+    if entry and entry["engine"] == "luxtts":
+        return _synthesize_lux(text, voice_id, speed)
 
     piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
     return _synthesize_piper(text, piper_id)

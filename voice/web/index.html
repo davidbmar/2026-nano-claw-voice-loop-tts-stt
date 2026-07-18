@@ -17,6 +17,36 @@
       <div id="debug-content"></div>
     </div>
 
+    <section id="goal-region-card" class="hidden" aria-live="polite">
+      <div class="flow-card-header">
+        <span>Goal region</span>
+        <span id="flow-outcome" class="flow-outcome hidden"></span>
+      </div>
+      <p id="flow-goal" class="flow-goal"></p>
+      <div class="flow-slots" aria-label="Scheduler slots">
+        <div id="flow-slot-job" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Job</span>
+          <span id="flow-slot-job-value" class="flow-slot-value">empty</span>
+        </div>
+        <div id="flow-slot-start" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Start</span>
+          <span id="flow-slot-start-value" class="flow-slot-value">empty</span>
+        </div>
+        <div id="flow-slot-duration" class="flow-slot flow-slot-empty">
+          <span class="flow-slot-label">Duration</span>
+          <span id="flow-slot-duration-value" class="flow-slot-value">empty</span>
+        </div>
+      </div>
+      <div class="flow-meta">
+        <span id="flow-budget">turn 0 / 0</span>
+        <span id="flow-latency">supervisor —</span>
+      </div>
+      <div id="flow-rejections" class="flow-rejections hidden">
+        <div class="flow-rejections-title">Validator rejected</div>
+        <ul id="flow-rejections-list"></ul>
+      </div>
+    </section>
+
     <main id="chat-log"></main>
 
     <footer id="controls">
@@ -26,27 +56,66 @@
       </div>
       <button id="settings-btn" type="button" title="Pipeline settings">⚙</button>
       <div id="pipeline-panel" class="hidden">
-        <div class="pipe-row"><label for="stt-select">STT (Whisper)</label>
-          <select id="stt-select">
-            <option value="tiny">tiny</option><option value="base" selected>base</option>
-            <option value="small">small</option><option value="medium">medium</option>
-          </select></div>
-        <div class="pipe-row"><label for="model-select">LLM</label>
-          <select id="model-select"></select></div>
-        <div id="voice-row">
-          <label for="voice-select">Voice</label>
-          <select id="voice-select" disabled></select>
-          <button id="voice-preview-btn" type="button" title="Preview voice" disabled>▶</button>
-          <span id="speed-control">
-            <label for="speed-slider">Speed</label>
-            <input id="speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
-            <span id="speed-value">1.0×</span>
-          </span>
-        </div>
+        <section class="pipe-card pipe-card-browser" title="Settings for chatting and talking in this page — they never affect phone calls">
+          <div class="pipe-card-head">
+            <span class="pipe-card-title">This browser</span>
+            <span class="pipe-card-tag">monitor</span>
+          </div>
+          <div class="pipe-row"><label for="stt-select">STT (Whisper)</label>
+            <select id="stt-select">
+              <option value="tiny">tiny</option><option value="base" selected>base</option>
+              <option value="small">small</option><option value="medium">medium</option>
+            </select></div>
+          <div class="pipe-row"><label for="model-select">LLM</label>
+            <select id="model-select"></select></div>
+          <div id="voice-row">
+            <label for="voice-select">Voice</label>
+            <select id="voice-select" disabled></select>
+            <button id="voice-preview-btn" type="button" title="Preview voice" disabled>▶</button>
+            <span id="speed-control">
+              <label for="speed-slider">Speed</label>
+              <input id="speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
+              <span id="speed-value">1.0×</span>
+            </span>
+          </div>
+        </section>
+        <section class="pipe-card pipe-card-phone" title="Settings for the real phone line — voice, STT, speed, and flow apply live to a call in progress">
+          <div class="pipe-card-head">
+            <span class="pipe-card-title">Phone line</span>
+            <span id="phone-call-status" class="pipe-lamp">● idle</span>
+          </div>
+          <div class="pipe-row"><label for="phone-voice-select" title="Voice on the phone line — applies live, next sentence, even mid-call">Voice</label>
+            <select id="phone-voice-select"></select></div>
+          <div class="pipe-row"><label for="phone-model-select" title="LLM answering phone calls — applies on the next agent turn">LLM</label>
+            <select id="phone-model-select"></select></div>
+          <div class="pipe-row"><label for="phone-stt-select" title="Whisper size for phone transcription — applies to the caller's next utterance">STT (Whisper)</label>
+            <select id="phone-stt-select">
+              <option value="tiny">tiny</option><option value="base">base</option>
+              <option value="small">small</option><option value="medium">medium</option>
+            </select></div>
+          <div class="pipe-row"><label for="phone-speed-slider" title="Speaking speed on the phone line — applies live">Speed</label>
+            <span id="phone-speed-control">
+              <input id="phone-speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
+              <span id="phone-speed-value">1.0×</span>
+            </span></div>
+          <div class="pipe-row"><label for="vad-select" title="Speech detection on the phone line — applies to new calls">VAD</label>
+            <select id="vad-select"></select></div>
+        </section>
+        <section class="pipe-card pipe-card-shared" title="One setting shared by the phone line and browser Talk sessions">
+          <div class="pipe-card-head">
+            <span class="pipe-card-title">Shared</span>
+            <span class="pipe-card-tag">phone + browser</span>
+          </div>
+          <div class="pipe-row"><label for="flow-select" title="Goal flow — applies live on the phone (caller's next utterance); a browser Talk session picks it up when it starts">Flow</label>
+            <div class="pipe-control-stack">
+              <select id="flow-select"></select>
+              <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
+            </div></div>
+        </section>
       </div>
       <button id="stop-btn" class="hidden">Stop</button>
       <button id="talk-btn" type="button" aria-pressed="false" disabled>Start Hands-Free Phone Mode</button>
-      <p id="phone-mode-help">Click once before dialing. Claude will listen, answer, and resume listening automatically.</p>
+      <p id="phone-mode-help">Click once before dialing. The assistant will listen, answer, and resume listening automatically.</p>
     </footer>
   </div>
 

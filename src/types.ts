@@ -63,6 +63,7 @@ export interface AgentConfig {
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
+  knowledgeFiles?: string[];
 }
 
 /**
@@ -133,8 +134,19 @@ export interface LLMResponse {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    /** Prompt tokens served from the provider's prompt cache (Anthropic). */
+    cacheReadTokens?: number;
+    /** Prompt tokens written to the provider's prompt cache (Anthropic). */
+    cacheWriteTokens?: number;
   };
 }
+
+/**
+ * Marker the ContextBuilder places after the stable system-prompt prefix
+ * (persona + knowledge). Providers that support prompt caching split here and
+ * mark the prefix cacheable; all other providers must strip it before sending.
+ */
+export const SYSTEM_CACHE_MARKER = '\n[[cache-breakpoint]]\n';
 
 /**
  * One event in a streamed LLM completion.

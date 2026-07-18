@@ -4,7 +4,11 @@ set -e
 cd "$(dirname "$0")"
 
 echo "Installing TTS service dependencies..."
-pip install -r requirements.txt
+if [ -f requirements.lock ]; then
+  pip install -r requirements.lock   # exact pinned versions — no auto-updates
+else
+  pip install -r requirements.txt
+fi
 
 echo ""
 echo "Starting TTS service on http://0.0.0.0:8300"

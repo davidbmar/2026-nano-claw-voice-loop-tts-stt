@@ -35,6 +35,7 @@ export const AgentDefaultsSchema = z.object({
   temperature: z.number().min(0).max(2).optional().default(0.7),
   maxTokens: z.number().positive().optional().default(4096),
   systemPrompt: z.string().optional(),
+  knowledgeFiles: z.array(z.string()).optional(),
 });
 
 /**
@@ -48,6 +49,9 @@ export const AgentsConfigSchema = z.object({
  * Tools configuration schema
  */
 export const ToolsConfigSchema = z.object({
+  /** false = register no tools at all: the agent answers purely from its
+   * prompt (persona + knowledge). Env override: NANO_CLAW_DISABLE_TOOLS=1. */
+  enabled: z.boolean().optional().default(true),
   restrictToWorkspace: z.boolean().optional().default(false),
   allowedCommands: z.array(z.string()).optional(),
   deniedCommands: z.array(z.string()).optional(),

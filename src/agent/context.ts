@@ -1,5 +1,6 @@
-import { Message, Skill, ToolDefinition, AgentConfig } from '../types';
+import { Message, Skill, ToolDefinition, AgentConfig, SYSTEM_CACHE_MARKER } from '../types';
 import { formatDate } from '../utils/helpers';
+import { loadKnowledge } from './knowledge';
 
 /**
  * Context builder for constructing prompts
@@ -24,8 +25,45 @@ export class ContextBuilder {
       parts.push(this.getDefaultSystemPrompt());
     }
 
-    // Add current time
-    parts.push(`\nCurrent time: ${formatDate(new Date())}`);
+    // Grounding knowledge (site digests built by scripts/build_knowledge.py).
+    // Kept adjacent to the persona and AHEAD of the per-turn timestamp so the
+    // stable prefix (persona + knowledge) can be covered by a prompt-cache
+    // breakpoint; anything after the timestamp is uncacheable.
+    if (this.config.knowledgeFiles?.length) {
+      const knowledge = loadKnowledge(this.config.knowledgeFiles);
+      if (knowledge) {
+        parts.push('\n## Knowledge');
+        parts.push(
+          'Ground answers on the topics below ONLY in this knowledge section. ' +
+            'For schedules, launches, news, and events, anything you remember from ' +
+            'training is stale by definition — do not use it, and do not invent ' +
+            'items that are not listed here. This is a point-in-time snapshot; ' +
+            'each section states when its data was captured. When speaking, keep ' +
+            'list answers to the top two or three items and offer to continue. ' +
+            'Mention data age only when the data is volatile, clearly old, or the ' +
+            "user asks. If a question on these topics isn't covered below, say " +
+            'what you do know and be clear the snapshot does not include it.\n'
+        );
+        parts.push(knowledge);
+      } else {
+        parts.push(
+          '\nNote: a site knowledge base is configured but currently unavailable. ' +
+            'If asked about it, say the knowledge base is unavailable right now ' +
+            'rather than answering from memory.'
+        );
+      }
+    }
+
+    // Everything above this marker (persona + knowledge) is stable across
+    // turns; cache-capable providers mark it as a cacheable prefix, others
+    // strip the marker. The timestamp and anything below churn per turn.
+    parts.push(SYSTEM_CACHE_MARKER);
+
+    // Add current time (minute precision — finer would churn the cacheable
+    // prompt prefix every turn for no benefit)
+    const now = new Date();
+    now.setSeconds(0, 0);
+    parts.push(`\nCurrent time: ${formatDate(now)}`);
 
     // Add skills information
     if (skills.length > 0) {
@@ -48,6 +86,14 @@ export class ContextBuilder {
         parts.push(`- **${tool.function.name}**: ${tool.function.description}`);
       }
       parts.push('');
+    } else {
+      // Knowledge-only mode: the base persona may mention tools — override
+      // that so the model never promises actions it cannot take.
+      parts.push(
+        '\nNo tools are available in this session. Answer directly from this ' +
+          'prompt and the conversation; never say you will run, check, or look ' +
+          'something up with a tool.'
+      );
     }
 
     return parts.join('\n');

@@ -53,3 +53,10 @@ temp/
 
 # OS files
 Thumbs.db
+
+# Site crawl artifacts (rebuildable via scripts/crawl_site.py)
+data/
+.gstack/
+lux-service/.venv/
+lux-service/LuxTTS/
+lux-service/.verified

@@ -14,6 +14,7 @@ import { AgentConfig, ToolCall, StreamEvent, LLMResponse } from '../types';
 import { ProviderManager } from '../providers/index';
 import { Memory } from '../agent/memory';
 import { ContextBuilder } from '../agent/context';
+import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
 import { ToolRegistry } from '../agent/tools/registry';
 import { ShellTool } from '../agent/tools/shell';
@@ -29,7 +30,13 @@ interface DebugInfo {
   iteration: number;
   messageCount: number;
   model: string;
-  tokenUsage?: { prompt: number; completion: number; total: number };
+  tokenUsage?: {
+    prompt: number;
+    completion: number;
+    total: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
   durationMs: number;
   firstTokenMs?: number;
   finishReason?: string;
@@ -113,6 +120,9 @@ export function __setProviderManagerForTest(pm: unknown): void {
 function createToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   const toolsConfig = config.tools;
+  // Knowledge-only mode: no tools registered → no tools offered to the LLM,
+  // no approval pauses; the agent answers purely from persona + knowledge.
+  if (toolsConfig?.enabled === false) return registry;
   registry.register(
     new ShellTool(
       toolsConfig?.restrictToWorkspace,
@@ -137,6 +147,7 @@ export function getAgentConfig(modelOverride?: string): AgentConfig {
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     systemPrompt: config.agents?.defaults?.systemPrompt,
+    knowledgeFiles: resolveKnowledgeFiles(config),
   };
 }
 
@@ -184,7 +195,13 @@ async function stepLoop(
       messageCount,
       model: agentConfig.model,
       tokenUsage: response.usage
-        ? { prompt: response.usage.promptTokens, completion: response.usage.completionTokens, total: response.usage.totalTokens }
+        ? {
+            prompt: response.usage.promptTokens,
+            completion: response.usage.completionTokens,
+            total: response.usage.totalTokens,
+            cacheRead: response.usage.cacheReadTokens,
+            cacheWrite: response.usage.cacheWriteTokens,
+          }
         : undefined,
       durationMs,
       finishReason: response.finishReason,
@@ -289,7 +306,13 @@ export async function* stepLoopStream(
       messageCount,
       model: agentConfig.model,
       tokenUsage: usage
-        ? { prompt: usage.promptTokens, completion: usage.completionTokens, total: usage.totalTokens }
+        ? {
+            prompt: usage.promptTokens,
+            completion: usage.completionTokens,
+            total: usage.totalTokens,
+            cacheRead: usage.cacheReadTokens,
+            cacheWrite: usage.cacheWriteTokens,
+          }
         : undefined,
       durationMs: Date.now() - startTime,
       firstTokenMs: firstTokenAt !== undefined ? firstTokenAt - startTime : undefined,
@@ -418,7 +441,9 @@ function safeParseToolArgs(argsJson: string): Record<string, unknown> {
 
 function handleModels(res: http.ServerResponse): void {
   initShared();
-  sendJson(res, 200, { models: modelsWithAvailability(config), default: DEFAULT_MODEL });
+  // Advertise the deployment's configured default (docker/default-config.json),
+  // not the compiled-in constant — the voice UI uses this for fresh browsers.
+  sendJson(res, 200, { models: modelsWithAvailability(config), default: config.agents?.defaults?.model || DEFAULT_MODEL });
 }
 
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

@@ -42,7 +42,28 @@ _PIPER_ENTRIES = [
     for v in PIPER_CATALOG
 ]
 
-_ALL = _KOKORO_ENTRIES + _PIPER_ENTRIES
+# Mirror of lux-service/voices/*.wav (kept in sync manually, like Kokoro).
+# Each id is a reference recording the cloning model mimics at 48kHz. All are
+# lang "a": LuxTTS speaks English with the cloned timbre regardless of the
+# reference language, so previews use the English sample even for voices
+# cloned from Spanish Kokoro references.
+_LUX_NAMES = [
+    ("lux_heart", "Heart"), ("lux_bella", "Bella"), ("lux_nicole", "Nicole"),
+    ("lux_aoede", "Aoede"), ("lux_kore", "Kore"), ("lux_sarah", "Sarah"),
+    ("lux_nova", "Nova"), ("lux_sky", "Sky"), ("lux_fenrir", "Fenrir"),
+    ("lux_michael", "Michael"), ("lux_puck", "Puck"), ("lux_echo", "Echo"),
+    ("lux_emma", "Emma"), ("lux_isabella", "Isabella"), ("lux_george", "George"),
+    ("lux_fable", "Fable"), ("lux_lewis", "Lewis"),
+    ("lux_dora", "Dora"), ("lux_alex", "Alex"), ("lux_santa", "Santa"),
+]
+
+_LUX_ENTRIES = [
+    {"id": vid, "name": f"{name} (48k)", "engine": "luxtts",
+     "lang": "a", "grade": None, "group": "LuxTTS — cloned"}
+    for (vid, name) in _LUX_NAMES
+]
+
+_ALL = _KOKORO_ENTRIES + _PIPER_ENTRIES + _LUX_ENTRIES
 _BY_ID = {v["id"]: v for v in _ALL}
 
 DEFAULT_VOICE = "af_heart"
@@ -57,7 +78,7 @@ def lookup(voice_id: str) -> dict | None:
 
 
 def grouped_for_ui() -> dict:
-    order = ["American English", "British English", "Spanish", "Piper — fast"]
+    order = ["American English", "British English", "Spanish", "LuxTTS — cloned", "Piper — fast"]
     groups = []
     for label in order:
         voices = [v for v in _ALL if v["group"] == label]

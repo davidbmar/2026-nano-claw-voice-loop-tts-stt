@@ -302,6 +302,57 @@ sqlite3 /app/data/metrics.db \
   'SELECT model, llm_ttft_ms, e2e_ms, est_cost_usd FROM turns ORDER BY id DESC LIMIT 5;'
 ```
 
+## Site Knowledge (persona grounding)
+
+The agent can answer questions about a website from a crawled snapshot instead
+of stale training data. Space Channel (spacechannel.com) is the first site;
+the pipeline is generic:
+
+```bash
+# 1. Crawl once — pages + JSON data feeds → data/<site>/site_index.json
+.venv-test/bin/python scripts/crawl_site.py https://www.spacechannel.com/ \
+  --feed https://www.spacechannel.com/data/launches.json  # repeat per feed
+
+# 2. Distill → data/<site>/knowledge.md (~10k-token digest the LLM answers from)
+python3 scripts/build_knowledge.py spacechannel
+
+# 3. Run — run.sh auto-detects data/*/knowledge.md, mounts data/ read-only
+#    at /app/sites, and injects the digest into the system prompt
+./run.sh
+```
+
+To keep it fresh, re-crawl on a schedule using the base URL + feeds recorded
+in the existing index (fails loudly for cron; a broken crawl never replaces
+the last good digest):
+
+```bash
+scripts/refresh_site.sh spacechannel
+```
+
+How it works:
+
+- **No lookup tool.** Tool calls pause the voice loop for approval, so
+  knowledge rides in the system prompt: between the persona and the timestamp,
+  where the Anthropic provider marks it as a prompt-cache prefix. After the
+  first turn the ~10k-token digest is served from cache (watch
+  `cacheRead`/`cacheWrite` in the Debug panel token counts).
+- **Deterministic digests.** `build_knowledge.py` classifies launches as
+  flown vs upcoming, renders vague NET dates honestly (`month precision`),
+  precomputes rollups (next launch, per-provider counts), and surfaces each
+  feed's own timestamp — a site can serve data older than the crawl. Empty
+  feeds are marked EMPTY rather than omitted, which is what keeps the model
+  from improvising.
+- **Authored overview.** Crawls of JS-rendered SPAs capture data feeds, not
+  page content. `docs/knowledge/<site>.md` (committed) describes what the
+  site *is*; the builder prepends it to every digest.
+- **Detail files.** `data/<site>/knowledge/<feed>.md` are small per-feed
+  files safe to read into a conversation. The raw `site_index.json` is
+  builder input only — at ~474KB it should never enter the context window.
+- Knowledge files are configured via `agents.defaults.knowledgeFiles` in the
+  config or the `NANO_CLAW_KNOWLEDGE` env var (comma-separated paths), and
+  are re-read automatically when their mtime changes — a cron refresh lands
+  on the next turn without a restart.
+
 ## Component Details
 
 | Component | Where it runs | Role |
@@ -333,8 +384,10 @@ docker run -it --rm \
   -p 9090:8080 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e STT_SERVICE_URL="http://host.docker.internal:8200" \
+  -e NANO_CLAW_KNOWLEDGE="/app/sites/spacechannel/knowledge.md" \
   -v nano-claw-models:/app/voice/models \
   -v nano-claw-data:/app/data \
+  -v "$(pwd)/data":/app/sites:ro \
   nano-claw-voice
 ```
 

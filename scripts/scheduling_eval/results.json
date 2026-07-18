@@ -1,0 +1,252 @@
+{
+  "generated_at": "2026-07-17T03:33:24.576117+00:00",
+  "supervisor_model": "claude-opus-4-8",
+  "caller_model": "claude-opus-4-8",
+  "overall": {
+    "passed": 8,
+    "failed": 0,
+    "total": 8,
+    "supervisor_latency_ms": {
+      "p50": 3757.3,
+      "p95": 5425.1
+    }
+  },
+  "scenarios": [
+    {
+      "id": "thirty-minute-flexible",
+      "name": "30m, no day preference",
+      "expected": "booked",
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "leaking faucet",
+        "duration_minutes": 30,
+        "slot_start": "2026-07-17T09:30:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 3,
+      "supervisor_latency_ms": {
+        "p50": 3482.5,
+        "p95": 4290.5
+      },
+      "supervisor_samples_ms": [
+        4380.2,
+        3482.5,
+        3257.1
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "one-hour-flexible",
+      "name": "1h, no day preference",
+      "expected": "booked",
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "toilet repair",
+        "duration_minutes": 60,
+        "slot_start": "2026-07-20T10:00:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 2,
+      "supervisor_latency_ms": {
+        "p50": 3417.7,
+        "p95": 3723.3
+      },
+      "supervisor_samples_ms": [
+        3078.0,
+        3757.3
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "two-hour-repair",
+      "name": "2h drain repair",
+      "expected": "booked",
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "drain repair",
+        "duration_minutes": 120,
+        "slot_start": "2026-07-21T14:00:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 3,
+      "supervisor_latency_ms": {
+        "p50": 5175.0,
+        "p95": 5190.5
+      },
+      "supervisor_samples_ms": [
+        5175.0,
+        5192.3,
+        3192.8
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "four-hour-flexible",
+      "name": "4h installation",
+      "expected": "booked",
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "water heater installation",
+        "duration_minutes": 240,
+        "slot_start": "2026-07-21T12:00:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 3,
+      "supervisor_latency_ms": {
+        "p50": 4532.1,
+        "p95": 5357.8
+      },
+      "supervisor_samples_ms": [
+        3444.1,
+        5449.6,
+        4532.1
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "four-hour-friday-impossible",
+      "name": "4h, Friday only",
+      "expected": "no_booking",
+      "outcome": "no_booking",
+      "exit": "budget",
+      "slots": {
+        "job": "sewer-line repair",
+        "duration_minutes": 240
+      },
+      "scripted_confirmation": "",
+      "caller_turns": 7,
+      "supervisor_latency_ms": {
+        "p50": 4632.8,
+        "p95": 6893.2
+      },
+      "supervisor_samples_ms": [
+        4479.6,
+        4786.0,
+        5205.0,
+        7455.9,
+        3679.2,
+        3048.0
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": null,
+      "duration_honored": null,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "ambiguous-thursday",
+      "name": "1h, Thursday-ish",
+      "expected": [
+        "booked",
+        "no_booking"
+      ],
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "pipe inspection",
+        "duration_minutes": 60,
+        "slot_start": "2026-07-22T10:00:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 3,
+      "supervisor_latency_ms": {
+        "p50": 4349.5,
+        "p95": 4963.2
+      },
+      "supervisor_samples_ms": [
+        4349.5,
+        5031.4,
+        3274.1
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": null,
+      "passed": true
+    },
+    {
+      "id": "change-of-mind",
+      "name": "Change day before confirm",
+      "expected": "booked",
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "garbage disposal replacement",
+        "duration_minutes": 60,
+        "slot_start": "2026-07-22T10:00:00"
+      },
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 3,
+      "supervisor_latency_ms": {
+        "p50": 3167.9,
+        "p95": 3622.0
+      },
+      "supervisor_samples_ms": [
+        3167.9,
+        3672.4,
+        2971.4
+      ],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
+      "preference_honored": true,
+      "passed": true
+    },
+    {
+      "id": "human-escape",
+      "name": "Ask for a human",
+      "expected": "escape",
+      "outcome": "escape",
+      "exit": "escape",
+      "slots": {},
+      "scripted_confirmation": "",
+      "caller_turns": 1,
+      "supervisor_latency_ms": {
+        "p50": null,
+        "p95": null
+      },
+      "supervisor_samples_ms": [],
+      "rejected": [],
+      "expected_match": true,
+      "exit_match": true,
+      "valid_against_ground_truth": null,
+      "duration_honored": null,
+      "preference_honored": null,
+      "passed": true
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import { AgentConfig, Message, ToolCall } from '../types';
 import { ProviderManager } from '../providers/index';
 import { Memory } from './memory';
 import { ContextBuilder } from './context';
+import { resolveKnowledgeFiles } from './knowledge';
 import { SkillsLoader } from './skills';
 import { ToolRegistry } from './tools/registry';
 import { ShellTool } from './tools/shell';
@@ -42,6 +43,7 @@ export class AgentLoop {
       temperature: config.agents?.defaults?.temperature || 0.7,
       maxTokens: config.agents?.defaults?.maxTokens || 4096,
       systemPrompt: config.agents?.defaults?.systemPrompt,
+      knowledgeFiles: resolveKnowledgeFiles(config),
       ...agentConfig,
     };
 
@@ -61,6 +63,8 @@ export class AgentLoop {
    */
   private registerBuiltInTools(config: Config): void {
     const toolsConfig = config.tools;
+    // Knowledge-only mode: see NANO_CLAW_DISABLE_TOOLS / tools.enabled
+    if (toolsConfig?.enabled === false) return;
 
     this.toolRegistry.register(
       new ShellTool(
