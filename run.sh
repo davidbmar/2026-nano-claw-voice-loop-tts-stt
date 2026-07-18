@@ -86,7 +86,13 @@ else
     echo "Creating STT virtual environment..."
     "$SERVICE_PYTHON" -m venv "$STT_VENV"
   fi
-  "$STT_VENV/bin/pip" install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
+  # Prefer the lockfile (exact pinned versions — no auto-updates); fall back
+  # to requirements.txt only when no lock has been generated yet.
+  if [ -f "$SCRIPT_DIR/stt-service/requirements.lock" ]; then
+    "$STT_VENV/bin/pip" install -q -r "$SCRIPT_DIR/stt-service/requirements.lock"
+  else
+    "$STT_VENV/bin/pip" install -q -r "$SCRIPT_DIR/stt-service/requirements.txt"
+  fi
   "$STT_VENV/bin/python" "$SCRIPT_DIR/stt-service/server.py" &
   STT_PID=$!
 
@@ -115,7 +121,11 @@ else
     echo "Creating TTS virtual environment..."
     "$SERVICE_PYTHON" -m venv "$TTS_VENV"
   fi
-  "$TTS_VENV/bin/pip" install -q -r "$SCRIPT_DIR/tts-service/requirements.txt"
+  if [ -f "$SCRIPT_DIR/tts-service/requirements.lock" ]; then
+    "$TTS_VENV/bin/pip" install -q -r "$SCRIPT_DIR/tts-service/requirements.lock"
+  else
+    "$TTS_VENV/bin/pip" install -q -r "$SCRIPT_DIR/tts-service/requirements.txt"
+  fi
   PYTORCH_ENABLE_MPS_FALLBACK=1 "$TTS_VENV/bin/python" "$SCRIPT_DIR/tts-service/server.py" &
   TTS_PID=$!
 
@@ -130,6 +140,32 @@ else
   echo ""
 fi
 
+# Start LuxTTS service (optional voice cloning) if set up and not running.
+# Setup is manual (lux-service/setup.sh) because it installs a large pinned
+# dependency set and pickle-scans the model weights; without it the LuxTTS
+# dropdown entry simply falls back to Piper (degraded-mode convention).
+LUX_SERVICE_URL="${LUX_SERVICE_URL:-http://host.docker.internal:8301}"
+LUX_CHECK_URL="${LUX_SERVICE_URL/host.docker.internal/localhost}"
+LUX_PID=""
+
+if curl -sf "$LUX_CHECK_URL/health" >/dev/null 2>&1; then
+  echo "LuxTTS service already running at $LUX_CHECK_URL"
+elif [ -f "$SCRIPT_DIR/lux-service/.verified" ]; then
+  echo "=== Starting LuxTTS service ==="
+  PYTORCH_ENABLE_MPS_FALLBACK=1 "$SCRIPT_DIR/lux-service/.venv/bin/python" "$SCRIPT_DIR/lux-service/server.py" &
+  LUX_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sf "$LUX_CHECK_URL/health" >/dev/null 2>&1; then
+      echo "LuxTTS service ready"
+      break
+    fi
+    sleep 1
+  done
+  echo ""
+else
+  echo "LuxTTS service not set up (optional) — run lux-service/setup.sh to enable the cloned voice"
+fi
+
 # Clean up services on exit
 cleanup() {
   if [ -n "$STT_PID" ]; then
@@ -142,6 +178,11 @@ cleanup() {
     echo "Stopping TTS service (pid $TTS_PID)..."
     kill $TTS_PID 2>/dev/null
     wait $TTS_PID 2>/dev/null
+  fi
+  if [ -n "$LUX_PID" ]; then
+    echo "Stopping LuxTTS service (pid $LUX_PID)..."
+    kill $LUX_PID 2>/dev/null
+    wait $LUX_PID 2>/dev/null
   fi
 }
 trap cleanup EXIT
@@ -204,6 +245,7 @@ docker run $TTY_FLAGS --rm \
   -e NANO_CLAW_FLOW_AVAILABILITY \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
+  -e LUX_SERVICE_URL="$LUX_SERVICE_URL" \
   -v nano-claw-models:/app/voice/models \
   -v nano-claw-data:/app/data \
   -v "$SCRIPT_DIR/data":/app/sites:ro \

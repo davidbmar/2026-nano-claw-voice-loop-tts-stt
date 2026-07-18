@@ -21,6 +21,7 @@ from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
+from voice import lux_client
 from voice.backoff import Backoff
 
 if TYPE_CHECKING:
@@ -50,8 +51,14 @@ BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false
 METRICS = metrics_db.init_db()
 
 
+# no-cache: browsers must revalidate the UI on every load, otherwise tabs
+# opened before a deploy keep running the old app.js (stale controls that
+# silently do nothing). FileResponse still serves 304s when unchanged.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 async def index_handler(request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "index.html")
+    return web.FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 async def static_handler(request: web.Request) -> web.FileResponse:
@@ -59,7 +66,7 @@ async def static_handler(request: web.Request) -> web.FileResponse:
     path = (STATIC_DIR / filename).resolve()
     if not path.is_relative_to(STATIC_DIR.resolve()) or not path.is_file():
         raise web.HTTPNotFound()
-    return web.FileResponse(path)
+    return web.FileResponse(path, headers=_NO_CACHE)
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -189,16 +196,19 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     continue
                 voice_id = msg.get("voiceId", "")
                 session.set_voice(voice_id, msg.get("speed", 1.0))
-                # Proactively warn if a Kokoro voice was picked but the service
-                # is down — the reply will still work (Piper fallback).
+                # Proactively warn if a native-service voice was picked but the
+                # service is down — the reply will still work (Piper fallback).
                 entry = voice_catalog.lookup(voice_id)
-                if entry and entry["engine"] == "kokoro":
+                if entry and entry["engine"] in ("kokoro", "luxtts"):
+                    probe = (kokoro_client.is_healthy if entry["engine"] == "kokoro"
+                             else lux_client.is_healthy)
+                    label = "Kokoro" if entry["engine"] == "kokoro" else "LuxTTS"
                     loop = asyncio.get_running_loop()
-                    healthy = await loop.run_in_executor(None, kokoro_client.is_healthy)
+                    healthy = await loop.run_in_executor(None, probe)
                     if not healthy:
                         await ws.send_json({
                             "type": "voice_notice",
-                            "text": "Kokoro voice unavailable — using the fast voice.",
+                            "text": f"{label} voice unavailable — using the fast voice.",
                         })
 
             elif msg_type == "tool_approve":

@@ -20,6 +20,12 @@ const speedValue = document.getElementById("speed-value");
 const modelSelect = document.getElementById("model-select");
 const sttSelect = document.getElementById("stt-select");
 const vadSelect = document.getElementById("vad-select");
+const phoneVoiceSelect = document.getElementById("phone-voice-select");
+const phoneModelSelect = document.getElementById("phone-model-select");
+const phoneSttSelect = document.getElementById("phone-stt-select");
+const phoneSpeedSlider = document.getElementById("phone-speed-slider");
+const phoneSpeedValue = document.getElementById("phone-speed-value");
+const phoneCallStatus = document.getElementById("phone-call-status");
 const flowSelect = document.getElementById("flow-select");
 const flowWarning = document.getElementById("flow-warning");
 const goalRegionCard = document.getElementById("goal-region-card");
@@ -63,6 +69,83 @@ vadSelect.addEventListener("change", function () {
     });
 });
 
+// ── Phone line controls (voice/model/speed) ──────────────────
+// Served by GET/POST /api/phone/config. Voice + speed apply live (next
+// spoken sentence, even mid-call); model applies on the next agent turn.
+var phonePendingModel = null; // config may load before the models list
+
+function applyPhoneConfig(cfg) {
+    // Don't yank a control out from under the user mid-edit (the 5s poll
+    // would otherwise snap an open dropdown back); the lamp always updates.
+    var editing = [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider]
+        .indexOf(document.activeElement) >= 0;
+    if (!editing) {
+        phoneVoiceSelect.value = cfg.voice;
+        if (phoneModelSelect.options.length > 0) {
+            phoneModelSelect.value = cfg.model || "";
+        } else {
+            phonePendingModel = cfg.model || "";
+        }
+        phoneSttSelect.value = cfg.stt_size;
+        phoneSpeedSlider.value = String(cfg.speed);
+        phoneSpeedValue.textContent = cfg.speed.toFixed(1) + "×";
+    }
+    phoneCallStatus.classList.remove("offline");
+    if (cfg.active_calls > 0) {
+        phoneCallStatus.textContent = "● live · " + cfg.active_calls +
+            (cfg.active_calls === 1 ? " caller" : " callers");
+        phoneCallStatus.title = "A call is up — voice, STT, speed, and flow changes apply mid-call";
+        phoneCallStatus.classList.add("live");
+    } else {
+        phoneCallStatus.textContent = "● idle";
+        phoneCallStatus.title = "No call in progress";
+        phoneCallStatus.classList.remove("live");
+    }
+}
+
+function phoneControlsUnavailable() {
+    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider].forEach(function (el) { el.disabled = true; });
+    var o = document.createElement("option");
+    o.textContent = "n/a (phone disabled)";
+    phoneVoiceSelect.appendChild(o);
+    phoneCallStatus.textContent = "● offline";
+    phoneCallStatus.title = "Phone gateway is not enabled on this node";
+    phoneCallStatus.classList.remove("live");
+    phoneCallStatus.classList.add("offline");
+}
+
+function loadPhoneConfig() {
+    fetch("/api/phone/config").then(function (r) {
+        if (!r.ok) { throw new Error("phone disabled"); }
+        return r.json();
+    }).then(applyPhoneConfig).catch(phoneControlsUnavailable);
+}
+
+function pushPhoneConfig(partial) {
+    fetch("/api/phone/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial),
+    }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) { if (cfg) { applyPhoneConfig(cfg); } });
+}
+
+phoneVoiceSelect.addEventListener("change", function () {
+    pushPhoneConfig({ voice: phoneVoiceSelect.value });
+});
+phoneModelSelect.addEventListener("change", function () {
+    pushPhoneConfig({ model: phoneModelSelect.value });
+});
+phoneSttSelect.addEventListener("change", function () {
+    pushPhoneConfig({ stt_size: phoneSttSelect.value });
+});
+phoneSpeedSlider.addEventListener("input", function () {
+    phoneSpeedValue.textContent = parseFloat(phoneSpeedSlider.value).toFixed(1) + "×";
+});
+phoneSpeedSlider.addEventListener("change", function () {
+    pushPhoneConfig({ speed: parseFloat(phoneSpeedSlider.value) });
+});
+
 function renderFlowConfig(config) {
     var options = Array.isArray(config.options) ? config.options : ["off", "scheduler"];
     flowSelect.innerHTML = "";
@@ -103,7 +186,7 @@ flowSelect.addEventListener("change", function () {
         return r.json();
     }).then(function (config) {
         renderFlowConfig(config || {});
-        statusText.textContent = "Flow updated — applies to new sessions and calls";
+        statusText.textContent = "Flow updated — phone applies it on the caller's next utterance";
     }).catch(loadFlowConfig).finally(function () {
         flowSelect.disabled = false;
     });
@@ -579,17 +662,23 @@ var previewAudio = new Audio();
 
 function renderVoiceOptions(uiCatalog) {
     voiceSelect.innerHTML = "";
+    phoneVoiceSelect.innerHTML = "";
     VoiceUI.groupVoices(uiCatalog).forEach(function (group) {
         var og = document.createElement("optgroup");
         og.label = group.label;
+        var ogPhone = document.createElement("optgroup");
+        ogPhone.label = group.label;
         group.options.forEach(function (opt) {
             var o = document.createElement("option");
             o.value = opt.id;
             o.textContent = opt.label;
             og.appendChild(o);
+            ogPhone.appendChild(o.cloneNode(true));
         });
         voiceSelect.appendChild(og);
+        phoneVoiceSelect.appendChild(ogPhone);
     });
+    loadPhoneConfig();
     voiceSelect.value = currentVoiceId;
     if (!voiceSelect.value) {
         currentVoiceId = uiCatalog.default;
@@ -649,7 +738,17 @@ var LS_MODEL = "nanoclaw.model", LS_STT = "nanoclaw.stt";
 var currentModel = localStorage.getItem(LS_MODEL) || "anthropic/claude-haiku-4-5";
 var currentStt = localStorage.getItem(LS_STT) || "base";
 
-settingsBtn.addEventListener("click", function () { pipelinePanel.classList.toggle("hidden"); });
+// While the panel is open, refresh phone state every 5s so the live-call
+// lamp and any changes made from other tabs/calls stay truthful.
+var phonePollTimer = null;
+settingsBtn.addEventListener("click", function () {
+    pipelinePanel.classList.toggle("hidden");
+    if (phonePollTimer) { clearInterval(phonePollTimer); phonePollTimer = null; }
+    if (!pipelinePanel.classList.contains("hidden") && !phoneVoiceSelect.disabled) {
+        loadPhoneConfig();
+        phonePollTimer = setInterval(loadPhoneConfig, 5000);
+    }
+});
 
 function loadModels() {
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
@@ -659,6 +758,17 @@ function loadModels() {
             el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
             modelSelect.appendChild(el);
         });
+        // Phone LLM mirror: "(server default)" + every available model.
+        phoneModelSelect.innerHTML = "";
+        var def = document.createElement("option");
+        def.value = ""; def.textContent = "server default (" + data.default + ")";
+        phoneModelSelect.appendChild(def);
+        Pipeline.buildModelOptions(data.models).forEach(function (o) {
+            var el = document.createElement("option");
+            el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
+            phoneModelSelect.appendChild(el);
+        });
+        if (phonePendingModel !== null) { phoneModelSelect.value = phonePendingModel; phonePendingModel = null; }
         // keep stored model if still available, else fall back to default
         var chosen = data.models.find(function (m) { return m.id === currentModel && m.available; });
         currentModel = chosen ? currentModel : data.default;
@@ -725,7 +835,7 @@ function handleMessage(msg) {
             if (msg.text) {
                 addBubble(msg.text, "user");
                 showThinking();
-                setPhoneStatus("Claude is thinking...");
+                setPhoneStatus("Thinking...");
             } else {
                 clearThinking();
                 rearmPhoneMode("No speech detected; listening again...");
@@ -736,14 +846,14 @@ function handleMessage(msg) {
             clearThinking();
             addBubble(msg.text, "agent");
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_reply_delta":
             clearThinking();
             appendAgentDelta(msg.text);
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_reply_done":
@@ -752,7 +862,7 @@ function handleMessage(msg) {
 
         case "agent_audio_start":
             setAgentSpeaking(true);
-            setPhoneStatus("Claude is speaking to the phone...");
+            setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_audio_end":
@@ -1024,7 +1134,7 @@ function sendTextMessage() {
     textInput.value = "";
     if (phoneModeEnabled) {
         autoTurnPending = true;
-        setPhoneStatus("Claude is thinking...");
+        setPhoneStatus("Thinking...");
     }
     sendMsg("text_message", { text: text });
 }

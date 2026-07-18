@@ -23,6 +23,8 @@ def phone_env(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_VAD", "energy")
     monkeypatch.setattr(phone, "_vad_mode", None)
     phone._answered.clear()
+    phone._overrides.clear()
+    phone._active_calls.clear()
 
 
 def make_app():
@@ -267,6 +269,123 @@ def test_inbound_buffer_cap_trims_oldest(monkeypatch, caplog):
             assert np.array_equal(call._inbound_buffer[0][0], decoded[1])
             assert np.array_equal(call._inbound_buffer[-1][0], decoded[-1])
             assert "inbound buffer capped at 3 frames" in caplog.text
+        finally:
+            await call.close()
+            await asyncio.sleep(0)
+
+    run(_run())
+
+
+# ── /api/phone/config — live overrides from the web UI ───────────────────
+
+
+def _config_roundtrip(method, path="/api/phone/config", payload=None):
+    async def go():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        if method == "get":
+            resp = await client.get(path)
+        else:
+            resp = await client.post(path, json=payload)
+        body = await resp.json() if resp.status == 200 else None
+        await client.close()
+        return resp.status, body
+
+    return run(go())
+
+
+def test_phone_config_get_reflects_env(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "bm_george")
+    status, body = _config_roundtrip("get")
+    assert status == 200
+    assert body["voice"] == "bm_george"
+    assert body["model"] == ""  # server default
+    assert body["speed"] == 1.0
+    assert body["active_calls"] == 0
+
+
+def test_phone_config_set_overrides_env_live(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "bm_george")
+    status, body = _config_roundtrip(
+        "post",
+        payload={"voice": "lux_george", "model": "gemini/gemini-flash-latest", "speed": 1.3},
+    )
+    assert status == 200
+    assert body["voice"] == "lux_george"
+    assert body["model"] == "gemini/gemini-flash-latest"
+    assert body["speed"] == 1.3
+    # The override wins over the environment — this is what makes changes
+    # apply to a call already in progress.
+    assert phone._cfg("NANO_CLAW_PHONE_VOICE") == "lux_george"
+
+
+def test_phone_config_rejects_unknown_voice_and_bad_speed():
+    s1, _ = _config_roundtrip("post", payload={"voice": "not-a-voice"})
+    s2, _ = _config_roundtrip("post", payload={"speed": 9})
+    assert (s1, s2) == (400, 400)
+    assert "NANO_CLAW_PHONE_VOICE" not in phone._overrides
+
+
+def test_phone_config_clearing_model_returns_to_server_default():
+    phone._overrides["NANO_CLAW_PHONE_MODEL"] = "some/model"
+    status, body = _config_roundtrip("post", payload={"model": ""})
+    assert status == 200
+    assert body["model"] == ""
+    assert "NANO_CLAW_PHONE_MODEL" not in phone._overrides
+
+
+def test_phone_config_stt_size_validated_and_live(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_STT_SIZE", "base")
+    status, body = _config_roundtrip("post", payload={"stt_size": "small"})
+    assert status == 200
+    assert body["stt_size"] == "small"
+    assert phone._cfg("NANO_CLAW_PHONE_STT_SIZE") == "small"
+    s_bad, _ = _config_roundtrip("post", payload={"stt_size": "gigantic"})
+    assert s_bad == 400
+
+
+def test_flow_switches_mid_call(monkeypatch):
+    class FakeFlow:
+        greeting = "hi"
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-flow")
+        try:
+            assert call.flow is None  # started with flow off
+
+            # UI flips to scheduler mid-call → next turn joins the flow
+            monkeypatch.setattr(phone, "get_flow_mode", lambda: "scheduler")
+            monkeypatch.setattr(phone.FlowSession, "create", classmethod(lambda cls, **kw: FakeFlow()))
+            call._sync_flow_mode()
+            assert isinstance(call.flow, FakeFlow)
+
+            # UI flips back to off → next turn returns to persona chat
+            monkeypatch.setattr(phone, "get_flow_mode", lambda: "off")
+            call._sync_flow_mode()
+            assert call.flow is None
+        finally:
+            await call.close()
+            await asyncio.sleep(0)
+
+    run(_run())
+
+
+def test_flow_create_failure_falls_back_and_does_not_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def _create(cls, **kw):
+        calls["n"] += 1
+        return None
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-flow-fail")
+        try:
+            monkeypatch.setattr(phone, "get_flow_mode", lambda: "scheduler")
+            monkeypatch.setattr(phone.FlowSession, "create", classmethod(_create))
+            call._sync_flow_mode()
+            call._sync_flow_mode()
+            assert call.flow is None
+            assert calls["n"] == 1  # no retry spam after a failed create
         finally:
             await call.close()
             await asyncio.sleep(0)

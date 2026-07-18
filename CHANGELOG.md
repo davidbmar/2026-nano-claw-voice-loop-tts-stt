@@ -7,8 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Default chat LLM is now `gemini/gemini-flash-lite-latest` (~2× cheaper than
+  Haiku for 24h continuous use once prompt caching is accounted for; the
+  goal-region supervisor stays on claude-haiku-4-5 per the eval sweep).
+  `/api/models` now advertises the configured default instead of the
+  compiled-in constant.
+- The phone line (512-FLOW-101) speaks `lux_george` — the LuxTTS clone of the
+  previous `bm_george` Kokoro voice (`NANO_CLAW_PHONE_VOICE` in `.env`).
+
 ### Added
 
+- Live phone-line controls in the web UI: the ⚙ panel is split into "This
+  browser" (STT/LLM/Voice/Speed for the page session) and "Phone line"
+  (Voice/LLM/STT/Speed/VAD/Flow) sections. Phone voice, STT, and speed are
+  runtime overrides served by `GET/POST /api/phone/config` that apply live —
+  next sentence / next utterance — even mid-call; the LLM applies on the next
+  agent turn; VAD and Flow apply per call. The panel shows a "N call live"
+  indicator; a restart returns to the `.env` values. UI files are now served
+  with `Cache-Control: no-cache` so deploys can't leave stale tabs running
+  controls that silently do nothing.
+- LuxTTS voice-cloning engine as an optional dropdown voice: new native
+  `lux-service/` (port 8301, isolated venv) mirrors the Kokoro service and
+  serves 48kHz cloned speech; `voice/lux_client.py` + `engine: "luxtts"`
+  routing in `voice/tts.py` with Piper fallback when the service is down.
+  Ships 20 voices — one clone per Kokoro voice (Spanish references included;
+  they speak English with the cloned timbre) — prewarmed at service startup.
+  The phone line (512-FLOW-101) speaks `lux_george` via NANO_CLAW_PHONE_VOICE.
+  Supply-chain
+  audited before adoption (`.gstack/security-reports/2026-07-17-luxtts-supply-chain.json`);
+  `lux-service/setup.sh` pins LuxTTS/LinaCodec commits + the HF model
+  revision and pickle-scans weights before the server will load them.
+- Supply-chain pinning across all services: `requirements.lock` (full pip
+  freeze of the known-good envs) for `lux-service/`, `tts-service/`,
+  `stt-service/`, and the container (`voice/requirements.lock`); run scripts
+  and the Dockerfile install from locks when present. Dockerfile now copies
+  `package-lock.json` and uses `npm ci` (it previously resolved npm deps fresh
+  on every build). lux-service prefetches its models (LuxTTS + whisper-base)
+  at pinned revisions in setup.sh and runs with `HF_HUB_OFFLINE=1` — nothing
+  auto-updates at runtime.
 - Site knowledge pipeline: `scripts/crawl_site.py` (site → `data/<site>/site_index.json`),
   `scripts/build_knowledge.py` (index → `knowledge.md` digest + per-feed detail files),
   and `scripts/refresh_site.sh` for cron re-crawls. Space Channel is the first site.

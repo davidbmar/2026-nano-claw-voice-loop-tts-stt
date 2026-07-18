@@ -566,11 +566,7 @@ body {
     max-width: 400px;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.75rem;
-    border: 1px solid #2a2a2a;
-    border-radius: 0.6rem;
-    background: #161616;
+    gap: 0.6rem;
 }
 
 .pipe-row {
@@ -610,3 +606,108 @@ body {
 @media (max-width: 460px) {
     .flow-slots { grid-template-columns: 1fr; }
 }
+
+/* ── ⚙ panel cards ───────────────────────────────────────────
+   Two instrument cards, scope-coded by an accent rail: app-blue for the
+   local browser session, amber (the on-air lamp color) for the real phone
+   line. The phone card's status lamp is driven by live call state. */
+.pipe-card {
+    --accent: #2563eb;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.65rem 0.75rem 0.75rem;
+    background: #161616;
+    border: 1px solid #262626;
+    border-left: 3px solid var(--accent);
+    border-radius: 0.7rem;
+}
+.pipe-card-phone { --accent: #f59e0b; }
+.pipe-card-shared { --accent: #a78bfa; }
+
+.pipe-card-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.15rem;
+}
+.pipe-card-title {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.66rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #9ca3af;
+}
+.pipe-card-title::before {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--accent);
+    margin-right: 0.5rem;
+    vertical-align: 6%;
+}
+.pipe-card-tag {
+    margin-left: auto;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.58rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #4b5563;
+}
+
+/* Status lamp on the phone card: dim green when idle, pulsing red while a
+   real call is up, gray when the phone gateway is disabled. */
+.pipe-lamp {
+    margin-left: auto;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.14rem 0.5rem;
+    border-radius: 999px;
+    background: #10251a;
+    border: 1px solid #1d3a2a;
+    color: #22c55e;
+    white-space: nowrap;
+}
+.pipe-lamp.live {
+    background: #321313;
+    border-color: #7f1d1d;
+    color: #f87171;
+    animation: lamp-pulse 1.6s ease-in-out infinite;
+}
+.pipe-lamp.offline {
+    background: #1a1a1a;
+    border-color: #2a2a2a;
+    color: #6b7280;
+    animation: none;
+}
+@keyframes lamp-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.35); }
+    50% { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .pipe-lamp.live { animation: none; }
+}
+
+/* Dark controls inside the cards (native selects were rendering light). */
+#pipeline-panel select {
+    color-scheme: dark;
+    background: #111;
+    color: #e0e0e0;
+    border: 1px solid #2a2a2a;
+    font: inherit;
+    font-size: 0.8rem;
+}
+.pipe-card select:hover { border-color: color-mix(in srgb, var(--accent) 45%, #2a2a2a); }
+.pipe-card select:focus-visible,
+.pipe-card input:focus-visible,
+.pipe-card button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.pipe-card input[type="range"] { accent-color: var(--accent); }
+.pipe-card label { color: #9ca3af; }

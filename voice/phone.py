@@ -80,7 +80,16 @@ def idle_action(idle_s: float, prompted: bool, prompt_after_s: float) -> str:
     return "hangup" if prompted else "prompt"
 
 
+# Runtime overrides set from the web UI (/api/phone/config). Checked before
+# the environment so changes apply live — voice mid-call on the next sentence,
+# model on the next turn. In-memory only: a container restart falls back to
+# the .env values.
+_overrides: dict[str, str] = {}
+
+
 def _cfg(name: str, default: str = "") -> str:
+    if name in _overrides:
+        return _overrides[name].strip()
     return os.environ.get(name, default).strip()
 
 
@@ -146,12 +155,18 @@ async def _telnyx_cmd(client: httpx.AsyncClient, cid: str, command: str, payload
         return False
 
 
+# Live call ids — lets /api/phone/config report whether a change lands
+# mid-call or on the next call.
+_active_calls: set[str] = set()
+
+
 class PhoneCall:
     """One live call: endpointing → STT → agent → TTS, half-duplex."""
 
     def __init__(self, ws: web.WebSocketResponse, call_id: str) -> None:
         self.ws = ws
         self.call_id = call_id
+        _active_calls.add(call_id)
         self.session_id = f"phone-{call_id[:24]}"
         # Dynamic mode endpoints fast (450 ms) because the semantic tail
         # check can rescue fragments; fixed mode keeps the safer 700 ms.
@@ -176,6 +191,7 @@ class PhoneCall:
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
         self.flow = FlowSession.create() if get_flow_mode() == "scheduler" else None
+        self._flow_create_failed = False
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         # Idle policy: clock runs from the last time the caller spoke or the
         # agent finished speaking; one "are you still there?" per stretch.
@@ -185,12 +201,35 @@ class PhoneCall:
 
     async def close(self) -> None:
         self.closed = True
+        _active_calls.discard(self.call_id)
         self._inbound_buffer.clear()
         if self._turn_task and not self._turn_task.done():
             self._turn_task.cancel()
         if self._idle_task and not self._idle_task.done():
             self._idle_task.cancel()
         await self._http.aclose()
+
+    def _sync_flow_mode(self) -> None:
+        """Re-evaluate the Flow dropdown at each turn boundary so a change in
+        the web UI applies to the caller's next utterance, mid-call.
+
+        Off → scheduler joins the flow cold (no flow greeting; it engages
+        with whatever the caller says next). Scheduler → off abandons the
+        negotiation state and returns to persona chat. A failed FlowSession
+        create (availability missing) falls back to persona chat and is not
+        retried for the rest of the call."""
+        want = get_flow_mode() == "scheduler"
+        if want and self.flow is None and not self._flow_create_failed:
+            self.flow = FlowSession.create()
+            if self.flow is None:
+                self._flow_create_failed = True
+                log.warning("[phone %s] flow switch requested but FlowSession "
+                            "unavailable — staying in persona chat", self.call_id[:8])
+            else:
+                log.info("[phone %s] flow joined mid-call (scheduler)", self.call_id[:8])
+        elif not want and self.flow is not None:
+            log.info("[phone %s] flow left mid-call (scheduler → persona)", self.call_id[:8])
+            self.flow = None
 
     def _mark_activity(self) -> None:
         self.last_activity = time.monotonic()
@@ -363,6 +402,7 @@ class PhoneCall:
             self._tail_extensions = 0
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
+            self._sync_flow_mode()
             if self.flow:
                 reply = await self.flow.reply(text)
                 log.info(
@@ -394,10 +434,14 @@ class PhoneCall:
         chunker = TextChunker()
         first_spoken_at: float | None = None
         try:
+            payload: dict = {"message": text, "sessionId": self.session_id}
+            model = _cfg("NANO_CLAW_PHONE_MODEL")
+            if model:
+                payload["model"] = model  # else: server's configured default
             async with self._http.stream(
                 "POST",
                 f"{NANO_CLAW_URL}/api/chat",
-                json={"message": text, "sessionId": self.session_id},
+                json=payload,
                 headers={"Accept": "text/event-stream"},
             ) as resp:
                 if "text/event-stream" not in resp.headers.get("content-type", ""):
@@ -483,9 +527,13 @@ class PhoneCall:
         if self.closed or not self.speaking or not sentence:
             return
         voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+        try:
+            speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
+        except ValueError:
+            speed = 1.0
         loop = asyncio.get_running_loop()
         try:
-            pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, 1.0)
+            pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, speed)
             for frame in pcm48k_to_ulaw_frames(pcm48k):
                 if self.closed or not self.speaking:
                     return  # hung up or barged in
@@ -658,6 +706,66 @@ async def vad_set_handler(request: web.Request) -> web.Response:
     return web.json_response({"active": get_vad_mode()})
 
 
+async def config_get_handler(request: web.Request) -> web.Response:
+    """Pipeline-settings surface: the phone line's live-tunable config."""
+    try:
+        speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
+    except ValueError:
+        speed = 1.0
+    return web.json_response({
+        "voice": _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+        "model": _cfg("NANO_CLAW_PHONE_MODEL", ""),  # "" → server default
+        "speed": speed,
+        "stt_size": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
+        "active_calls": len(_active_calls),
+    })
+
+
+async def config_set_handler(request: web.Request) -> web.Response:
+    """Set runtime overrides from the web UI. Voice applies to the next
+    spoken sentence (even mid-call); model applies to the next agent turn.
+    Overrides live in memory — a restart returns to the .env values."""
+    from voice import voice_catalog
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.Response(status=400, text="bad json")
+
+    if "voice" in body:
+        voice = str(body["voice"])
+        if voice_catalog.lookup(voice) is None:
+            return web.Response(status=400, text=f"unknown voice: {voice}")
+        _overrides["NANO_CLAW_PHONE_VOICE"] = voice
+    if "model" in body:
+        model = str(body["model"]).strip()
+        if model:
+            _overrides["NANO_CLAW_PHONE_MODEL"] = model
+        else:
+            _overrides.pop("NANO_CLAW_PHONE_MODEL", None)  # back to server default
+    if "speed" in body:
+        try:
+            speed = float(body["speed"])
+        except (TypeError, ValueError):
+            return web.Response(status=400, text="bad speed")
+        if not 0.5 <= speed <= 2.0:
+            return web.Response(status=400, text="speed out of range (0.5-2.0)")
+        _overrides["NANO_CLAW_PHONE_SPEED"] = str(speed)
+    if "stt_size" in body:
+        size = str(body["stt_size"])
+        if size not in ("tiny", "base", "small", "medium"):
+            return web.Response(status=400, text=f"unknown stt size: {size}")
+        # Read per transcription request, so this applies to the caller's
+        # next utterance even mid-call.
+        _overrides["NANO_CLAW_PHONE_STT_SIZE"] = size
+
+    log.info("phone config updated: voice=%s model=%s speed=%s (%d active call(s))",
+             _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+             _cfg("NANO_CLAW_PHONE_MODEL") or "(default)",
+             _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), len(_active_calls))
+    return await config_get_handler(request)
+
+
 def register_phone_routes(app: web.Application) -> None:
     """Attach gateway routes when NANO_CLAW_PHONE=1 (no-op otherwise)."""
     global _metrics_conn
@@ -677,5 +785,7 @@ def register_phone_routes(app: web.Application) -> None:
     app.router.add_get("/api/calls", calls_handler)
     app.router.add_get("/api/phone/vad", vad_get_handler)
     app.router.add_post("/api/phone/vad", vad_set_handler)
+    app.router.add_get("/api/phone/config", config_get_handler)
+    app.router.add_post("/api/phone/config", config_set_handler)
     log.info("[phone] Telnyx gateway registered (webhook base: %s, VAD: %s)",
              _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE"), get_vad_mode())

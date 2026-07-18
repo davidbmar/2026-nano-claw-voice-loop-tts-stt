@@ -441,7 +441,9 @@ function safeParseToolArgs(argsJson: string): Record<string, unknown> {
 
 function handleModels(res: http.ServerResponse): void {
   initShared();
-  sendJson(res, 200, { models: modelsWithAvailability(config), default: DEFAULT_MODEL });
+  // Advertise the deployment's configured default (docker/default-config.json),
+  // not the compiled-in constant — the voice UI uses this for fresh browsers.
+  sendJson(res, 200, { models: modelsWithAvailability(config), default: config.agents?.defaults?.model || DEFAULT_MODEL });
 }
 
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
