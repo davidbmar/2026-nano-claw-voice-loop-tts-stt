@@ -217,6 +217,7 @@ class PhoneCall:
         self.speaking = False
         self.interrupted = False
         self.closed = False
+        self._playback_flush_sent = False
         self._turn_task: asyncio.Task | None = None
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
@@ -231,7 +232,11 @@ class PhoneCall:
         self._idle_task = asyncio.create_task(self._idle_watchdog())
 
     async def close(self) -> None:
+        was_speaking = self.speaking
+        self.speaking = False
         self.closed = True
+        if was_speaking or self.interrupted:
+            await self._flush_playback()
         _active_calls.discard(self.call_id)
         self._inbound_buffer.clear()
         if self._turn_task and not self._turn_task.done():
@@ -407,8 +412,8 @@ class PhoneCall:
                 return
 
     def _interrupt(self) -> None:
-        """Caller talked over the agent: flush Telnyx's audio buffer, stop
-        speaking, and turn the interruption itself into the next utterance."""
+        """Caller talked over the agent: stop speaking and turn the
+        interruption itself into the next utterance."""
         log.info("[phone %s] barge-in — caller interrupted", self.call_id[:8])
         if self.tap:
             self.tap.event(
@@ -419,15 +424,24 @@ class PhoneCall:
         self.speaking = False  # speak() loop sees this and aborts
         frames = self.barge.take_frames()
         self.endpointer.prime(frames)
-        # Telnyx buffers outbound media ahead of playback; without a clear
-        # the caller keeps hearing the old answer for seconds after we stop.
-        asyncio.create_task(self._send_clear())
+        asyncio.create_task(self._flush_playback())
 
-    async def _send_clear(self) -> None:
+    async def _flush_playback(self) -> None:
+        """Clear surplus audio queued by faster-than-real-time frame pacing.
+
+        Frames are sent about 10% ahead of playback, so Telnyx can hold audible
+        speech after a local interruption. One clear drops that buffered tail.
+        """
+        if self._playback_flush_sent or getattr(self.ws, "closed", False):
+            return
+        self._playback_flush_sent = True
         try:
             await self.ws.send_json({"event": "clear"})
         except Exception:
             log.exception("[phone %s] clear failed", self.call_id[:8])
+        else:
+            if self.tap:
+                self.tap.event("clear_sent")
 
     # ── One conversational turn ──────────────────────────────────
 
@@ -517,6 +531,7 @@ class PhoneCall:
             if tap:
                 tap.event("agent_done", ms=(time.monotonic() - t0) * 1000.0)
 
+        self._playback_flush_sent = False
         self.speaking = True
         self.barge.reset()
         chunker = TextChunker()
@@ -719,6 +734,7 @@ class PhoneCall:
         """Speak a complete text (greeting, idle prompts, error lines)."""
         if self.closed or not text:
             return
+        self._playback_flush_sent = False
         self.speaking = True
         self.barge.reset()
         try:

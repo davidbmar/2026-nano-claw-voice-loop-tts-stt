@@ -180,3 +180,25 @@ output at 16 kHz or higher and compare its spectrum with `outbound.wav`.
 | --- | --- | --- |
 | `NANO_CLAW_PHONE_TAP` | unset/off | Exact value `1` enables per-call capture; every other value creates no tap and performs no capture I/O. |
 | `NANO_CLAW_PHONE_TAP_DIR` | `/tmp/nano-claw-phone-taps` | Root directory; each call ID gets one subdirectory. |
+
+## Barge-in buffer flush
+
+Outbound 20 ms frames are paced at about 18 ms to keep Telnyx's jitter buffer
+fed. During a long answer that 10% lead accumulates, so merely stopping local
+sends on barge-in can leave roughly one second of already-queued speech after
+a ten-second response. The caller then hears the agent continue even though
+the gateway has accepted the interruption.
+
+When barge-in is detected, the gateway now stops sending media and sends
+Telnyx `{"event": "clear"}` exactly once. Telnyx immediately stops the media
+playing on the stream and empties its media queue. A hangup during playback
+uses the same flush while the media WebSocket is still available; a closed
+socket or failed clear remains isolated from the call path.
+
+To measure the change, enable the call tap and make a controlled call with a
+long agent response, then interrupt it. `timings.jsonl` should contain paired
+`barge_in` and `clear_sent` events, and `phone_tap_report.py`'s **Barge-in to
+last outbound frame** value should be at or below a single frame interval. The
+report measures the gateway send boundary; record or listen at the handset and
+compare the audible post-interruption tail before and after this change to
+confirm that Telnyx's queued audio was removed.
