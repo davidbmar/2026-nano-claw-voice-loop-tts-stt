@@ -202,3 +202,17 @@ last outbound frame** value should be at or below a single frame interval. The
 report measures the gateway send boundary; record or listen at the handset and
 compare the audible post-interruption tail before and after this change to
 confirm that Telnyx's queued audio was removed.
+
+## Sentence synthesis look-ahead
+
+Phone playback pre-synthesizes exactly one sentence ahead while the current
+sentence's frames are being sent. The one-sentence bound removes most normal
+inter-sentence synthesis gaps without building a large queue of audio that
+would be discarded on barge-in. Hangup or barge-in cancels and awaits the
+pending synthesis task, and a failed prefetched sentence is logged and skipped
+without interrupting the sentence already playing.
+
+With the call tap enabled, `synth_ahead_hit` means the next synthesis was ready
+when playback needed it; `synth_ahead_miss` includes `wait_ms`, the remaining
+synthesis wait at that boundary. Compare those events with the adjacent
+`frames_sent` records and their inter-sentence gap to quantify the improvement.
