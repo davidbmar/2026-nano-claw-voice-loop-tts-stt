@@ -53,6 +53,7 @@ from voice.phone_audio import (
     transcript_looks_incomplete,
     ulaw_decode,
 )
+from voice.phone_tap import CallTap
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 
@@ -179,6 +180,17 @@ class PhoneCall:
         self.call_id = call_id
         _active_calls.add(call_id)
         self.session_id = f"phone-{call_id[:24]}"
+        codec = phone_codec()
+        rate = 16000 if codec == "l16" else 8000
+        self.tap = CallTap.create(call_id, codec, rate, rate)
+        self._tap_sentence_index = 0
+        self._active_tap_sentence_index: int | None = None
+        if self.tap:
+            self.tap.event(
+                "call_start",
+                codec=codec,
+                voice=_cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+            )
         # Dynamic mode endpoints fast (450 ms) because the semantic tail
         # check can rescue fragments; fixed mode keeps the safer 700 ms.
         self.dynamic = dynamic_endpoint_enabled()
@@ -226,7 +238,13 @@ class PhoneCall:
             self._turn_task.cancel()
         if self._idle_task and not self._idle_task.done():
             self._idle_task.cancel()
-        await self._http.aclose()
+        try:
+            await self._http.aclose()
+        finally:
+            tap, self.tap = self.tap, None
+            if tap:
+                tap.event("call_end")
+                tap.close()
 
     def _sync_flow_mode(self) -> None:
         """Re-evaluate the Flow dropdown at each turn boundary so a change in
@@ -284,6 +302,8 @@ class PhoneCall:
         if self.closed:
             return
         payload = base64.b64decode(payload_b64)
+        if self.tap:
+            self.tap.inbound_frame(payload)
         pcm = (
             np.frombuffer(payload, dtype=np.int16)
             if phone_codec() == "l16"
@@ -320,7 +340,7 @@ class PhoneCall:
             self._buffer_inbound(pcm, is_speech)
             return
 
-        utterance = self.endpointer.feed(pcm, is_speech=is_speech)
+        utterance = self._feed_endpointer(pcm, is_speech)
         if utterance:
             self._mark_activity()
             if self._turn_task and not self._turn_task.done():
@@ -328,6 +348,27 @@ class PhoneCall:
                 self._inbound_buffer.clear()
             self.interrupted = False
             self._start_turn(utterance)
+
+    def _feed_endpointer(
+        self, pcm: np.ndarray, is_speech: bool | None
+    ) -> bytes | None:
+        """Feed one decoded frame and capture endpoint state transitions."""
+        tap = self.tap
+        if tap is None:
+            return self.endpointer.feed(pcm, is_speech=is_speech)
+        was_in_utterance = self.endpointer._in_utterance
+        rms = (
+            float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+            if len(pcm)
+            else 0.0
+        )
+        utterance = self.endpointer.feed(pcm, is_speech=is_speech)
+        is_in_utterance = self.endpointer._in_utterance
+        if not was_in_utterance and is_in_utterance:
+            tap.event("utterance_start", rms=rms)
+        if was_in_utterance and not is_in_utterance:
+            tap.event("utterance_end", rms=rms, accepted=utterance is not None)
+        return utterance
 
     def _buffer_inbound(self, pcm: np.ndarray, is_speech: bool | None) -> None:
         if len(self._inbound_buffer) >= MAX_BUFFERED_INBOUND_FRAMES:
@@ -359,7 +400,7 @@ class PhoneCall:
     def _replay_inbound(self) -> None:
         while self._inbound_buffer and not self.closed:
             pcm, is_speech = self._inbound_buffer.popleft()
-            utterance = self.endpointer.feed(pcm, is_speech=is_speech)
+            utterance = self._feed_endpointer(pcm, is_speech)
             if utterance:
                 self._mark_activity()
                 self._start_turn(utterance)
@@ -369,6 +410,10 @@ class PhoneCall:
         """Caller talked over the agent: flush Telnyx's audio buffer, stop
         speaking, and turn the interruption itself into the next utterance."""
         log.info("[phone %s] barge-in — caller interrupted", self.call_id[:8])
+        if self.tap:
+            self.tap.event(
+                "barge_in", sentence_index=self._active_tap_sentence_index
+            )
         self._mark_activity()
         self.interrupted = True
         self.speaking = False  # speak() loop sees this and aborts
@@ -431,7 +476,12 @@ class PhoneCall:
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
             self._sync_flow_mode()
             if self.flow:
+                agent_started = time.monotonic() if self.tap else None
                 reply = await self.flow.reply(text)
+                if self.tap and agent_started is not None:
+                    self.tap.event(
+                        "agent_done", ms=(time.monotonic() - agent_started) * 1000.0
+                    )
                 log.info(
                     "[phone %s] flow outcome=%s slots=%s",
                     self.call_id[:8],
@@ -456,6 +506,17 @@ class PhoneCall:
         still writing the rest. Falls back to the non-stream JSON shape when
         the API has streaming disabled (NANO_CLAW_STREAM=0)."""
         t0 = time.monotonic()
+        tap = self.tap
+        agent_done_recorded = False
+
+        def record_agent_done() -> None:
+            nonlocal agent_done_recorded
+            if agent_done_recorded:
+                return
+            agent_done_recorded = True
+            if tap:
+                tap.event("agent_done", ms=(time.monotonic() - t0) * 1000.0)
+
         self.speaking = True
         self.barge.reset()
         chunker = TextChunker()
@@ -474,6 +535,7 @@ class PhoneCall:
                 if "text/event-stream" not in resp.headers.get("content-type", ""):
                     body = json.loads(await resp.aread())
                     reply = body.get("response", "") or "I didn't catch that — could you say it again?"
+                    record_agent_done()
                     log.info("[phone %s] agent non-stream (%.1fs)", self.call_id[:8], time.monotonic() - t0)
                     for chunk in self._sentences(reply):
                         await self._speak_chunk(chunk)
@@ -501,6 +563,7 @@ class PhoneCall:
                                     )
                                 await self._speak_chunk(chunk)
                         elif ev == "final":
+                            record_agent_done()
                             tail = chunker.flush()
                             if tail:
                                 await self._speak_chunk(tail)
@@ -513,11 +576,13 @@ class PhoneCall:
                                 "I can't take actions over the phone, but I'm happy to answer questions."
                             )
                         elif ev == "error":
+                            record_agent_done()
                             await self._speak_chunk("Sorry, something went wrong. Try asking again.")
                     elif raw.startswith("event:"):
                         event = raw[6:].strip()
                     elif raw.startswith("data:"):
                         data_lines.append(raw[5:].strip())
+                record_agent_done()
         finally:
             self.speaking = False
             if not self.interrupted:
@@ -535,6 +600,7 @@ class PhoneCall:
 
     async def _transcribe(self, pcm: bytes) -> str:
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
+        started = time.monotonic() if self.tap else None
         resp = await self._http.post(
             f"{stt_url}/transcribe",
             content=pcm,
@@ -545,7 +611,14 @@ class PhoneCall:
                 "X-Model-Size": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
             },
         )
-        return resp.json().get("text", "")
+        text = resp.json().get("text", "")
+        if self.tap and started is not None:
+            self.tap.event(
+                "stt_done",
+                ms=(time.monotonic() - started) * 1000.0,
+                text_len=len(text),
+            )
+        return text
 
     # ── Outbound audio ───────────────────────────────────────────
 
@@ -553,6 +626,18 @@ class PhoneCall:
         """TTS one sentence → paced phone frames. Caller manages `speaking`."""
         if self.closed or not self.speaking or not sentence:
             return
+        tap = self.tap
+        sentence_index: int | None = None
+        if tap:
+            self._tap_sentence_index += 1
+            sentence_index = self._tap_sentence_index
+            self._active_tap_sentence_index = sentence_index
+            tap.event("synth_start", sentence_index=sentence_index)
+        synth_started = time.monotonic() if tap else None
+        send_started: float | None = None
+        send_times: list[float] | None = [] if tap else None
+        audio_s_sent = 0.0
+        last_frame_audio_ms = 0.0
         voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
         try:
             speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
@@ -561,22 +646,74 @@ class PhoneCall:
         loop = asyncio.get_running_loop()
         try:
             pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, speed)
+            if tap and synth_started is not None:
+                tap.tts_pcm48k(pcm48k)
+                tap.event(
+                    "synth_done",
+                    sentence_index=sentence_index,
+                    ms=(time.monotonic() - synth_started) * 1000.0,
+                    samples=len(pcm48k) // 2,
+                )
+            codec = phone_codec()
             frames = (
                 pcm48k_to_l16_frames(pcm48k)
-                if phone_codec() == "l16"
+                if codec == "l16"
                 else pcm48k_to_ulaw_frames(pcm48k)
             )
+            if tap:
+                outbound_rate = 16000 if codec == "l16" else 8000
+                sample_width = 2 if codec == "l16" else 1
+                send_started = time.monotonic()
             for frame in frames:
                 if self.closed or not self.speaking:
-                    return  # hung up or barged in
+                    break  # hung up or barged in
                 await self.ws.send_json(
                     {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
                 )
+                if tap and send_times is not None:
+                    sent_at = time.monotonic()
+                    tap.outbound_frame(frame)
+                    send_times.append(sent_at)
+                    frame_samples = len(frame) // sample_width
+                    audio_s_sent += frame_samples / outbound_rate
+                    last_frame_audio_ms = frame_samples * 1000.0 / outbound_rate
                 # Pace slightly faster than real time: keeps Telnyx's
                 # jitter buffer fed without flooding it.
                 await asyncio.sleep(FRAME_MS / 1000 * 0.9)
         except Exception:
             log.exception("[phone %s] speak failed", self.call_id[:8])
+        finally:
+            if tap and send_times is not None:
+                elapsed_s = (
+                    time.monotonic() - send_started if send_started is not None else 0.0
+                )
+                intervals_ms = np.diff(send_times) * 1000.0
+                if len(intervals_ms):
+                    interval_p50_ms, interval_p95_ms = np.percentile(
+                        intervals_ms, [50, 95]
+                    )
+                    interval_max_ms = float(np.max(intervals_ms))
+                else:
+                    interval_p50_ms = interval_p95_ms = interval_max_ms = 0.0
+                fields = {
+                    "sentence_index": sentence_index,
+                    "count": len(send_times),
+                    "interval_p50_ms": float(interval_p50_ms),
+                    "interval_p95_ms": float(interval_p95_ms),
+                    "interval_max_ms": interval_max_ms,
+                    "audio_s": audio_s_sent,
+                    "elapsed_s": elapsed_s,
+                    "surplus_s": audio_s_sent - elapsed_s,
+                }
+                if send_times:
+                    fields.update(
+                        first_frame_t=send_times[0],
+                        last_frame_t=send_times[-1],
+                        last_frame_audio_ms=last_frame_audio_ms,
+                    )
+                tap.event("frames_sent", **fields)
+                if self._active_tap_sentence_index == sentence_index:
+                    self._active_tap_sentence_index = None
 
     async def speak(self, text: str) -> None:
         """Speak a complete text (greeting, idle prompts, error lines)."""
