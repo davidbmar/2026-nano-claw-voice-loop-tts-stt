@@ -4,6 +4,12 @@ import {
     PROFILE_VERSION,
     TalkingCubeRenderer,
 } from "./talking-cube.js";
+import {
+    EMOTION_PROFILES,
+    PRESENCE_PROFILES,
+    applyEmotionLayer,
+    inferEmotion,
+} from "./emotion-layer.js";
 
 "use strict";
 
@@ -309,22 +315,64 @@ talkingCube.setPanelOpen(false);
 window.TalkingCube = talkingCube;
 window.VoiceCube = talkingCube;
 
+// ── Emotion layer state ──────────────────────────────────────
+// Sits between the user's base profile and the caller/moment/speaking
+// overlays (see effectiveVisualizationSettings). Auto mode infers an
+// emotion from each agent reply; manual mode (panel or window.VoiceEmotion)
+// pins one until auto is re-enabled.
+var emotionState = { emotion: "neutral", intensity: 0.7, presence: "idle" };
+var emotionAuto = true;
+
+function setVisualEmotion(name, opts) {
+    opts = opts || {};
+    if (!Object.prototype.hasOwnProperty.call(EMOTION_PROFILES, name)) return false;
+    emotionState.emotion = name;
+    if (opts.intensity != null) {
+        emotionState.intensity = Math.max(0, Math.min(1, Number(opts.intensity) || 0));
+    }
+    applyVisualizationLayers();
+    return true;
+}
+
+function setVisualPresence(name) {
+    if (!Object.prototype.hasOwnProperty.call(PRESENCE_PROFILES, name)) return false;
+    if (emotionState.presence === name) return true;
+    emotionState.presence = name;
+    applyVisualizationLayers();
+    return true;
+}
+
+function inferEmotionFromReply(text) {
+    if (!emotionAuto) return;
+    var inferred = inferEmotion(text);
+    setVisualEmotion(inferred.emotion, { intensity: inferred.intensity });
+}
+
+window.VoiceEmotion = {
+    set: function (name, opts) { emotionAuto = false; return setVisualEmotion(name, opts); },
+    presence: setVisualPresence,
+    auto: function (on) { emotionAuto = on !== false; return emotionAuto; },
+    state: function () { return Object.assign({ auto: emotionAuto }, emotionState); },
+    profiles: Object.keys(EMOTION_PROFILES),
+};
+
 function effectiveVisualizationSettings() {
-    var primary = visualizationSettings.primary;
-    var secondary = visualizationSettings.secondary;
+    var base = applyEmotionLayer(visualizationSettings, emotionState);
+    var primary = base.primary;
+    var secondary = base.secondary;
     if (callerVisualizationActive && !visualizationSpeaking) {
-        primary = visualizationSettings.secondary;
-        secondary = visualizationSettings.primary;
+        primary = base.secondary;
+        secondary = base.primary;
     }
     if (visualizationMoment) {
         primary = visualizationMoment.primary;
         secondary = visualizationMoment.secondary;
     }
-    return Object.assign({}, visualizationSettings, {
-        pattern: visualizationSpeaking ? "wave" : visualizationSettings.pattern,
+    return Object.assign({}, base, {
+        pattern: visualizationSpeaking ? "wave" : base.pattern,
         energy: visualizationSpeaking
-            ? Math.max(0.58, visualizationSettings.energy)
-            : visualizationSettings.energy,
+            ? Math.max(0.58, base.energy)
+            : base.energy,
         primary: primary,
         secondary: secondary,
     });
@@ -338,7 +386,11 @@ function updateTalkingCubeStatus() {
     } else if (callerVisualizationActive) {
         talkingCubeStatus.textContent = "Caller speaking · Secondary color";
     } else {
-        talkingCubeStatus.textContent = "Idle · " + VISUALIZATION_PATTERN_LABELS[visualizationSettings.pattern];
+        var idleLabel = "Idle · " + VISUALIZATION_PATTERN_LABELS[visualizationSettings.pattern];
+        if (emotionState.emotion !== "neutral") {
+            idleLabel += " · " + emotionState.emotion + (emotionAuto ? " (auto)" : "");
+        }
+        talkingCubeStatus.textContent = idleLabel;
     }
 }
 
@@ -435,6 +487,17 @@ cubeScene.addEventListener("change", function () {
     persistVisualizationSettings();
     syncVisualizationControls();
     talkingCube.pulse({ strength: 0.9, duration: 980 });
+});
+
+const cubeEmotion = document.getElementById("cube-emotion");
+cubeEmotion.addEventListener("change", function () {
+    if (cubeEmotion.value === "auto") {
+        emotionAuto = true;
+        setVisualEmotion("neutral");
+    } else {
+        emotionAuto = false;
+        setVisualEmotion(cubeEmotion.value, { intensity: 0.85 });
+    }
 });
 
 cubePattern.addEventListener("change", function () {
@@ -1737,9 +1800,11 @@ function handleMessage(msg) {
             if (msg.text) {
                 addBubble(msg.text, "user");
                 showThinking();
+                setVisualPresence("thinking");
                 setPhoneStatus("Thinking...");
             } else {
                 clearThinking();
+                setVisualPresence("idle");
                 rearmPhoneMode("No speech detected; listening again...");
             }
             break;
@@ -1748,6 +1813,8 @@ function handleMessage(msg) {
             clearThinking();
             markFirstAgentTextLatency();
             addBubble(msg.text, "agent");
+            inferEmotionFromReply(msg.text);
+            setVisualPresence("speaking");
             setAgentSpeaking(true);
             setPhoneStatus("Speaking to the phone...");
             break;
@@ -1761,6 +1828,7 @@ function handleMessage(msg) {
             break;
 
         case "agent_reply_done":
+            if (streamingBubble) inferEmotionFromReply(streamingBubble.textContent);
             finalizeAgentBubble();
             break;
 
@@ -1774,6 +1842,7 @@ function handleMessage(msg) {
             finalizeAgentBubble();
             setAgentSpeaking(false);
             setVisualizationSpeaking(false);
+            setVisualPresence("idle");
             if (bargeDetector) bargeDetector.reset();
             rearmPhoneMode("Waiting for the phone side...");
             break;
