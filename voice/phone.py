@@ -23,6 +23,8 @@ Optional:
     NANO_CLAW_PHONE_STT_SIZE        Whisper size for phone turns (default
                                     base; "tiny" for low-powered nodes)
     NANO_CLAW_PHONE_CODEC           pcmu (default) or l16 (16 kHz wideband)
+    NANO_CLAW_PHONE_RMS_MIN         minimum energy endpoint threshold
+    NANO_CLAW_PHONE_RMS_RATIO       noise-floor multiplier for endpointing
     NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
                                     mid-speech (buffer-flush via Telnyx
                                     "clear"); unset = half-duplex
@@ -206,6 +208,7 @@ class PhoneCall:
         self.endpointer = UtteranceEndpointer(
             end_silence_ms=450 if self.dynamic else 700,
             rate_hz=phone_rate(),
+            codec=codec,
         )
         self._tail_extensions = 0
         self._primed_len = 0
@@ -373,18 +376,20 @@ class PhoneCall:
         tap = self.tap
         if tap is None:
             return self.endpointer.feed(pcm, is_speech=is_speech)
-        was_in_utterance = self.endpointer._in_utterance
-        rms = (
-            float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
-            if len(pcm)
-            else 0.0
-        )
+        was_in_utterance = self.endpointer.in_utterance
         utterance = self.endpointer.feed(pcm, is_speech=is_speech)
-        is_in_utterance = self.endpointer._in_utterance
+        is_in_utterance = self.endpointer.in_utterance
+        rms = self.endpointer.current_rms
+        floor = self.endpointer.noise_floor
         if not was_in_utterance and is_in_utterance:
-            tap.event("utterance_start", rms=rms)
+            tap.event("utterance_start", rms=rms, floor=floor)
         if was_in_utterance and not is_in_utterance:
-            tap.event("utterance_end", rms=rms, accepted=utterance is not None)
+            tap.event(
+                "utterance_end",
+                rms=rms,
+                floor=floor,
+                accepted=utterance is not None,
+            )
         return utterance
 
     def _buffer_inbound(self, pcm: np.ndarray, is_speech: bool | None) -> None:

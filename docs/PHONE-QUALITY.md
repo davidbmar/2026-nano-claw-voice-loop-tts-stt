@@ -39,7 +39,9 @@ are mono, 16-bit PCM; their headers carry the actual sampling rate.
 `timings.jsonl` has one JSON object per line. Every object has an `event` and
 a monotonic `t` in seconds. It records call and utterance boundaries, STT and
 agent completion, synthesis, one aggregate frame-pacing record per sentence,
-and barge-in. It intentionally does not write a JSON record per audio frame.
+and barge-in. `utterance_start` and `utterance_end` include the frame's current
+int16 RMS and the rolling noise `floor`. It intentionally does not write a JSON
+record per audio frame.
 
 ## Enable and report a tap
 
@@ -174,12 +176,39 @@ The outbound tap is at the gateway send boundary, not inside the receiving
 handset. To prove the downlink's final acoustic hop as well, record the handset
 output at 16 kHz or higher and compare its spectrum with `outbound.wav`.
 
+## VAD and adaptive endpointing
+
+`NANO_CLAW_PHONE_VAD=silero` selects the neural Silero VAD for new calls.
+Unset or `energy` selects energy classification, which remains the application
+default; selecting Silero falls back loudly to energy if its model/runtime is
+unavailable. The web VAD selector is an in-memory override with precedence over
+the environment and likewise applies to new calls only.
+
+The current deployment does set `NANO_CLAW_PHONE_VAD`, but sets it to `energy`,
+not `silero`: the current `.env` contains that value and `run.sh` forwards the
+variable into the container. This task does not change that default or running
+mode. Set the value to `silero` and restart the container to opt in.
+
+In energy mode, L16 endpointing estimates the line's non-speech floor with an
+EMA of frame RMS values. Each call owns its estimate; the first non-speech
+frame seeds it, subsequent non-speech frames contribute 5%, and utterance
+resets preserve it. RMS and floor are linear int16 units, not dBFS. The speech
+boundary is `max(RMS minimum, floor × ratio)`, and speech frames do not update
+the floor so caller energy cannot ratchet the threshold upward. PCMU keeps its
+historical fixed 350-RMS behavior by default: its floor ratio is zero, so
+tracking the diagnostic floor cannot change classification. Silero's speech
+decisions remain authoritative when enabled, while its non-speech decisions
+still update the floor reported by the tap.
+
 ## Environment knobs
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NANO_CLAW_PHONE_TAP` | unset/off | Exact value `1` enables per-call capture; every other value creates no tap and performs no capture I/O. |
 | `NANO_CLAW_PHONE_TAP_DIR` | `/tmp/nano-claw-phone-taps` | Root directory; each call ID gets one subdirectory. |
+| `NANO_CLAW_PHONE_VAD` | `energy` | `silero` enables neural VAD for new calls when available; `energy` uses RMS endpointing. The current container configuration explicitly selects `energy`. |
+| `NANO_CLAW_PHONE_RMS_MIN` | PCMU: `350`; L16: `120` | Minimum speech boundary in linear int16 RMS units. |
+| `NANO_CLAW_PHONE_RMS_RATIO` | PCMU: `0.0`; L16: `3.0` | Noise-floor multiplier. PCMU's zero preserves its fixed-threshold compatibility default; setting a positive value opts it into adaptation. |
 
 ## Barge-in buffer flush
 

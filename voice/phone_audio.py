@@ -12,6 +12,8 @@ have carried live PSTN traffic on this exact number.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 _ULAW_BIAS = 0x84
@@ -21,6 +23,12 @@ TELNYX_RATE = 8000
 TTS_RATE = 48000
 FRAME_MS = 20  # Telnyx media frame duration
 FRAME_SAMPLES = TELNYX_RATE * FRAME_MS // 1000  # 160 samples / 20 ms
+
+PCMU_RMS_MIN = 350.0
+PCMU_RMS_RATIO = 0.0
+L16_RMS_MIN = 120.0
+L16_RMS_RATIO = 3.0
+NOISE_FLOOR_ALPHA = 0.05
 
 
 def ulaw_encode(pcm16: np.ndarray) -> bytes:
@@ -131,28 +139,131 @@ def resample_48k_to_16k(pcm16_48k: np.ndarray) -> np.ndarray:
     return np.clip(decimated, -32768, 32767).astype(np.int16)
 
 
+def _nonnegative_env_float(name: str, default: float) -> float:
+    """Read a finite, non-negative float from the environment."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if np.isfinite(value) and value >= 0.0 else default
+
+
+class NoiseFloorEstimator:
+    """Rolling non-speech RMS floor and its adaptive speech threshold.
+
+    ``floor`` and ``min_threshold`` are linear int16 RMS values. Each frame
+    already classified as non-speech updates ``floor`` with an exponential
+    moving average; speech frames leave it untouched. The resulting decision
+    boundary is always ``max(min_threshold, floor * ratio)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_threshold: float,
+        ratio: float,
+        alpha: float = NOISE_FLOOR_ALPHA,
+    ) -> None:
+        if not np.isfinite(min_threshold) or min_threshold < 0.0:
+            raise ValueError("min_threshold must be finite and non-negative")
+        if not np.isfinite(ratio) or ratio < 0.0:
+            raise ValueError("ratio must be finite and non-negative")
+        if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be finite and in (0, 1]")
+        self.min_threshold = float(min_threshold)
+        self.ratio = float(ratio)
+        self.alpha = float(alpha)
+        self.floor = 0.0
+        self._initialized = False
+
+    @property
+    def effective_threshold(self) -> float:
+        """Current speech boundary in linear int16 RMS units."""
+        return max(self.min_threshold, self.floor * self.ratio)
+
+    def observe(self, rms: float, *, is_speech: bool) -> None:
+        """Observe one classified frame, updating only for non-speech."""
+        if is_speech or not np.isfinite(rms):
+            return
+        sample = max(0.0, float(rms))
+        if not self._initialized:
+            self.floor = sample
+            self._initialized = True
+            return
+        self.floor += self.alpha * (sample - self.floor)
+
+    def classify(self, rms: float) -> bool:
+        """Classify one RMS sample, then learn from it when it is noise."""
+        is_speech = float(rms) >= self.effective_threshold
+        self.observe(rms, is_speech=is_speech)
+        return is_speech
+
+
 class UtteranceEndpointer:
     """Energy-based end-of-utterance detection for PCM16 phone frames.
 
     feed() consumes PCM16 frames and returns a completed utterance's PCM
     bytes when the caller has spoken and then gone quiet, else None.
 
-    Tuned for PSTN: μ-law noise floors are high, so the speech threshold is
-    RMS over int16 samples rather than anything adaptive. Utterances are
-    capped so a monologue (or hold music) can't buffer unbounded audio.
+    Energy and floor values are linear RMS over int16 samples (0–32768). The
+    rolling floor is an EMA of frames classified non-speech, and the effective
+    threshold is ``max(rms_min, floor * rms_ratio)``. The floor is frozen on
+    speech so a caller's voice cannot raise the boundary and swallow their
+    next soft word. By default PCMU retains the historical fixed 350-RMS
+    decision exactly (its ratio is zero); L16 uses a lower minimum plus the
+    adaptive floor. ``NANO_CLAW_PHONE_RMS_MIN`` and
+    ``NANO_CLAW_PHONE_RMS_RATIO`` override those codec defaults.
+
+    Utterances are capped so a monologue (or hold music) cannot buffer
+    unbounded audio.
     """
 
     def __init__(
         self,
         *,
-        rms_threshold: float = 350.0,
+        rms_threshold: float | None = None,
         min_speech_ms: int = 250,
         end_silence_ms: int = 700,
         max_utterance_ms: int = 15_000,
         preroll_ms: int = 240,
         rate_hz: int = 8000,
+        codec: str | None = None,
+        rms_min: float | None = None,
+        rms_ratio: float | None = None,
+        noise_floor_alpha: float = NOISE_FLOOR_ALPHA,
     ) -> None:
-        self.rms_threshold = rms_threshold
+        self.codec = (codec or ("l16" if rate_hz == 16000 else "pcmu")).lower()
+        if self.codec not in ("pcmu", "l16"):
+            raise ValueError("codec must be 'pcmu' or 'l16'")
+        if rms_threshold is not None and rms_min is not None:
+            raise ValueError("use rms_threshold or rms_min, not both")
+        default_min = L16_RMS_MIN if self.codec == "l16" else PCMU_RMS_MIN
+        default_ratio = L16_RMS_RATIO if self.codec == "l16" else PCMU_RMS_RATIO
+        explicit_min = rms_min if rms_min is not None else rms_threshold
+        resolved_min = (
+            float(explicit_min)
+            if explicit_min is not None
+            else _nonnegative_env_float("NANO_CLAW_PHONE_RMS_MIN", default_min)
+        )
+        resolved_ratio = (
+            float(rms_ratio)
+            if rms_ratio is not None
+            else _nonnegative_env_float("NANO_CLAW_PHONE_RMS_RATIO", default_ratio)
+        )
+        self.rms_min = resolved_min
+        self.rms_ratio = resolved_ratio
+        # Preserve the public legacy attribute: for PCMU's default ratio=0 it
+        # remains the exact fixed threshold used before adaptive endpointing.
+        self.rms_threshold = resolved_min
+        self._noise_floor = NoiseFloorEstimator(
+            min_threshold=resolved_min,
+            ratio=resolved_ratio,
+            alpha=noise_floor_alpha,
+        )
+        self.current_rms = 0.0
         self.min_speech_ms = min_speech_ms
         self.end_silence_ms = end_silence_ms
         self.max_utterance_ms = max_utterance_ms
@@ -161,6 +272,21 @@ class UtteranceEndpointer:
         preroll_samples = rate_hz * preroll_ms // 1000
         self._preroll_frames = max(1, preroll_samples // frame_samples)
         self.reset()
+
+    @property
+    def noise_floor(self) -> float:
+        """Current rolling non-speech floor in linear int16 RMS units."""
+        return self._noise_floor.floor
+
+    @property
+    def effective_threshold(self) -> float:
+        """Current energy-mode speech threshold in int16 RMS units."""
+        return self._noise_floor.effective_threshold
+
+    @property
+    def in_utterance(self) -> bool:
+        """Whether caller audio is currently being accumulated."""
+        return self._in_utterance
 
     def reset(self) -> None:
         self._frames: list[np.ndarray] = []
@@ -184,12 +310,17 @@ class UtteranceEndpointer:
         """Consume one PCM16 frame (any length ≥ 1 sample at ``rate_hz``).
 
         is_speech: externally-decided speech flag (e.g. Silero VAD). When
-        None, falls back to the internal RMS threshold (energy mode).
+        None, uses the adaptive energy threshold. External decisions remain
+        authoritative but still teach the floor when they classify non-speech.
         """
         frame_ms = len(frame) * 1000 // self.rate_hz
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
+        self.current_rms = rms
         if is_speech is None:
-            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
-            is_speech = rms >= self.rms_threshold
+            is_speech = self._noise_floor.classify(rms)
+        else:
+            is_speech = bool(is_speech)
+            self._noise_floor.observe(rms, is_speech=is_speech)
 
         if not self._in_utterance:
             # Keep a short preroll so the first syllable isn't clipped.
