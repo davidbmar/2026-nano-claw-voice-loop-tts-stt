@@ -36,6 +36,11 @@ REGION_MODELS = {
     "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash — cheapest",
     "xai/grok-4.20-0309-non-reasoning": "Grok 4.20 fast",
     "xai/grok-4.3": "Grok 4.3",
+    "gemini/gemini-2.5-flash-lite": "Gemini Flash-Lite — fastest TTFT",
+    "groq/openai/gpt-oss-20b": "GPT-OSS 20B (Groq) — fastest",
+    "openrouter/meta-llama/llama-4-scout": "Llama 4 Scout — 11/11",
+    "openrouter/openai/gpt-oss-20b:nitro": "GPT-OSS 20B (fastest route)",
+    "local/qwen3:14b": "Local Ollama qwen3:14b",
 }
 DEFAULT_REGION_MODEL = "claude-haiku-4-5"
 _region_model: str | None = None
@@ -123,7 +128,10 @@ def scheduler_region_config(digest: str) -> RegionConfig:
             "You are a concise, warm plumbing scheduler. Offer concrete available "
             "times, clarify constraints, and never claim a time outside the digest. "
             "Keep every reply to one or two short spoken sentences; offer at most "
-            "two candidate times per turn."
+            "two candidate times per turn. When a requested duration does not fit "
+            "any window on a day, say so plainly and offer the nearest other day "
+            "whose window fits it; never keep proposing a day that cannot fit the "
+            "duration."
         ),
         digest=digest,
         slots={
@@ -154,6 +162,13 @@ def load_free_windows(availability: dict) -> list[FreeWindow]:
     ]
 
 
+def _render_availability_window(window: dict) -> str:
+    start = datetime.fromisoformat(window["start"])
+    end = datetime.fromisoformat(window["end"])
+    capacity_minutes = int((end - start).total_seconds() // 60)
+    return f"{start:%H:%M}–{end:%H:%M} (fits ≤{capacity_minutes}m)"
+
+
 def availability_digest(availability: dict) -> str:
     """Render availability for the goal-region supervisor prompt."""
 
@@ -165,7 +180,8 @@ def availability_digest(availability: dict) -> str:
         parsed_day = datetime.fromisoformat(day)
         label = f"{parsed_day:%A %B} {parsed_day.day}"
         rendered = ", ".join(
-            f"{window['start'][11:16]}–{window['end'][11:16]}" for window in windows
+            _render_availability_window(window)
+            for window in windows
         )
         lines.append(f"- {label} ({day}): {rendered or 'no availability'}")
     return "\n".join(lines)

@@ -45,6 +45,13 @@ const flowModel = document.getElementById("flow-model");
 const flowLatency = document.getElementById("flow-latency");
 const flowRejections = document.getElementById("flow-rejections");
 const flowRejectionsList = document.getElementById("flow-rejections-list");
+const benchmarkSupervisor = document.getElementById("benchmark-supervisor");
+const benchmarkP50 = document.getElementById("benchmark-p50");
+const benchmarkTurns = document.getElementById("benchmark-turns");
+const latencyStt = document.getElementById("latency-stt");
+const latencyLlm = document.getElementById("latency-llm");
+const latencyTts = document.getElementById("latency-tts");
+const latencyOverall = document.getElementById("latency-overall");
 const talkingCubeCanvas = document.getElementById("talking-cube");
 const talkingCubeStatus = document.getElementById("talking-cube-status");
 const cubeScene = document.getElementById("cube-scene");
@@ -238,6 +245,8 @@ var visualizationMomentTimer = null;
 var visualizationMomentVersion = 0;
 var lastFlowOutcomeSignature = "";
 var lastFlowRejectionsSignature = "";
+var lastFlowTranscriptState = null;
+var supervisorSamples = [];
 var agentAudioContext = null;
 var agentAudioSource = null;
 var agentAudioAnalyser = null;
@@ -785,8 +794,6 @@ regionModelSelect.addEventListener("change", function () {
 });
 
 loadRegionModelConfig();
-const settingsBtn = document.getElementById("settings-btn");
-const pipelinePanel = document.getElementById("pipeline-panel");
 
 // ── State ────────────────────────────────────────────────────
 let ws = null;
@@ -808,9 +815,40 @@ let vadCalibrationUntil = 0;
 let vadRearmAt = 0;
 let bargeInEnabled = false;
 let bargeDetector = null;
+let activeTurnStartedAt = null;
+let sttRequestStartedAt = null;
+let firstAgentTextAt = null;
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
+
+function resetTurnLatency() {
+    latencyStt.textContent = "–";
+    latencyLlm.textContent = "–";
+    latencyTts.textContent = "–";
+    latencyOverall.textContent = "–";
+}
+
+function beginTurnLatency(measureStt) {
+    activeTurnStartedAt = performance.now();
+    sttRequestStartedAt = measureStt ? activeTurnStartedAt : null;
+    firstAgentTextAt = null;
+    resetTurnLatency();
+}
+
+function markTranscriptionLatency() {
+    if (sttRequestStartedAt === null) return;
+    latencyStt.textContent = formatLatency(performance.now() - sttRequestStartedAt);
+    sttRequestStartedAt = null;
+}
+
+function markFirstAgentTextLatency() {
+    if (firstAgentTextAt !== null) return;
+    firstAgentTextAt = performance.now();
+    if (activeTurnStartedAt !== null) {
+        latencyOverall.textContent = formatLatency(firstAgentTextAt - activeTurnStartedAt);
+    }
+}
 
 // ── Markdown rendering (safe DOM, no innerHTML) ──────────────
 function renderMarkdown(container, text) {
@@ -886,27 +924,40 @@ function renderInline(el, text) {
     }
 }
 
-// ── Chat bubbles ─────────────────────────────────────────────
+// ── Transcript lines ─────────────────────────────────────────
+function createTranscriptLine(role) {
+    const line = document.createElement("div");
+    line.className = "msg msg-" + role;
+
+    const speaker = document.createElement("span");
+    speaker.className = "transcript-speaker";
+    speaker.textContent = role === "agent" ? "AGENT:" : "CALLER:";
+
+    const content = document.createElement("div");
+    content.className = "transcript-content";
+    line.appendChild(speaker);
+    line.appendChild(content);
+    chatLog.appendChild(line);
+    return { line: line, content: content };
+}
+
 function addBubble(text, role) {
     clearThinking();
-    const bubble = document.createElement("div");
-    bubble.className = "msg msg-" + role;
+    const transcriptLine = createTranscriptLine(role);
     if (role === "agent") {
-        renderMarkdown(bubble, text);
+        renderMarkdown(transcriptLine.content, text);
     } else {
-        bubble.textContent = text;
+        transcriptLine.content.textContent = text;
     }
-    chatLog.appendChild(bubble);
     chatLog.scrollTop = chatLog.scrollHeight;
-    return bubble;
+    return transcriptLine.content;
 }
 
 function showThinking() {
     clearThinking();
-    const el = document.createElement("div");
-    el.className = "msg msg-agent thinking";
-    el.textContent = "Thinking...";
-    chatLog.appendChild(el);
+    const transcriptLine = createTranscriptLine("agent");
+    transcriptLine.line.classList.add("thinking");
+    transcriptLine.content.textContent = "Thinking…";
     chatLog.scrollTop = chatLog.scrollHeight;
 }
 
@@ -928,6 +979,114 @@ function finalizeAgentBubble() {
 function clearThinking() {
     const el = chatLog.querySelector(".thinking");
     if (el) el.remove();
+}
+
+function appendSystemLine(text, variant) {
+    const line = document.createElement("div");
+    line.className = "transcript-system" + (variant ? " transcript-system-" + variant : "");
+    line.textContent = text;
+    chatLog.appendChild(line);
+    chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function formatLatency(value) {
+    return typeof value === "number" && Number.isFinite(value)
+        ? Math.round(value) + " ms"
+        : "–";
+}
+
+function median(values) {
+    if (!values.length) return null;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    var middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2) return sorted[middle];
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function updateFlowBenchmarks(state) {
+    var supervisorMs = typeof state.supervisor_ms === "number"
+        && Number.isFinite(state.supervisor_ms)
+        ? state.supervisor_ms
+        : null;
+    if (supervisorMs !== null) {
+        supervisorSamples.push(supervisorMs);
+        benchmarkSupervisor.textContent = formatLatency(supervisorMs);
+        benchmarkP50.textContent = formatLatency(median(supervisorSamples));
+        latencyLlm.textContent = formatLatency(supervisorMs);
+    }
+    var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
+    var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
+    benchmarkTurns.textContent = turnsUsed + " / " + maxTurns;
+}
+
+function appendFlowTranscriptEvents(state, slots, rejected, outcome) {
+    var previous = lastFlowTranscriptState;
+    var goal = typeof state.goal === "string" ? state.goal : "";
+    if ((!previous || previous.goal !== goal) && goal) {
+        appendSystemLine("Flow started · " + goal);
+    }
+
+    if (typeof state.supervisor_ms === "number" && Number.isFinite(state.supervisor_ms)) {
+        var turnLabel = Number.isInteger(state.turns_used) ? state.turns_used : 0;
+        var maxLabel = Number.isInteger(state.max_turns) ? state.max_turns : 0;
+        appendSystemLine(
+            "Scheduler turn " + turnLabel + " / " + maxLabel
+            + " · supervisor " + formatLatency(state.supervisor_ms)
+        );
+    }
+
+    var priorSlots = previous ? previous.slots : {};
+    var changedSlots = [];
+    [
+        ["job", "job", slots.job],
+        ["start", "start", slots.slot_start ? formatFlowStart(slots.slot_start) : ""],
+        [
+            "duration_minutes",
+            "duration",
+            typeof slots.duration_minutes === "number"
+                ? slots.duration_minutes + " minutes"
+                : slots.duration_minutes,
+        ],
+    ].forEach(function (entry) {
+        var key = entry[0];
+        var label = entry[1];
+        var displayValue = entry[2];
+        if (slots[key] !== null && slots[key] !== undefined && slots[key] !== ""
+            && slots[key] !== priorSlots[key]) {
+            changedSlots.push(label + " → " + displayValue);
+        }
+    });
+    if (changedSlots.length) {
+        appendSystemLine("Slots updated · " + changedSlots.join(" · "));
+    }
+
+    var priorRejected = previous ? previous.rejected : [];
+    if (rejected.length && JSON.stringify(rejected) !== JSON.stringify(priorRejected)) {
+        appendSystemLine("Validator rejected · " + rejected.join(" · "), "rejected");
+    }
+
+    var previousOutcome = previous ? previous.outcome : "";
+    if (outcome && outcome !== previousOutcome) {
+        var outcomeText = outcome.toUpperCase();
+        if (outcome === "booked") {
+            var booking = [
+                slots.job,
+                slots.slot_start ? formatFlowStart(slots.slot_start) : "",
+                typeof slots.duration_minutes === "number"
+                    ? slots.duration_minutes + " minutes"
+                    : slots.duration_minutes,
+            ].filter(Boolean);
+            outcomeText += booking.length ? " · " + booking.join(" · ") : "";
+        }
+        appendSystemLine(outcomeText, outcome === "booked" ? "booked" : "");
+    }
+
+    lastFlowTranscriptState = {
+        goal: goal,
+        slots: Object.assign({}, slots),
+        rejected: rejected.slice(),
+        outcome: outcome,
+    };
 }
 
 function formatFlowStart(value) {
@@ -956,7 +1115,7 @@ function setFlowSlot(chip, valueEl, rawValue, displayValue) {
 
 function renderFlowState(state) {
     state = state && typeof state === "object" ? state : {};
-    goalRegionCard.classList.remove("hidden");
+    goalRegionCard.classList.add("hidden");
     flowGoal.textContent = typeof state.goal === "string" ? state.goal : "";
 
     var slots = state.slots && typeof state.slots === "object" ? state.slots : {};
@@ -1016,6 +1175,8 @@ function renderFlowState(state) {
     if (flowOutcome.textContent) {
         flowOutcome.className = "flow-outcome flow-outcome-" + outcome;
     }
+    updateFlowBenchmarks(state);
+    appendFlowTranscriptEvents(state, slots, rejected, outcome);
     updateFlowVisualization(state, outcome, rejected);
 }
 
@@ -1083,9 +1244,16 @@ function showToolCard(requestId, tools) {
 debugToggle.addEventListener("click", function () {
     debugPanel.classList.toggle("debug-collapsed");
     debugPanel.classList.toggle("debug-expanded");
+    debugToggle.setAttribute(
+        "aria-expanded",
+        String(debugPanel.classList.contains("debug-expanded"))
+    );
 });
 
 function addDebugEntry(info) {
+    if (typeof info.durationMs === "number" && Number.isFinite(info.durationMs)) {
+        latencyLlm.textContent = formatLatency(info.durationMs);
+    }
     var row = document.createElement("div");
     row.className = "debug-row";
 
@@ -1332,17 +1500,11 @@ var LS_MODEL = "nanoclaw.model", LS_STT = "nanoclaw.stt";
 var currentModel = localStorage.getItem(LS_MODEL) || "anthropic/claude-haiku-4-5";
 var currentStt = localStorage.getItem(LS_STT) || "base";
 
-// While the panel is open, refresh phone state every 5s so the live-call
-// lamp and any changes made from other tabs/calls stay truthful.
-var phonePollTimer = null;
-settingsBtn.addEventListener("click", function () {
-    pipelinePanel.classList.toggle("hidden");
-    if (phonePollTimer) { clearInterval(phonePollTimer); phonePollTimer = null; }
-    if (!pipelinePanel.classList.contains("hidden") && !phoneVoiceSelect.disabled) {
-        loadPhoneConfig();
-        phonePollTimer = setInterval(loadPhoneConfig, 5000);
-    }
-});
+// The configuration rail is always present, so keep its phone-line lamp and
+// values fresh whenever this tab is visible.
+var phonePollTimer = setInterval(function () {
+    if (!document.hidden && !phoneVoiceSelect.disabled) loadPhoneConfig();
+}, 5000);
 
 function loadModels() {
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
@@ -1426,6 +1588,7 @@ function handleMessage(msg) {
             break;
 
         case "transcription":
+            markTranscriptionLatency();
             if (msg.text) {
                 addBubble(msg.text, "user");
                 showThinking();
@@ -1438,6 +1601,7 @@ function handleMessage(msg) {
 
         case "agent_reply":
             clearThinking();
+            markFirstAgentTextLatency();
             addBubble(msg.text, "agent");
             setAgentSpeaking(true);
             setPhoneStatus("Speaking to the phone...");
@@ -1445,6 +1609,7 @@ function handleMessage(msg) {
 
         case "agent_reply_delta":
             clearThinking();
+            markFirstAgentTextLatency();
             appendAgentDelta(msg.text);
             setAgentSpeaking(true);
             setPhoneStatus("Speaking to the phone...");
@@ -1585,7 +1750,7 @@ function cleanupWebRTC() {
     }
     audioConnected = false;
     isRecording = false;
-    talkBtn.textContent = "Start Hands-Free Phone Mode";
+    talkBtn.textContent = "Start mic";
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
     talkBtn.disabled = true;
@@ -1636,6 +1801,7 @@ function finishAutomaticTurn(reason) {
     talkBtn.classList.remove("recording");
     autoTurnPending = true;
     setPhoneStatus(reason === "maximum_duration" ? "Maximum turn reached; transcribing..." : "Transcribing phone audio...");
+    beginTurnLatency(true);
     sendMsg("mic_stop");
 }
 
@@ -1702,7 +1868,7 @@ async function startPhoneMode() {
     vadRearmAt = vadCalibrationUntil;
     talkBtn.classList.add("phone-active");
     talkBtn.setAttribute("aria-pressed", "true");
-    talkBtn.textContent = "Stop Hands-Free Phone Mode";
+    talkBtn.textContent = "Stop mic";
     statusText.textContent = "Calibrating room noise...";
     if (vadFrameRequest !== null) window.cancelAnimationFrame(vadFrameRequest);
     vadFrameRequest = window.requestAnimationFrame(monitorPhoneAudio);
@@ -1723,7 +1889,7 @@ function stopPhoneMode(options) {
     stopCallerVisualization();
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
-    talkBtn.textContent = "Start Hands-Free Phone Mode";
+    talkBtn.textContent = "Start mic";
     if (config.status !== false && audioConnected) statusText.textContent = "Phone mode stopped";
 }
 
@@ -1737,6 +1903,7 @@ function sendTextMessage() {
     var text = textInput.value.trim();
     if (!text) return;
     textInput.value = "";
+    beginTurnLatency(false);
     if (phoneModeEnabled) {
         autoTurnPending = true;
         setPhoneStatus("Thinking...");
@@ -1761,6 +1928,7 @@ stopBtn.addEventListener("click", function () {
 
 window.addEventListener("beforeunload", function () {
     if (visualizationMomentTimer) clearTimeout(visualizationMomentTimer);
+    if (phonePollTimer) clearInterval(phonePollTimer);
     teardownAgentAudioAnalyser();
     talkingCube.destroy();
 });

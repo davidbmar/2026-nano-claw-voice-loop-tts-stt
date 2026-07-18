@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 await import("../voice/web/voice-ui.js");
 const VoiceUI = globalThis.VoiceUI;
@@ -25,5 +26,13 @@ assert.equal(grouped[1].options[0].label, "Lessac (US)", "Piper options have no 
 
 assert.equal(VoiceUI.sampleTextForLang("e").startsWith("Hola"), true);
 assert.equal(VoiceUI.sampleTextForLang("a").length > 0, true);
+
+const voiceHtml = await readFile(new URL("../voice/web/index.html", import.meta.url), "utf8");
+assert.match(voiceHtml, /talking-cube\.js/, "voice UI must reference the Talking Cube module");
+assert.match(voiceHtml, /id="configuration-sidebar"/, "configuration must live in the left rail");
+assert.match(voiceHtml, /id="transcription-panel"/, "transcription must live in the right rail");
+assert.match(voiceHtml, /id="benchmark-p50"/, "sidebar must expose scheduler benchmarks");
+assert.match(voiceHtml, /id="latency-overall"/, "sidebar must expose pipeline latency");
+assert.doesNotMatch(voiceHtml, /id="settings-btn"/, "the settings popover trigger must be removed");
 
 console.log("voice-ui tests passed");

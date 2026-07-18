@@ -3,232 +3,145 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>nano-claw voice</title>
+  <meta name="color-scheme" content="dark">
+  <title>nano-claw voice console</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="modulepreload" href="talking-cube.js">
-  <style>
-    #talking-cube-stage {
-      position: relative;
-      flex: 0 0 170px;
-      min-height: 130px;
-      overflow: hidden;
-      border-bottom: 1px solid #1e293b;
-      background: #080b12;
-      isolation: isolate;
-    }
-    #talking-cube {
-      display: block;
-      width: 100%;
-      height: 100%;
-      touch-action: none;
-    }
-    #talking-cube-stage .cube-hero-copy {
-      position: absolute;
-      top: 10px;
-      left: 14px;
-      z-index: 1;
-      color: #64748b;
-      font: 600 9px/1.4 "SF Mono", "Fira Code", monospace;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      pointer-events: none;
-    }
-    #talking-cube-stage .cube-hero-copy strong {
-      display: block;
-      margin-top: 2px;
-      color: #93c5fd;
-      font-size: 11px;
-      letter-spacing: 0.06em;
-    }
-    #pipeline-panel {
-      max-height: min(54vh, 620px);
-      overflow-y: auto;
-      padding-right: 3px;
-    }
-    #visualization-panel { --accent: #38bdf8; }
-    #visualization-panel > summary {
-      cursor: pointer;
-      list-style: none;
-      user-select: none;
-    }
-    #visualization-panel > summary::-webkit-details-marker { display: none; }
-    #visualization-panel > summary .pipe-card-tag::after { content: " +"; }
-    #visualization-panel[open] > summary .pipe-card-tag::after { content: " −"; }
-    .visualization-slider {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 3rem;
-      align-items: center;
-      gap: 0.4rem;
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    .visualization-slider input { width: 100%; min-width: 0; }
-    .visualization-slider output {
-      color: #64748b;
-      font: 10px/1 "SF Mono", "Fira Code", monospace;
-      text-align: right;
-    }
-    .visualization-colors {
-      display: flex;
-      flex: 1 1 auto;
-      align-items: center;
-      gap: 0.45rem;
-    }
-    .visualization-colors input[type="color"] {
-      width: 2.4rem;
-      height: 1.7rem;
-      padding: 1px;
-      border: 1px solid #2a2a2a;
-      border-radius: 0.35rem;
-      background: #111;
-    }
-    .visualization-checks {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 0.4rem;
-      color: #9ca3af;
-      font-size: 0.72rem;
-    }
-    .visualization-checks label { display: flex; align-items: center; gap: 0.3rem; }
-    .visualization-actions { display: flex; gap: 0.45rem; }
-    .visualization-actions button {
-      flex: 1;
-      padding: 0.4rem 0.5rem;
-      border: 1px solid #2a2a2a;
-      border-radius: 0.4rem;
-      background: #202020;
-      color: #cbd5e1;
-      cursor: pointer;
-      font: inherit;
-      font-size: 0.72rem;
-    }
-    @media (max-height: 720px), (max-width: 460px) {
-      #talking-cube-stage { flex-basis: 125px; min-height: 100px; }
-    }
-  </style>
 </head>
 <body>
   <div id="app">
-    <header id="status-bar">
-      <span id="status-text">Connecting...</span>
-    </header>
+    <aside id="configuration-sidebar" aria-label="Voice agent configuration">
+      <div class="console-brand" aria-label="nano-claw voice console">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>nano-claw</span>
+        <span class="brand-surface">voice console</span>
+      </div>
 
-    <div id="debug-panel" class="debug-collapsed">
-      <button id="debug-toggle">Debug</button>
-      <div id="debug-content"></div>
-    </div>
-
-    <section id="goal-region-card" class="hidden" aria-live="polite">
-      <div class="flow-card-header">
-        <span>Goal region</span>
-        <span id="flow-outcome" class="flow-outcome hidden"></span>
-      </div>
-      <p id="flow-goal" class="flow-goal"></p>
-      <div class="flow-slots" aria-label="Scheduler slots">
-        <div id="flow-slot-job" class="flow-slot flow-slot-empty">
-          <span class="flow-slot-label">Job</span>
-          <span id="flow-slot-job-value" class="flow-slot-value">empty</span>
-        </div>
-        <div id="flow-slot-start" class="flow-slot flow-slot-empty">
-          <span class="flow-slot-label">Start</span>
-          <span id="flow-slot-start-value" class="flow-slot-value">empty</span>
-        </div>
-        <div id="flow-slot-duration" class="flow-slot flow-slot-empty">
-          <span class="flow-slot-label">Duration</span>
-          <span id="flow-slot-duration-value" class="flow-slot-value">empty</span>
-        </div>
-      </div>
-      <div class="flow-meta">
-        <span id="flow-budget">turn 0 / 0</span>
-        <span><span id="flow-model">model —</span> · <span id="flow-latency">supervisor —</span></span>
-      </div>
-      <div id="flow-rejections" class="flow-rejections hidden">
-        <div class="flow-rejections-title">Validator rejected</div>
-        <ul id="flow-rejections-list"></ul>
-      </div>
-    </section>
-
-    <section id="talking-cube-stage" aria-label="Live voice visualization">
-      <canvas id="talking-cube" aria-label="Voice-reactive constellation; drag to orbit and scroll to zoom"></canvas>
-      <div class="cube-hero-copy" aria-hidden="true">
-        Voice constellation
-        <strong id="talking-cube-status">Idle · Nebula</strong>
-      </div>
-    </section>
-
-    <main id="chat-log"></main>
-
-    <footer id="controls">
-      <div id="text-input-row">
-        <input id="text-input" type="text" placeholder="Type a message..." autocomplete="off" disabled>
-        <button id="send-btn" disabled>Send</button>
-      </div>
-      <button id="settings-btn" type="button" title="Pipeline settings">⚙</button>
-      <div id="pipeline-panel" class="hidden">
-        <section class="pipe-card pipe-card-browser" title="Settings for chatting and talking in this page — they never affect phone calls">
-          <div class="pipe-card-head">
-            <span class="pipe-card-title">This browser</span>
-            <span class="pipe-card-tag">monitor</span>
+      <div id="pipeline-panel">
+        <section id="benchmarks-panel" class="console-section" aria-labelledby="benchmarks-heading">
+          <h2 id="benchmarks-heading" class="console-section-title">Benchmarks</h2>
+          <div class="metric-row">
+            <span class="metric-key">LAST SUPERVISOR</span>
+            <span id="benchmark-supervisor" class="metric-value">–</span>
           </div>
-          <div class="pipe-row"><label for="stt-select">STT (Whisper)</label>
-            <select id="stt-select">
-              <option value="tiny">tiny</option><option value="base" selected>base</option>
-              <option value="small">small</option><option value="medium">medium</option>
-            </select></div>
-          <div class="pipe-row"><label for="model-select">LLM</label>
-            <select id="model-select"></select></div>
-          <div id="voice-row">
-            <label for="voice-select">Voice</label>
-            <select id="voice-select" disabled></select>
-            <button id="voice-preview-btn" type="button" title="Preview voice" disabled>▶</button>
-            <span id="speed-control">
-              <label for="speed-slider">Speed</label>
-              <input id="speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
-              <span id="speed-value">1.0×</span>
-            </span>
+          <div class="metric-row">
+            <span class="metric-key">SESSION P50</span>
+            <span id="benchmark-p50" class="metric-value">–</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-key">TURNS</span>
+            <span id="benchmark-turns" class="metric-value">0 / 0</span>
           </div>
         </section>
-        <section class="pipe-card pipe-card-phone" title="Settings for the real phone line — voice, STT, speed, and flow apply live to a call in progress">
-          <div class="pipe-card-head">
-            <span class="pipe-card-title">Phone line</span>
-            <span id="phone-call-status" class="pipe-lamp">● idle</span>
+
+        <section id="agent-configuration-panel" class="console-section" aria-labelledby="agent-configuration-heading">
+          <h2 id="agent-configuration-heading" class="console-section-title">Agent configuration</h2>
+
+          <div class="config-stage">
+            <div class="config-stage-name">VAD</div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="vad-select" title="Speech detection profile for new phone calls">PROFILE</label>
+              <select id="vad-select" aria-label="VAD profile"></select>
+            </div>
           </div>
-          <div class="pipe-row"><label for="phone-voice-select" title="Voice on the phone line — applies live, next sentence, even mid-call">Voice</label>
-            <select id="phone-voice-select"></select></div>
-          <div class="pipe-row"><label for="phone-model-select" title="LLM answering phone calls — applies on the next agent turn">LLM</label>
-            <select id="phone-model-select"></select></div>
-          <div class="pipe-row"><label for="phone-stt-select" title="Whisper size for phone transcription — applies to the caller's next utterance">STT (Whisper)</label>
-            <select id="phone-stt-select">
-              <option value="tiny">tiny</option><option value="base">base</option>
-              <option value="small">small</option><option value="medium">medium</option>
-            </select></div>
-          <div class="pipe-row"><label for="phone-speed-slider" title="Speaking speed on the phone line — applies live">Speed</label>
-            <span id="phone-speed-control">
-              <input id="phone-speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
-              <span id="phone-speed-value">1.0×</span>
-            </span></div>
-          <div class="pipe-row"><label for="vad-select" title="Speech detection on the phone line — applies to new calls">VAD</label>
-            <select id="vad-select"></select></div>
-        </section>
-        <section class="pipe-card pipe-card-shared" title="One setting shared by the phone line and browser Talk sessions">
-          <div class="pipe-card-head">
-            <span class="pipe-card-title">Shared</span>
-            <span class="pipe-card-tag">phone + browser</span>
+
+          <div class="config-stage">
+            <div class="config-stage-name">SPEECH-TO-TEXT</div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="stt-select">MODEL</label>
+              <select id="stt-select" aria-label="Whisper model">
+                <option value="tiny">whisper tiny</option>
+                <option value="base" selected>whisper base</option>
+                <option value="small">whisper small</option>
+                <option value="medium">whisper medium</option>
+              </select>
+            </div>
           </div>
-          <div class="pipe-row"><label for="flow-select" title="Goal flow — applies live on the phone (caller's next utterance); a browser Talk session picks it up when it starts">Flow</label>
-            <div class="pipe-control-stack">
-              <select id="flow-select"></select>
-              <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
-            </div></div>
-          <div class="pipe-row"><label for="region-model-select" title="Goal-region supervisor — applies when the next scheduler turn starts">Scheduler model</label>
-            <select id="region-model-select"></select></div>
+
+          <div class="config-stage">
+            <div class="config-stage-name">LLM</div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="model-select">MODEL</label>
+              <select id="model-select" aria-label="Chat provider and model"></select>
+            </div>
+          </div>
+
+          <div class="config-stage">
+            <div class="config-stage-name">SCHEDULER</div>
+            <div class="pipe-row pipe-row-nested">
+              <label for="region-model-select" title="Goal-region supervisor; new turns use changes immediately">MODEL</label>
+              <select id="region-model-select" aria-label="Scheduler model"></select>
+            </div>
+          </div>
+
+          <div class="config-stage config-stage-single">
+            <div class="pipe-row">
+              <label for="flow-select" title="Goal flow shared by the phone line and browser sessions">FLOW</label>
+              <span class="pipe-control-stack">
+                <select id="flow-select"></select>
+                <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="config-stage">
+            <div class="config-stage-name">TEXT-TO-SPEECH</div>
+            <div id="voice-row" class="pipe-row pipe-row-nested">
+              <label for="voice-select">MODEL</label>
+              <span class="inline-value-control">
+                <select id="voice-select" aria-label="Text-to-speech voice" disabled></select>
+                <button id="voice-preview-btn" class="icon-button" type="button" title="Preview voice" aria-label="Preview voice" disabled>▶</button>
+              </span>
+            </div>
+            <div id="speed-control" class="pipe-row pipe-row-nested">
+              <label for="speed-slider">SPEED</label>
+              <span class="compact-range">
+                <input id="speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
+                <span id="speed-value">1.0×</span>
+              </span>
+            </div>
+          </div>
+
+          <details id="phone-line-panel" class="auxiliary-config">
+            <summary>
+              <span>PHONE LINE OVERRIDES</span>
+              <span id="phone-call-status" class="pipe-lamp">● idle</span>
+            </summary>
+            <div class="auxiliary-config-body">
+              <div class="pipe-row pipe-row-nested">
+                <label for="phone-voice-select" title="Applies live on the next phone sentence">VOICE</label>
+                <select id="phone-voice-select"></select>
+              </div>
+              <div class="pipe-row pipe-row-nested">
+                <label for="phone-model-select" title="Applies on the next phone agent turn">LLM</label>
+                <select id="phone-model-select"></select>
+              </div>
+              <div class="pipe-row pipe-row-nested">
+                <label for="phone-stt-select" title="Applies to the caller's next utterance">STT</label>
+                <select id="phone-stt-select">
+                  <option value="tiny">whisper tiny</option>
+                  <option value="base">whisper base</option>
+                  <option value="small">whisper small</option>
+                  <option value="medium">whisper medium</option>
+                </select>
+              </div>
+              <div id="phone-speed-control" class="pipe-row pipe-row-nested">
+                <label for="phone-speed-slider" title="Applies live to the phone line">SPEED</label>
+                <span class="compact-range">
+                  <input id="phone-speed-slider" type="range" min="0.5" max="2" step="0.1" value="1">
+                  <span id="phone-speed-value">1.0×</span>
+                </span>
+              </div>
+            </div>
+          </details>
         </section>
-        <details id="visualization-panel" class="pipe-card">
-          <summary class="pipe-card-head">
-            <span class="pipe-card-title">Visualization</span>
-            <span class="pipe-card-tag">live canvas</span>
-          </summary>
-          <div class="pipe-row"><label for="cube-scene">Scene</label>
+
+        <section id="visualization-panel" class="console-section" aria-labelledby="visualization-heading">
+          <div class="section-heading-row">
+            <h2 id="visualization-heading" class="console-section-title">Visualization</h2>
+            <span class="section-note">LIVE CANVAS</span>
+          </div>
+          <div class="pipe-row"><label for="cube-scene">PRESET</label>
             <select id="cube-scene">
               <option value="calm" selected>Calm constellation</option>
               <option value="focus">Lens field</option>
@@ -236,8 +149,9 @@
               <option value="octahedron">Octahedron</option>
               <option value="classic">Classic cube</option>
               <option value="custom">Custom</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-pattern">Pattern</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-pattern">PATTERN</label>
             <select id="cube-pattern">
               <option value="focus">Lens drift</option>
               <option value="wave">Voice wave</option>
@@ -245,21 +159,24 @@
               <option value="helix">Double helix</option>
               <option value="scan">Signal scan</option>
               <option value="nebula" selected>Nebula</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-formation">Formation</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-formation">FORMATION</label>
             <select id="cube-formation">
               <option value="focus" selected>Lens field</option>
               <option value="octahedron">Octahedron</option>
               <option value="cube">Cube</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-element-shape">Light shape</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-element-shape">SHAPE</label>
             <select id="cube-element-shape">
               <option value="orb" selected>Soft orb</option>
               <option value="octagon">Octagon</option>
               <option value="diamond">Diamond</option>
               <option value="voxel">3D voxel</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-grid-size">Grid</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-grid-size">GRID</label>
             <select id="cube-grid-size">
               <option value="5">5 × 5 × 5</option>
               <option value="7">7 × 7 × 7</option>
@@ -267,8 +184,9 @@
               <option value="11" selected>11 × 11 × 11</option>
               <option value="13">13 × 13 × 13</option>
               <option value="15">15 × 15 × 15</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-palette">Palette</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-palette">PALETTE</label>
             <select id="cube-palette">
               <option value="nanoclaw" selected>nano-claw blue</option>
               <option value="electric">Electric blue</option>
@@ -277,50 +195,138 @@
               <option value="sunset">Solar flare</option>
               <option value="mono">Moonlight</option>
               <option value="custom">Custom</option>
-            </select></div>
-          <div class="pipe-row"><label for="cube-primary-color">Colors</label>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-primary-color">COLORS</label>
             <span class="visualization-colors">
               <input id="cube-primary-color" type="color" value="#2563eb" aria-label="Primary visualization color">
               <input id="cube-secondary-color" type="color" value="#60a5fa" aria-label="Secondary visualization color">
-            </span></div>
-          <div class="pipe-row"><label for="cube-energy">Energy</label>
-            <span class="visualization-slider"><input id="cube-energy" data-cube-setting="energy" type="range" min="0" max="1" step="0.01" value="0.28"><output for="cube-energy">28%</output></span></div>
-          <div class="pipe-row"><label for="cube-response">Response</label>
-            <span class="visualization-slider"><input id="cube-response" data-cube-setting="response" type="range" min="0" max="1" step="0.01" value="0.65"><output for="cube-response">65%</output></span></div>
-          <div class="pipe-row"><label for="cube-speed">Speed</label>
-            <span class="visualization-slider"><input id="cube-speed" data-cube-setting="speed" type="range" min="0.08" max="1.4" step="0.01" value="0.18"><output for="cube-speed">8%</output></span></div>
-          <div class="pipe-row"><label for="cube-opacity">Opacity</label>
-            <span class="visualization-slider"><input id="cube-opacity" data-cube-setting="opacity" type="range" min="0.08" max="1" step="0.01" value="0.52"><output for="cube-opacity">52%</output></span></div>
-          <div class="pipe-row"><label for="cube-density">Density</label>
-            <span class="visualization-slider"><input id="cube-density" data-cube-setting="density" type="range" min="0.2" max="1" step="0.01" value="0.72"><output for="cube-density">72%</output></span></div>
-          <div class="pipe-row"><label for="cube-bloom">Glow</label>
-            <span class="visualization-slider"><input id="cube-bloom" data-cube-setting="bloom" type="range" min="0" max="1" step="0.01" value="0.38"><output for="cube-bloom">38%</output></span></div>
-          <div class="pipe-row"><label for="cube-spread">Spacing</label>
-            <span class="visualization-slider"><input id="cube-spread" data-cube-setting="spread" type="range" min="0.68" max="1.35" step="0.01" value="1.02"><output for="cube-spread">102%</output></span></div>
-          <div class="pipe-row"><label for="cube-rotation-speed">Rotation</label>
-            <span class="visualization-slider"><input id="cube-rotation-speed" data-cube-setting="rotationSpeed" type="range" min="0" max="1.2" step="0.01" value="0.1"><output for="cube-rotation-speed">8%</output></span></div>
+            </span>
+          </div>
+          <div class="pipe-row"><label for="cube-energy">ENERGY</label>
+            <span class="visualization-slider"><input id="cube-energy" data-cube-setting="energy" type="range" min="0" max="1" step="0.01" value="0.28"><output for="cube-energy">28%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-response">RESPONSE</label>
+            <span class="visualization-slider"><input id="cube-response" data-cube-setting="response" type="range" min="0" max="1" step="0.01" value="0.65"><output for="cube-response">65%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-speed">SPEED</label>
+            <span class="visualization-slider"><input id="cube-speed" data-cube-setting="speed" type="range" min="0.08" max="1.4" step="0.01" value="0.18"><output for="cube-speed">8%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-opacity">OPACITY</label>
+            <span class="visualization-slider"><input id="cube-opacity" data-cube-setting="opacity" type="range" min="0.08" max="1" step="0.01" value="0.52"><output for="cube-opacity">52%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-density">DENSITY</label>
+            <span class="visualization-slider"><input id="cube-density" data-cube-setting="density" type="range" min="0.2" max="1" step="0.01" value="0.72"><output for="cube-density">72%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-bloom">GLOW</label>
+            <span class="visualization-slider"><input id="cube-bloom" data-cube-setting="bloom" type="range" min="0" max="1" step="0.01" value="0.38"><output for="cube-bloom">38%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-spread">SPACING</label>
+            <span class="visualization-slider"><input id="cube-spread" data-cube-setting="spread" type="range" min="0.68" max="1.35" step="0.01" value="1.02"><output for="cube-spread">102%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-rotation-speed">ROTATION</label>
+            <span class="visualization-slider"><input id="cube-rotation-speed" data-cube-setting="rotationSpeed" type="range" min="0" max="1.2" step="0.01" value="0.1"><output for="cube-rotation-speed">8%</output></span>
+          </div>
           <div class="visualization-checks">
             <label><input id="cube-show-frame" type="checkbox"> Frame</label>
             <label><input id="cube-show-links" type="checkbox"> Links</label>
-            <label><input id="cube-auto-rotate" type="checkbox" checked> Auto orbit</label>
+            <label><input id="cube-auto-rotate" type="checkbox" checked> Orbit</label>
           </div>
           <div class="visualization-actions">
-            <button id="cube-pulse" type="button">Sweep the field</button>
-            <button id="cube-reset" type="button">Reset to default</button>
+            <button id="cube-pulse" type="button">Pulse</button>
+            <button id="cube-reset" type="button">Reset</button>
           </div>
-        </details>
+        </section>
+
+        <section id="latency-panel" class="console-section" aria-labelledby="latency-heading">
+          <h2 id="latency-heading" class="console-section-title">Latency</h2>
+          <div class="metric-row"><span class="metric-key">STT</span><span id="latency-stt" class="metric-value">–</span></div>
+          <div class="metric-row"><span class="metric-key">LLM</span><span id="latency-llm" class="metric-value">–</span></div>
+          <div class="metric-row"><span class="metric-key">TTS</span><span id="latency-tts" class="metric-value">–</span></div>
+          <div class="metric-row"><span class="metric-key">OVERALL</span><span id="latency-overall" class="metric-value">–</span></div>
+        </section>
+
+        <div id="debug-panel" class="debug-collapsed">
+          <button id="debug-toggle" type="button" aria-expanded="false">Iteration log</button>
+          <div id="debug-content"></div>
+        </div>
       </div>
-      <button id="stop-btn" class="hidden">Stop</button>
-      <button id="talk-btn" type="button" aria-pressed="false" disabled>Start Hands-Free Phone Mode</button>
-      <p id="phone-mode-help">Click once before dialing. The assistant will listen, answer, and resume listening automatically.</p>
-    </footer>
+    </aside>
+
+    <section id="center-stage" aria-label="Voice visualization and controls">
+      <div class="stage-topline" aria-hidden="true">
+        <span>VOICE AGENT PLAYGROUND</span>
+        <span class="stage-topline-rule"></span>
+        <span>REALTIME</span>
+      </div>
+
+      <section id="talking-cube-stage" aria-label="Live voice visualization">
+        <canvas id="talking-cube" aria-label="Voice-reactive constellation; drag to orbit and scroll to zoom"></canvas>
+        <div class="cube-hero-copy" aria-hidden="true">
+          <span>VOICE CONSTELLATION</span>
+          <strong id="talking-cube-status">Idle · Nebula</strong>
+        </div>
+      </section>
+
+      <footer id="controls">
+        <div id="text-input-row">
+          <input id="text-input" type="text" placeholder="Type a message…" aria-label="Message the agent" autocomplete="off" disabled>
+          <button id="send-btn" type="button" aria-label="Send message" disabled>Send</button>
+        </div>
+        <div id="mic-control-pill">
+          <button id="talk-btn" type="button" aria-pressed="false" aria-describedby="phone-mode-help" disabled>Start mic</button>
+          <span class="pill-divider" aria-hidden="true"></span>
+          <span class="connection-status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Connecting…</span></span>
+          <button id="stop-btn" class="hidden" type="button">Stop audio</button>
+        </div>
+        <p id="phone-mode-help">Start the mic before dialing. The assistant listens, answers, and resumes listening automatically.</p>
+      </footer>
+    </section>
+
+    <aside id="transcription-panel" aria-labelledby="transcription-heading">
+      <header class="transcription-header">
+        <h1 id="transcription-heading">Transcription</h1>
+        <span class="transcription-live"><span aria-hidden="true"></span>LIVE</span>
+      </header>
+      <main id="chat-log" role="log" aria-live="polite" aria-relevant="additions text"></main>
+
+      <section id="goal-region-card" class="hidden" aria-hidden="true">
+        <div class="flow-card-header">
+          <span>Goal region</span>
+          <span id="flow-outcome" class="flow-outcome hidden"></span>
+        </div>
+        <p id="flow-goal" class="flow-goal"></p>
+        <div class="flow-slots" aria-label="Scheduler slots">
+          <div id="flow-slot-job" class="flow-slot flow-slot-empty">
+            <span class="flow-slot-label">Job</span>
+            <span id="flow-slot-job-value" class="flow-slot-value">empty</span>
+          </div>
+          <div id="flow-slot-start" class="flow-slot flow-slot-empty">
+            <span class="flow-slot-label">Start</span>
+            <span id="flow-slot-start-value" class="flow-slot-value">empty</span>
+          </div>
+          <div id="flow-slot-duration" class="flow-slot flow-slot-empty">
+            <span class="flow-slot-label">Duration</span>
+            <span id="flow-slot-duration-value" class="flow-slot-value">empty</span>
+          </div>
+        </div>
+        <div class="flow-meta">
+          <span id="flow-budget">turn 0 / 0</span>
+          <span><span id="flow-model">model —</span> · <span id="flow-latency">supervisor —</span></span>
+        </div>
+        <div id="flow-rejections" class="flow-rejections hidden">
+          <div class="flow-rejections-title">Validator rejected</div>
+          <ul id="flow-rejections-list"></ul>
+        </div>
+      </section>
+    </aside>
   </div>
 
   <div id="debug-modal-overlay">
-    <div id="debug-modal">
-      <div id="debug-modal-title">Iteration Detail</div>
+    <div id="debug-modal" role="dialog" aria-modal="true" aria-labelledby="debug-modal-title">
+      <div id="debug-modal-title">Iteration detail</div>
       <div id="debug-modal-body"></div>
-      <button id="debug-modal-close">Close</button>
+      <button id="debug-modal-close" type="button">Close</button>
     </div>
   </div>
 

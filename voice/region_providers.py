@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -133,11 +134,22 @@ class OpenAICompatProvider:
             f"{system}\n\nRespond with a single JSON object matching this schema: "
             f"{schema_json}"
         )
+        if self.provider == "xai":
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "region_turn",
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+        else:
+            response_format = {"type": "json_object"}
         return self._chat_completion(
             system=schema_system,
             messages=messages,
             max_tokens=max_tokens,
-            response_format={"type": "json_object"},
+            response_format=response_format,
         )
 
     def complete_text(
@@ -172,32 +184,53 @@ class OpenAICompatProvider:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        # GPT-OSS models route answers into a reasoning channel by default;
+        # low effort keeps the JSON in `content` (and keeps turns fast).
+        if "gpt-oss" in self.model:
+            payload["reasoning_effort"] = "low"
+        # A real User-Agent matters: Groq's edge 403s urllib's default UA.
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "nano-claw-goal-region/1.0",
+        }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
 
-        try:
-            response = urllib.request.urlopen(request, timeout=self.timeout_s)
+        raw_response = None
+        # One polite retry on 429: free-tier providers (Groq) rate-limit
+        # bursts; honoring Retry-After turns a dead scenario into a slow turn.
+        for attempt in range(2):
             try:
-                raw_response = response.read()
-            finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(
-                f"{self.provider} supervisor request failed with HTTP {exc.code}"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError(
-                f"{self.provider} supervisor request failed: {exc}"
-            ) from exc
+                response = urllib.request.urlopen(request, timeout=self.timeout_s)
+                try:
+                    raw_response = response.read()
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt == 0:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    try:
+                        delay = min(float(retry_after), 30.0) if retry_after else 2.0
+                    except ValueError:
+                        delay = 2.0
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(
+                    f"{self.provider} supervisor request failed with HTTP {exc.code}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise RuntimeError(
+                    f"{self.provider} supervisor request failed: {exc}"
+                ) from exc
 
         try:
             response_payload = json.loads(raw_response.decode("utf-8"))
@@ -233,6 +266,18 @@ _OPENAI_COMPAT_SPECS = {
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "DASHSCOPE_API_KEY",
     ),
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+    ),
+    "local": ("http://localhost:11434/v1", "LOCAL_LLM_API_KEY"),
+    # Groq model IDs contain their own slashes (openai/gpt-oss-20b), so
+    # routing must split only on the first separator.
+    "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+    # Marketplace router — model ids keep their own slashes
+    # (openrouter/openai/gpt-oss-20b); ":nitro" suffix routes to the
+    # fastest live backend.
+    "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
 }
 
 
@@ -255,8 +300,13 @@ def resolve_supervisor(model: str) -> SupervisorProvider:
     if not provider_model.strip():
         raise ValueError(f"{prefix}/ requires a provider model name")
     base_url, api_key_env = spec
+    if prefix == "local":
+        base_url = (
+            os.environ.get("LOCAL_LLM_BASE_URL", "").strip()
+            or "http://localhost:11434/v1"
+        )
     api_key = os.environ.get(api_key_env, "").strip()
-    if not api_key:
+    if prefix != "local" and not api_key:
         raise ValueError(
             f"{api_key_env} is required for {prefix}/ supervisor models"
         )

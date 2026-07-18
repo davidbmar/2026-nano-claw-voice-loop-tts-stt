@@ -1,9 +1,10 @@
 """Turn a stream of text deltas into speakable chunks for incremental TTS.
 
 Rules:
-- The FIRST chunk of a reply flushes as soon as FIRST_CHUNK_WORDS words have
-  accumulated, even without a sentence boundary — so audio starts fast.
-- Every later chunk flushes only on sentence-ending punctuation (. ! ?).
+- Chunks flush only on sentence-ending punctuation (. ! ?), never in the
+  middle of a clause that is still arriving.
+- Sentence-ending punctuation stays attached so the TTS engine can use it for
+  prosody; commas remain inside the sentence for intra-sentence pauses.
 - Markdown is stripped so TTS reads clean prose.
 """
 
@@ -11,9 +12,22 @@ from __future__ import annotations
 
 import re
 
-FIRST_CHUNK_WORDS = 6
-
 _SENTENCE_END = re.compile(r".*?[.!?]\s", re.DOTALL)
+_BARE_HOUR_MERIDIEM = re.compile(
+    r"\b(0?[1-9]|1[0-2]):00\s+([ap]m)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_for_speech(text: str) -> str:
+    """Make scheduler-style prose friendlier for speech synthesis."""
+    text = re.sub(r"\s*[–—]\s*", ", ", text)
+    text = text.replace("(", "").replace(")", "")
+    text = _BARE_HOUR_MERIDIEM.sub(
+        lambda match: f"{int(match.group(1))} {match.group(2).upper()}",
+        text,
+    )
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def _clean(text: str) -> str:
@@ -33,7 +47,6 @@ def _clean(text: str) -> str:
 class TextChunker:
     def __init__(self) -> None:
         self._buf = ""
-        self._first_done = False
 
     def push(self, delta: str) -> list[str]:
         """Add a delta; return any speakable chunks now complete."""
@@ -50,15 +63,6 @@ class TextChunker:
             cleaned = _clean(raw)
             if cleaned:
                 chunks.append(cleaned)
-                self._first_done = True
-
-        # Eager first chunk: if nothing spoken yet and enough words piled up.
-        if not self._first_done and len(self._buf.split()) >= FIRST_CHUNK_WORDS:
-            cleaned = _clean(self._buf)
-            self._buf = ""
-            if cleaned:
-                chunks.append(cleaned)
-                self._first_done = True
 
         return chunks
 
@@ -66,6 +70,4 @@ class TextChunker:
         """Return and clear the trailing remainder."""
         cleaned = _clean(self._buf)
         self._buf = ""
-        if cleaned:
-            self._first_done = True
         return cleaned

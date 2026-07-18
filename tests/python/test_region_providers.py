@@ -10,7 +10,13 @@ from datetime import datetime
 import pytest
 
 from scripts.scheduling_eval import run_eval
-from voice import region_providers
+from voice import flow_session, region_providers
+from voice.flow_session import (
+    REGION_MODELS,
+    availability_digest,
+    scheduler_region_config,
+    set_region_model,
+)
 from voice.goal_region import FreeWindow, GoalRegionRunner, RegionConfig
 from voice.region_providers import (
     AnthropicProvider,
@@ -93,6 +99,27 @@ class FakeAnthropicClient:
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             "DASHSCOPE_API_KEY",
         ),
+        (
+            "gemini/gemini-2.5-flash-lite",
+            "gemini",
+            "gemini-2.5-flash-lite",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "GEMINI_API_KEY",
+        ),
+        (
+            "groq/openai/gpt-oss-20b",
+            "groq",
+            "openai/gpt-oss-20b",
+            "https://api.groq.com/openai/v1",
+            "GROQ_API_KEY",
+        ),
+        (
+            "openrouter/meta-llama/llama-4-scout",
+            "openrouter",
+            "meta-llama/llama-4-scout",
+            "https://openrouter.ai/api/v1",
+            "OPENROUTER_API_KEY",
+        ),
     ],
 )
 def test_prefix_routing_resolves_openai_compat_provider(
@@ -132,6 +159,9 @@ def test_bare_model_uses_anthropic_and_unknown_prefix_fails():
         ("deepseek/deepseek-chat", "DEEPSEEK_API_KEY"),
         ("xai/grok-4-1-fast", "XAI_API_KEY"),
         ("qwen/qwen-plus", "DASHSCOPE_API_KEY"),
+        ("gemini/gemini-2.5-flash-lite", "GEMINI_API_KEY"),
+        ("groq/openai/gpt-oss-20b", "GROQ_API_KEY"),
+        ("openrouter/meta-llama/llama-4-scout", "OPENROUTER_API_KEY"),
     ],
 )
 def test_prefixed_provider_requires_its_environment_key(monkeypatch, model, key_env):
@@ -188,6 +218,222 @@ def _chat_response(content: str, finish_reason: str = "stop") -> dict:
     }
 
 
+def test_gemini_fake_transport_happy_path(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    transport = FakeURLopener([_chat_response(json.dumps(_region_payload()))])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor("gemini/gemini-2.5-flash-lite")
+
+    content, finish_reason = provider.complete(
+        "Return a region turn.",
+        [{"role": "user", "content": "Monday at nine."}],
+        {"type": "object"},
+        256,
+    )
+
+    assert json.loads(content) == _region_payload()
+    assert finish_reason == "stop"
+    request, timeout = transport.calls[0]
+    assert request.full_url == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    assert request.get_header("Authorization") == "Bearer gemini-test-key"
+    assert timeout == 30.0
+    wire_payload = json.loads(request.data)
+    assert wire_payload["model"] == "gemini-2.5-flash-lite"
+    assert wire_payload["response_format"] == {"type": "json_object"}
+
+
+def test_groq_nested_model_adds_user_agent_and_low_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    transport = FakeURLopener([_chat_response(json.dumps(_region_payload()))])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor("groq/openai/gpt-oss-20b")
+
+    content, finish_reason = provider.complete(
+        "Return a region turn.",
+        [{"role": "user", "content": "Monday at nine."}],
+        {"type": "object"},
+        256,
+    )
+
+    assert json.loads(content) == _region_payload()
+    assert finish_reason == "stop"
+    request, timeout = transport.calls[0]
+    assert request.full_url == "https://api.groq.com/openai/v1/chat/completions"
+    assert request.get_header("Authorization") == "Bearer groq-test-key"
+    assert request.get_header("User-agent") == "nano-claw-goal-region/1.0"
+    assert timeout == 30.0
+    wire_payload = json.loads(request.data)
+    assert wire_payload["model"] == "openai/gpt-oss-20b"
+    assert wire_payload["reasoning_effort"] == "low"
+    assert wire_payload["response_format"] == {"type": "json_object"}
+
+
+def test_openrouter_nested_model_routes_through_fake_transport(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    transport = FakeURLopener([_chat_response(json.dumps(_region_payload()))])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor("openrouter/meta-llama/llama-4-scout")
+
+    content, finish_reason = provider.complete(
+        "Return a region turn.",
+        [{"role": "user", "content": "Monday at nine."}],
+        {"type": "object"},
+        256,
+    )
+
+    assert json.loads(content) == _region_payload()
+    assert finish_reason == "stop"
+    request, timeout = transport.calls[0]
+    assert request.full_url == "https://openrouter.ai/api/v1/chat/completions"
+    assert request.get_header("Authorization") == "Bearer openrouter-test-key"
+    assert timeout == 30.0
+    wire_payload = json.loads(request.data)
+    assert wire_payload["model"] == "meta-llama/llama-4-scout"
+    assert wire_payload["response_format"] == {"type": "json_object"}
+
+
+def test_openai_compat_retries_one_rate_limit_with_retry_after(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    rate_limit = urllib.error.HTTPError(
+        "https://api.groq.com/openai/v1/chat/completions",
+        429,
+        "rate limited",
+        {"Retry-After": "0.25"},
+        None,
+    )
+    transport = FakeURLopener([
+        rate_limit,
+        _chat_response(json.dumps(_region_payload())),
+    ])
+    sleeps = []
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    monkeypatch.setattr(region_providers.time, "sleep", sleeps.append)
+    provider = resolve_supervisor("groq/openai/gpt-oss-20b")
+
+    content, finish_reason = provider.complete(
+        "Return a region turn.",
+        [],
+        {"type": "object"},
+        256,
+    )
+
+    assert json.loads(content) == _region_payload()
+    assert finish_reason == "stop"
+    assert len(transport.calls) == 2
+    assert sleeps == [0.25]
+
+
+def test_local_prefix_uses_configured_url_and_optional_bearer(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://llm.test:11434/v1/")
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    transport = FakeURLopener([_chat_response(json.dumps(_region_payload()))])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor("local/qwen3:14b")
+
+    content, finish_reason = provider.complete(
+        "Return a region turn.",
+        [],
+        {"type": "object"},
+        256,
+    )
+
+    assert provider.provider == "local"
+    assert provider.model == "qwen3:14b"
+    assert provider.base_url == "http://llm.test:11434/v1/"
+    assert provider.api_key_env == "LOCAL_LLM_API_KEY"
+    assert json.loads(content) == _region_payload()
+    assert finish_reason == "stop"
+    request, _timeout = transport.calls[0]
+    assert request.full_url == "http://llm.test:11434/v1/chat/completions"
+    assert request.get_header("Authorization") is None
+    assert json.loads(request.data)["response_format"] == {"type": "json_object"}
+
+
+def test_local_prefix_defaults_to_ollama_and_sends_configured_key(monkeypatch):
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "local-test-key")
+    transport = FakeURLopener([_chat_response("plain caller text")])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor("local/qwen3:14b")
+
+    content, finish_reason = provider.complete_text("Act as a caller.", [], 64)
+
+    assert provider.base_url == "http://localhost:11434/v1"
+    assert content == "plain caller text"
+    assert finish_reason == "stop"
+    request, _timeout = transport.calls[0]
+    assert request.get_header("Authorization") == "Bearer local-test-key"
+
+
+def test_availability_digest_annotates_each_window_capacity():
+    availability = {
+        "timezone": "America/Chicago",
+        "days": {
+            "2026-07-20": [
+                {
+                    "start": "2026-07-20T08:00:00",
+                    "end": "2026-07-20T09:30:00",
+                },
+                {
+                    "start": "2026-07-20T17:45:00",
+                    "end": "2026-07-20T18:00:00",
+                },
+            ],
+            "2026-07-21": [],
+        },
+    }
+
+    digest = availability_digest(availability)
+
+    assert (
+        "- Monday July 20 (2026-07-20): 08:00–09:30 (fits ≤90m), "
+        "17:45–18:00 (fits ≤15m)"
+    ) in digest
+    assert "- Tuesday July 21 (2026-07-21): no availability" in digest
+
+
+def test_scheduler_persona_contains_day_hop_instruction():
+    day_hop_instruction = (
+        "When a requested duration does not fit any window on a day, say so "
+        "plainly and offer the nearest other day whose window fits it; never keep "
+        "proposing a day that cannot fit the duration."
+    )
+
+    assert day_hop_instruction in scheduler_region_config("digest").persona
+
+
+@pytest.mark.parametrize(
+    ("model", "label"),
+    [
+        (
+            "gemini/gemini-2.5-flash-lite",
+            "Gemini Flash-Lite — fastest TTFT",
+        ),
+        (
+            "groq/openai/gpt-oss-20b",
+            "GPT-OSS 20B (Groq) — fastest",
+        ),
+        (
+            "openrouter/meta-llama/llama-4-scout",
+            "Llama 4 Scout — 11/11",
+        ),
+        (
+            "openrouter/openai/gpt-oss-20b:nitro",
+            "GPT-OSS 20B (fastest route)",
+        ),
+        ("local/qwen3:14b", "Local Ollama qwen3:14b"),
+    ],
+)
+def test_dropdown_registry_accepts_new_provider_entries(monkeypatch, model, label):
+    monkeypatch.setattr(flow_session, "_region_model", None)
+
+    assert REGION_MODELS[model] == label
+    assert set_region_model(model) is True
+    assert flow_session.get_region_model() == model
+
+
 def test_openai_compat_engine_turn_posts_schema_json_and_books(monkeypatch):
     monkeypatch.setenv("SCHED_EVAL_MODEL", "deepseek/deepseek-chat")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
@@ -210,6 +456,7 @@ def test_openai_compat_engine_turn_posts_schema_json_and_books(monkeypatch):
     assert request.full_url == "https://api.deepseek.com/v1/chat/completions"
     assert request.get_method() == "POST"
     assert request.get_header("Authorization") == "Bearer deepseek-test-key"
+    assert request.get_header("User-agent") == "nano-claw-goal-region/1.0"
     assert timeout == 30.0
     wire_payload = json.loads(request.data)
     assert wire_payload["model"] == "deepseek-chat"
@@ -227,6 +474,49 @@ def test_openai_compat_engine_turn_posts_schema_json_and_books(monkeypatch):
         "content"
     ]
     assert '"additionalProperties":false' in system["content"]
+
+
+@pytest.mark.parametrize(
+    ("model", "key_env", "expected_response_format"),
+    [
+        (
+            "xai/grok-4-1-fast",
+            "XAI_API_KEY",
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "region_turn",
+                    "strict": True,
+                    "schema": {"type": "object"},
+                },
+            },
+        ),
+        (
+            "deepseek/deepseek-chat",
+            "DEEPSEEK_API_KEY",
+            {"type": "json_object"},
+        ),
+    ],
+)
+def test_openai_provider_uses_expected_response_format(
+    monkeypatch,
+    model,
+    key_env,
+    expected_response_format,
+):
+    monkeypatch.setenv(key_env, "test-key")
+    transport = FakeURLopener([_chat_response(json.dumps(_region_payload()))])
+    monkeypatch.setattr(region_providers.urllib.request, "urlopen", transport)
+    provider = resolve_supervisor(model)
+
+    provider.complete("Return a region turn.", [], {"type": "object"}, 256)
+
+    request, _timeout = transport.calls[0]
+    wire_payload = json.loads(request.data)
+    assert wire_payload["response_format"] == expected_response_format
+    assert "Respond with a single JSON object matching this schema:" in (
+        wire_payload["messages"][0]["content"]
+    )
 
 
 def test_malformed_openai_content_retries_then_degrades(monkeypatch):
