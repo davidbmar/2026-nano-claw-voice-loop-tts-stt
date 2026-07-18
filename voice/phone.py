@@ -27,6 +27,8 @@ Optional:
     NANO_CLAW_PHONE_RMS_RATIO       noise-floor multiplier for endpointing
     NANO_CLAW_PHONE_GAIN            off = bypass outbound peak normalization
     NANO_CLAW_PHONE_GAIN_TARGET_DB  target peak dBFS (default -3)
+    NANO_CLAW_PHONE_PREBUFFER_MS    initial unpaced audio burst (default 200)
+    NANO_CLAW_PHONE_PACE_FACTOR     frame interval multiplier (default 1.0)
     NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
                                     mid-speech (buffer-flush via Telnyx
                                     "clear"); unset = half-duplex
@@ -38,9 +40,11 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -77,6 +81,67 @@ DEFAULT_GREETING = (
 IDLE_PROMPT_TEXT = "Hi — are you still there?"
 IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling Space Channel — goodbye!"
 MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
+FRAME_S = FRAME_MS / 1000.0
+DEFAULT_PHONE_PREBUFFER_MS = 200.0
+DEFAULT_PHONE_PACE_FACTOR = 1.0
+
+
+class FramePacer:
+    """Anchor real-time frame sends to monotonic absolute deadlines.
+
+    Relative sleeps add each send's work and scheduler oversleep to every
+    later frame, so jitter becomes permanent drift.  This pacer advances one
+    absolute deadline by ``frame_s * pace_factor`` per frame; a late wake-up
+    therefore shortens or skips following sleeps until the schedule catches
+    up.
+
+    The old phone loop used a 0.9 interval to keep Telnyx fed, but that made
+    buffered surplus grow throughout a reply.  ``prebuffer_ms`` supplies the
+    same safety headroom once, immediately after :meth:`reset`, while a 1.0
+    factor holds the buffer steady.  Reuse one reset pacer for every sentence
+    in a reply so sentence boundaries cannot trigger another prebuffer burst.
+    """
+
+    def __init__(
+        self,
+        frame_s: float = FRAME_S,
+        *,
+        prebuffer_ms: float = DEFAULT_PHONE_PREBUFFER_MS,
+        pace_factor: float = DEFAULT_PHONE_PACE_FACTOR,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        if not math.isfinite(frame_s) or frame_s <= 0.0:
+            raise ValueError("frame_s must be finite and positive")
+        if not math.isfinite(prebuffer_ms) or prebuffer_ms < 0.0:
+            raise ValueError("prebuffer_ms must be finite and non-negative")
+        if not math.isfinite(pace_factor) or pace_factor <= 0.0:
+            raise ValueError("pace_factor must be finite and positive")
+        self.frame_s = float(frame_s)
+        self.prebuffer_ms = float(prebuffer_ms)
+        self.pace_factor = float(pace_factor)
+        self._clock = clock or time.monotonic
+        self._deadline: float | None = None
+
+    @property
+    def running(self) -> bool:
+        """Whether :meth:`reset` has anchored this reply's schedule."""
+        return self._deadline is not None
+
+    def reset(self) -> None:
+        """Anchor a new reply and make its configured audio headroom due now."""
+        prebuffer_s = self.prebuffer_ms / 1000.0
+        self._deadline = self._clock() - prebuffer_s * self.pace_factor
+
+    def now(self) -> float:
+        """Read the monotonic clock used by this deadline sequence."""
+        return self._clock()
+
+    def next_deadline(self) -> float:
+        """Return the next frame's absolute monotonic send deadline."""
+        if self._deadline is None:
+            raise RuntimeError("FramePacer.reset() must be called before pacing")
+        self._deadline += self.frame_s * self.pace_factor
+        return self._deadline
 
 
 @dataclass(frozen=True)
@@ -108,6 +173,33 @@ def _cfg(name: str, default: str = "") -> str:
     if name in _overrides:
         return _overrides[name].strip()
     return os.environ.get(name, default).strip()
+
+
+def _phone_pacing_value(name: str, default: float, *, allow_zero: bool) -> float:
+    """Read one finite pacing value, falling back on unsafe input."""
+    try:
+        value = float(_cfg(name, str(default)))
+    except ValueError:
+        return default
+    minimum_ok = value >= 0.0 if allow_zero else value > 0.0
+    return value if math.isfinite(value) and minimum_ok else default
+
+
+def _phone_frame_pacer(*, clock: Callable[[], float] | None = None) -> FramePacer:
+    """Build a reply pacer from the live phone environment/override config."""
+    return FramePacer(
+        prebuffer_ms=_phone_pacing_value(
+            "NANO_CLAW_PHONE_PREBUFFER_MS",
+            DEFAULT_PHONE_PREBUFFER_MS,
+            allow_zero=True,
+        ),
+        pace_factor=_phone_pacing_value(
+            "NANO_CLAW_PHONE_PACE_FACTOR",
+            DEFAULT_PHONE_PACE_FACTOR,
+            allow_zero=False,
+        ),
+        clock=clock,
+    )
 
 
 def phone_codec() -> str:
@@ -255,6 +347,7 @@ class PhoneCall:
         self._turn_task: asyncio.Task | None = None
         self._sentence_pipelines: set[SentencePipeline] = set()
         self._gain_normalizer = _phone_gain_normalizer()
+        self._frame_pacer: FramePacer | None = None
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
@@ -467,10 +560,11 @@ class PhoneCall:
         asyncio.create_task(self._flush_playback())
 
     async def _flush_playback(self) -> None:
-        """Clear surplus audio queued by faster-than-real-time frame pacing.
+        """Clear the bounded prebuffer surplus queued by frame pacing.
 
-        Frames are sent about 10% ahead of playback, so Telnyx can hold audible
-        speech after a local interruption. One clear drops that buffered tail.
+        Playback starts with a small one-time burst so Telnyx does not starve.
+        Telnyx can still hold that audio after a local interruption; one clear
+        drops the buffered tail.
         """
         if self._playback_flush_sent or getattr(self.ws, "closed", False):
             return
@@ -728,8 +822,13 @@ class PhoneCall:
                 wait_ms=wait_s * 1000.0,
             )
 
-    async def _play_synthesized(self, speech: _SynthesizedSpeech) -> None:
+    async def _play_synthesized(
+        self,
+        speech: _SynthesizedSpeech,
+        pacer: FramePacer | None = None,
+    ) -> None:
         """Pace one already-synthesized sentence to the phone transport."""
+        pacer = pacer or getattr(self, "_frame_pacer", None) or _phone_frame_pacer()
         tap = speech.tap
         sentence_index = speech.sentence_index
         send_started: float | None = None
@@ -753,32 +852,37 @@ class PhoneCall:
                 if codec == "l16"
                 else pcm48k_to_ulaw_frames(gain.pcm16)
             )
+            if frames and not pacer.running:
+                # The first sentence's synthesis must not consume prebuffer
+                # time. Anchor only once its transport frames are ready.
+                pacer.reset()
             if tap:
                 outbound_rate = 16000 if codec == "l16" else 8000
                 sample_width = 2 if codec == "l16" else 1
-                send_started = time.monotonic()
+                send_started = pacer.now()
             for frame in frames:
                 if self.closed or not self.speaking:
                     break  # hung up or barged in
+                deadline = pacer.next_deadline()
+                await asyncio.sleep(max(0.0, deadline - pacer.now()))
+                if self.closed or not self.speaking:
+                    break  # interruption may have landed during the sleep
                 await self.ws.send_json(
                     {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
                 )
                 if tap and send_times is not None:
-                    sent_at = time.monotonic()
+                    sent_at = pacer.now()
                     tap.outbound_frame(frame)
                     send_times.append(sent_at)
                     frame_samples = len(frame) // sample_width
                     audio_s_sent += frame_samples / outbound_rate
                     last_frame_audio_ms = frame_samples * 1000.0 / outbound_rate
-                # Pace slightly faster than real time: keeps Telnyx's
-                # jitter buffer fed without flooding it.
-                await asyncio.sleep(FRAME_MS / 1000 * 0.9)
         except Exception:
             log.exception("[phone %s] speak failed", self.call_id[:8])
         finally:
             if tap and send_times is not None:
                 elapsed_s = (
-                    time.monotonic() - send_started if send_started is not None else 0.0
+                    pacer.now() - send_started if send_started is not None else 0.0
                 )
                 intervals_ms = np.diff(send_times) * 1000.0
                 if len(intervals_ms):
@@ -813,6 +917,8 @@ class PhoneCall:
         if self.closed or not self.speaking:
             return
         self._gain_normalizer.reset()
+        previous_pacer = getattr(self, "_frame_pacer", None)
+        self._frame_pacer = _phone_frame_pacer()
         pipeline = SentencePipeline(
             sentences,
             self._synthesize_sentence,
@@ -829,6 +935,7 @@ class PhoneCall:
                     if self.closed or not self.speaking:
                         return
         finally:
+            self._frame_pacer = previous_pacer
             self._sentence_pipelines.discard(pipeline)
 
     async def _speak_chunk(self, sentence: str) -> None:

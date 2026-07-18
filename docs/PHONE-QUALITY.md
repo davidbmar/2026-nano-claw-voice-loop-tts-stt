@@ -89,10 +89,11 @@ deployment's data policy.
 - **Inter-sentence gaps** measure from the prior sentence's last frame end to
   the next sentence's first sent frame. Negative values mean frames were
   queued slightly ahead; large positive values are audible dead-air candidates.
-- **Pacing** summarizes the one-per-sentence `frames_sent` records. Frames are
-  nominally 20 ms and currently sent at about 18 ms intervals. A growing
-  positive surplus means audio is being queued faster than wall time; a
-  negative surplus or high p95/max interval points to starvation or jitter.
+- **Pacing** summarizes the one-per-sentence `frames_sent` records. After one
+  reply-level prebuffer burst, frames have monotonic absolute deadlines at
+  nominally 20 ms intervals. The summed surplus should stay near the configured
+  prebuffer instead of growing with answer length; a negative surplus or high
+  p95/max interval points to starvation or jitter.
 - **Barge-in to last outbound frame** is signed. A positive value means a
   frame crossed the send boundary after barge-in; a negative value means the
   final send preceded detection. This does not include audio already buffered
@@ -218,6 +219,8 @@ still update the floor reported by the tap.
 | `NANO_CLAW_PHONE_RMS_RATIO` | PCMU: `0.0`; L16: `3.0` | Noise-floor multiplier. PCMU's zero preserves its fixed-threshold compatibility default; setting a positive value opts it into adaptation. |
 | `NANO_CLAW_PHONE_GAIN` | on | Exact value `off` (case-insensitive) bypasses phone gain processing with byte-identical 48 kHz PCM. |
 | `NANO_CLAW_PHONE_GAIN_TARGET_DB` | `-3` | Per-sentence target peak in dBFS. Invalid or non-finite values fall back to `-3`. |
+| `NANO_CLAW_PHONE_PREBUFFER_MS` | `200` | Milliseconds of audio sent immediately at the start of each reply. Zero disables the burst; invalid, negative, or non-finite values fall back to `200`. |
+| `NANO_CLAW_PHONE_PACE_FACTOR` | `1.0` | Multiplies the 20 ms absolute-deadline interval. `1.0` is real time; values below `1.0` send faster and values above it send slower. Invalid, non-positive, or non-finite values fall back to `1.0`. |
 
 ## Outbound gain normalization
 
@@ -240,13 +243,37 @@ Set `NANO_CLAW_PHONE_GAIN=off` to compare against the prior path. Bypass returns
 the original 48 kHz bytes unchanged; with the tap enabled, `gain_applied` then
 reports 0 dB while retaining the measured source peak.
 
+## Deadline-based frame pacing
+
+The former loop slept for 90% of a frame after every send. The short interval
+was intentional jitter-buffer protection, but it steadily queued about 100 ms
+of surplus for every second of speech. Relative sleeps also made every slow
+send and scheduler oversleep permanent: later frames inherited that drift.
+
+Playback now sends `NANO_CLAW_PHONE_PREBUFFER_MS` of audio immediately once per
+reply, then advances a monotonic absolute deadline by the 20 ms frame duration
+times `NANO_CLAW_PHONE_PACE_FACTOR`. Each sleep is only the positive distance
+to that deadline. A late iteration therefore makes following sleeps shorter or
+zero until playback catches up instead of shifting the rest of the reply. The
+default 200 ms prebuffer retains startup headroom, while the default 1.0 factor
+stops that headroom from growing.
+
+One pacer is reset at the first playable frame and shared by every sentence in
+the reply. Synthesis look-ahead therefore does not consume the initial
+prebuffer, and a sentence boundary cannot create a second burst. In tap output,
+sum the per-sentence `surplus_s` values: for a reply longer than the prebuffer,
+the result should remain near 0.200 s regardless of the reply's duration.
+Short zero intervals at the beginning or immediately after an injected delay
+are expected catch-up; steady-state p95 intervals should remain near 20 ms.
+
 ## Barge-in buffer flush
 
-Outbound 20 ms frames are paced at about 18 ms to keep Telnyx's jitter buffer
-fed. During a long answer that 10% lead accumulates, so merely stopping local
-sends on barge-in can leave roughly one second of already-queued speech after
-a ten-second response. The caller then hears the agent continue even though
-the gateway has accepted the interruption.
+Historically, outbound 20 ms frames were sent at about 18 ms to keep Telnyx's
+jitter buffer fed. During a long answer that 10% lead accumulated, so merely
+stopping local sends on barge-in could leave roughly one second of already
+queued speech after a ten-second response. Absolute pacing now bounds the
+normal surplus near the one-time prebuffer, but even that bounded queue should
+not play after the caller interrupts.
 
 When barge-in is detected, the gateway now stops sending media and sends
 Telnyx `{"event": "clear"}` exactly once. Telnyx immediately stops the media
