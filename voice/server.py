@@ -32,6 +32,14 @@ from voice.wav import pcm_to_wav
 from voice import kokoro_client
 from voice import lux_client
 from voice.backoff import Backoff
+from voice.webauth.aiohttp_adapter import (
+    AUTH_ADAPTER_KEY,
+    SECURITY_HEADERS,
+    AiohttpAuthAdapter,
+    WebSocketIdentity,
+    close_auth_adapter,
+    request_security_middleware,
+)
 
 if TYPE_CHECKING:
     from voice.webrtc import Session
@@ -88,7 +96,23 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     # socket keeps agent memory and pending tool approvals conversation-local.
     conversation_id = f"voice-{uuid.uuid4().hex}"
     ws = web.WebSocketResponse()
-    await ws.prepare(request)
+
+    # Every real route request has the adapter installed by create_app().  The
+    # fallback keeps direct unit-level calls transport-free; it cannot occur on
+    # the registered aiohttp route.  Origin/session resolution and registration
+    # all happen before the WebSocket upgrade.
+    try:
+        auth_adapter = request.app.get(AUTH_ADAPTER_KEY)
+    except AttributeError:
+        auth_adapter = None
+    socket_identity = WebSocketIdentity(None, None, conversation_id)
+    if auth_adapter is not None:
+        ws.headers.update(SECURITY_HEADERS)
+        socket_identity = await auth_adapter.bind_websocket(
+            request, ws, conversation_id, prepare=True
+        )
+    else:
+        await ws.prepare(request)
     log.info("WebSocket connected")
 
     session: Session | None = None
@@ -136,6 +160,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
                 session = Session()
                 session._agent_session_id = conversation_id
+                # Identity is fixed at the HTTP upgrade.  Browser messages can
+                # never replace these server-owned values; login/logout applies
+                # when the page reconnects and receives a new socket.
+                session.user_sub = socket_identity.user_sub
+                session.tenant = socket_identity.tenant
+                session.conversation_id = conversation_id
+                session._user_sub = socket_identity.user_sub
+                session._tenant_id = socket_identity.tenant
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
                 session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
@@ -296,8 +328,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # Memory deletion is the privacy boundary; a WebRTC teardown
                 # failure must not prevent it from running.
                 log.exception("WebRTC session close failed")
-        await _delete_agent_session(http_client, conversation_id)
-        await http_client.aclose()
+        try:
+            await _delete_agent_session(http_client, conversation_id)
+            await http_client.aclose()
+        finally:
+            if auth_adapter is not None:
+                await auth_adapter.unbind_websocket(ws)
         log.info("WebSocket disconnected")
 
     return ws
@@ -834,10 +870,15 @@ async def preview_handler(request: web.Request) -> web.Response:
     return web.Response(body=wav, content_type="audio/wav")
 
 
-def create_app() -> web.Application:
+def create_app(
+    auth_adapter: AiohttpAuthAdapter | None = None,
+) -> web.Application:
     from voice import phone
 
-    app = web.Application()
+    app = web.Application(middlewares=[request_security_middleware])
+    adapter = auth_adapter or AiohttpAuthAdapter.from_environment()
+    app[AUTH_ADAPTER_KEY] = adapter
+    app.on_cleanup.append(close_auth_adapter)
     cost_ledger.ensure_schema(METRICS)
     app.router.add_get("/", index_handler)
     app.router.add_get("/costs", costs_page_handler)
@@ -851,6 +892,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/voice/flow", flow_set_handler)
     app.router.add_get("/api/voice/region-model", region_model_get_handler)
     app.router.add_post("/api/voice/region-model", region_model_set_handler)
+    # Auth routes must precede the one-segment flat static route below or
+    # aiohttp will let that catch public API names as filenames.
+    adapter.register_routes(app)
     phone.register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
     # The gateway now lives in voice.phone (the original design predates that
     # split).  Install a runtime adapter so call-end receipts remain isolated

@@ -145,6 +145,85 @@ therefore produce at most one successful login.
 attempts per IP and five per verified `sub` per minute, with bounded bucket
 storage and fail-closed behavior at capacity. An adapter performs the IP check
 before expensive token verification and the `sub` check afterward. IP
-extraction is injected: task 042 will choose `CF-Connecting-IP` only on its
-trusted tunnel path and otherwise use the direct peer (`request.remote`). The
-core never trusts forwarding headers itself.
+extraction is injected: nano's aiohttp adapter chooses `CF-Connecting-IP` only
+on its trusted tunnel host and otherwise uses the direct peer
+(`request.remote`). The core never trusts forwarding headers itself.
+
+## aiohttp routes and cookie contract
+
+`voice.webauth.aiohttp_adapter.AiohttpAuthAdapter` registers the authentication
+routes before nano's flat static-file route:
+
+- `GET /api/auth/config` is public. With both
+  `NANO_CLAW_AUTH=optional` and a nonempty
+  `NANO_CLAW_GOOGLE_CLIENT_ID`, it returns `clientId`, `mode`, and a fresh
+  one-time `nonce`. Partial, missing, explicit-off, or unknown configuration
+  returns exactly `{"mode":"off"}` and does not initialize the auth database.
+- `POST /api/auth/google` accepts only a `credential`. It resolves the expected
+  signed nonce strictly through the host-only `nc_pre_auth` cookie created by
+  the config route; a nonce in JSON is ignored. Successful verification
+  upserts display claims, atomically rotates the tenant session, and returns
+  the signed-in user.
+- `GET /api/me` resolves and idle-touches `nc_session`, returning the trusted
+  `sub` and `tenant`, or HTTP 401 for a missing, revoked, or expired bearer.
+  Operational store failures remain distinct and fail closed with HTTP 503.
+- `POST /api/auth/logout` revokes that exact bearer, clears the cookie, and
+  actively closes every WebSocket bound to it. A store failure still clears
+  the browser cookie and closes the local sockets, but reports HTTP 503 because
+  durable revocation could not be confirmed.
+
+All auth responses, including errors, use `Cache-Control: no-store`. Invalid ID
+tokens and unknown Google key ids have the same HTTP 401 status and JSON body;
+key-fetch outages use a generic HTTP 503 response. This avoids a key-id
+validity oracle without misreporting an operational outage as a bad password.
+Production constructs the Google key cache through its normal rotating fetch
+path and never supplies `initial_keys`.
+
+The application bearer cookie is `nc_session`: host-only, `HttpOnly`,
+`Path=/`, and `SameSite=Lax`. Its `Max-Age` follows the store's absolute policy
+(seven days by default), while the store independently enforces the 24-hour
+sliding-idle boundary. `Secure` is controlled only by
+`NANO_CLAW_PUBLIC_HTTPS=1`; aiohttp's `request.secure` and forwarded-proto
+headers are intentionally ignored. Cookie deletion repeats the same path,
+HttpOnly, SameSite, and Secure attributes so the exact cookie is removed.
+The short-lived `nc_pre_auth` cookie has the same transport attributes and is
+cleared after a successful login.
+
+## HTTP and WebSocket request security
+
+Every unsafe auth or conversation-history request requires all three of:
+
+1. `Origin` exactly `http://localhost:9090` or
+   `https://nano.chattychapters.com`;
+2. `Sec-Fetch-Site: same-origin`; and
+3. `X-NC-Auth: 1`.
+
+The middleware emits no `Access-Control-Allow-*` headers and strips any such
+headers from sensitive responses, including failures. Browser preflight is
+therefore never an alternate authorization path. These checks intentionally
+do not gate nano's existing anonymous voice/model/control endpoints; Google
+login grants history identity only.
+
+The browser WebSocket cannot supply the custom HTTP header, so `/ws` separately
+requires one of the same two exact `Origin` values before upgrade. If a session
+cookie exists, the adapter resolves it before `WebSocketResponse.prepare()`,
+fails closed on a store outage, and fixes `user_sub`, `tenant`, and the
+server-generated conversation id to the socket for its lifetime. Browser
+messages cannot override them. Login or logout is visible on the next socket;
+session rotation, logout, and detected expiry close any socket whose cached
+identity has become invalid.
+
+The main console and auth responses carry a CSP that permits only local assets
+plus the declared GIS script, frame, style, and connection endpoints. It does
+not permit a Google profile-image origin. They also carry
+`Referrer-Policy: strict-origin-when-cross-origin` and
+`X-Content-Type-Options: nosniff`.
+
+## Deployment boundary
+
+`run.sh` forwards `NANO_CLAW_GOOGLE_CLIENT_ID`, `NANO_CLAW_AUTH`, and
+`NANO_CLAW_PUBLIC_HTTPS` and publishes the container only on
+`127.0.0.1:9090:8080`. The public host is consequently the trusted local
+cloudflared ingress path: only requests whose `Host` is
+`nano.chattychapters.com` may use `CF-Connecting-IP` for login limiting. Direct
+localhost traffic ignores that header and uses aiohttp's peer address.
