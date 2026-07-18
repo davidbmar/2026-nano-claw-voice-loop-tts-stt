@@ -1,9 +1,16 @@
-// Vendored from /Users/davidmar/src/talking_visualization/src/talking-cube.js for nano-claw.
+// Synced from /Users/davidmar/src/talking_visualization/src/talking-cube.js on 2026-07-18.
+// Renderer capabilities were ported wholesale; the upstream demo/director shell was not
+// ported because nano-claw owns the audio pipeline, console layout, theme, and lifecycle.
 
 const TAU = Math.PI * 2;
 
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const lerp = (a, b, amount) => a + (b - a) * amount;
+const normalizeAngle = (value) => (
+  value >= -Math.PI && value <= Math.PI
+    ? value
+    : Math.atan2(Math.sin(value), Math.cos(value))
+);
 const smoothstep = (edge0, edge1, value) => {
   const t = clamp((value - edge0) / (edge1 - edge0));
   return t * t * (3 - 2 * t);
@@ -43,17 +50,21 @@ function rgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${clamp(alpha)})`;
 }
 
-function rotatePoint(point, yaw, pitch) {
+function rotatePoint(point, yaw, pitch, roll = 0) {
   const cy = Math.cos(yaw);
   const sy = Math.sin(yaw);
   const cp = Math.cos(pitch);
   const sp = Math.sin(pitch);
-  const x = point.x * cy - point.z * sy;
+  const cr = Math.cos(roll);
+  const sr = Math.sin(roll);
+  const x1 = point.x * cy - point.z * sy;
   const z1 = point.x * sy + point.z * cy;
+  const y1 = point.y * cp - z1 * sp;
+  const z2 = point.y * sp + z1 * cp;
   return {
-    x,
-    y: point.y * cp - z1 * sp,
-    z: point.y * sp + z1 * cp,
+    x: x1 * cr - y1 * sr,
+    y: x1 * sr + y1 * cr,
+    z: z2,
   };
 }
 
@@ -62,26 +73,59 @@ function seededNoise(x, y, z, seed = 0) {
   return value - Math.floor(value);
 }
 
-const DEFAULT_SETTINGS = Object.freeze({
-  gridSize: 15,
-  pattern: 'focus',
-  formation: 'focus',
-  elementShape: 'orb',
-  primary: '#43e7ff',
-  secondary: '#169fdf',
-  energy: 0.68,
-  response: 0.78,
-  speed: 0.36,
-  bloom: 0.5,
-  opacity: 0.68,
-  density: 1,
-  spread: 1.02,
-  rotationSpeed: 0.16,
-  autoRotate: true,
-  showLinks: false,
-  showFrame: false,
-  idleLevel: 0.06,
+function onRegularPolygonBoundary(u, v, sides, thickness = 0.095) {
+  const radius = Math.hypot(u, v);
+  const sector = TAU / sides;
+  const rotation = -Math.PI / 2;
+  const angle = Math.atan2(v, u) - rotation;
+  const localAngle = ((angle + sector / 2) % sector + sector) % sector - sector / 2;
+  const boundaryRadius = Math.cos(Math.PI / sides) / Math.cos(localAngle);
+  return Math.abs(radius - boundaryRadius) <= thickness;
+}
+
+const PROFILE_SCHEMA = 'voxels-spatial-voice/profile';
+const PROFILE_VERSION = 2;
+const POLYGON_SIDES = Object.freeze([3, 5, 8]);
+const ROTATION_AXIS_NAMES = Object.freeze({
+  x: 'X axis',
+  y: 'Y axis',
+  z: 'Z axis',
+  voice: 'Voice shift',
 });
+
+const DEFAULT_PROFILE = Object.freeze({
+  schema: PROFILE_SCHEMA,
+  version: PROFILE_VERSION,
+  settings: Object.freeze({
+    gridSize: 15,
+    pattern: 'nebula',
+    formation: 'octahedron',
+    polygonSides: 8,
+    elementShape: 'octagon',
+    primary: '#ff775f',
+    secondary: '#ffca5c',
+    energy: 0.68,
+    response: 0.78,
+    speed: 0.5,
+    bloom: 0.48,
+    opacity: 0.7,
+    density: 0.9,
+    spread: 1.04,
+    rotationSpeed: 0.22,
+    rotationAxis: 'voice',
+    autoRotate: true,
+    showLinks: false,
+    showFrame: false,
+    idleLevel: 0.06,
+  }),
+  camera: Object.freeze({
+    yaw: -0.6266189174624561,
+    pitch: 1.0165614303738644,
+    roll: 0.1112071951618051,
+    distance: 590,
+  }),
+});
+const DEFAULT_SETTINGS = DEFAULT_PROFILE.settings;
 
 const PATTERN_NAMES = Object.freeze({
   focus: 'Lens drift',
@@ -94,6 +138,7 @@ const PATTERN_NAMES = Object.freeze({
 
 const FORMATION_NAMES = Object.freeze({
   focus: 'Lens field',
+  polygon: 'Polygon axes',
   octahedron: 'Octahedron',
   cube: 'Cube',
 });
@@ -122,10 +167,11 @@ export class TalkingCubeRenderer extends EventTarget {
     this.context = canvas.getContext('2d', { alpha: false });
     this.settings = { ...DEFAULT_SETTINGS, ...options };
     this.camera = {
-      yaw: -0.3,
-      pitch: 0.16,
-      distance: 590,
-      targetDistance: 590,
+      yaw: DEFAULT_PROFILE.camera.yaw,
+      pitch: DEFAULT_PROFILE.camera.pitch,
+      roll: DEFAULT_PROFILE.camera.roll,
+      distance: DEFAULT_PROFILE.camera.distance,
+      targetDistance: DEFAULT_PROFILE.camera.distance,
       dragVelocityX: 0,
       dragVelocityY: 0,
     };
@@ -145,6 +191,7 @@ export class TalkingCubeRenderer extends EventTarget {
     this.peakLevel = 0;
     this.breath = 1;
     this.hueShift = 0;
+    this.rotationVector = { x: 0, y: 1, z: 0 };
     this.frameRequest = 0;
     this.lastFrame = performance.now();
     this.time = 0;
@@ -225,12 +272,12 @@ export class TalkingCubeRenderer extends EventTarget {
     this.resize();
   }
 
-  configure(next = {}) {
+  configure(next = {}, options = {}) {
     const previousSize = this.settings.gridSize;
     const allowed = Object.keys(DEFAULT_SETTINGS);
     for (const [key, value] of Object.entries(next)) {
       if (!allowed.includes(key)) continue;
-      if (['primary', 'secondary', 'pattern', 'formation', 'elementShape'].includes(key)) {
+      if (['primary', 'secondary', 'pattern', 'formation', 'elementShape', 'rotationAxis'].includes(key)) {
         this.settings[key] = String(value);
       } else if (['autoRotate', 'showLinks', 'showFrame'].includes(key)) {
         this.settings[key] = Boolean(value);
@@ -242,9 +289,11 @@ export class TalkingCubeRenderer extends EventTarget {
     if (!PATTERN_NAMES[this.settings.pattern]) this.settings.pattern = 'focus';
     if (!FORMATION_NAMES[this.settings.formation]) this.settings.formation = 'focus';
     if (!ELEMENT_NAMES[this.settings.elementShape]) this.settings.elementShape = 'octagon';
+    if (!POLYGON_SIDES.includes(this.settings.polygonSides)) this.settings.polygonSides = 8;
+    if (!ROTATION_AXIS_NAMES[this.settings.rotationAxis]) this.settings.rotationAxis = 'y';
     if (previousSize !== this.settings.gridSize) this.buildGrid();
-    this.dispatchState('configure');
-    return this.getState();
+    if (!options.silent) this.dispatchState('configure');
+    return options.silent ? this.settings : this.getState();
   }
 
   setPattern(pattern, options = {}) {
@@ -386,9 +435,11 @@ export class TalkingCubeRenderer extends EventTarget {
   }
 
   resetCamera() {
-    this.camera.yaw = -0.3;
-    this.camera.pitch = 0.16;
-    this.camera.targetDistance = 590;
+    this.camera.yaw = DEFAULT_PROFILE.camera.yaw;
+    this.camera.pitch = DEFAULT_PROFILE.camera.pitch;
+    this.camera.roll = DEFAULT_PROFILE.camera.roll;
+    this.camera.distance = DEFAULT_PROFILE.camera.distance;
+    this.camera.targetDistance = DEFAULT_PROFILE.camera.distance;
     this.camera.dragVelocityX = 0;
     this.camera.dragVelocityY = 0;
     return this;
@@ -406,13 +457,81 @@ export class TalkingCubeRenderer extends EventTarget {
       camera: {
         yaw: this.camera.yaw,
         pitch: this.camera.pitch,
+        roll: this.camera.roll,
         distance: this.camera.distance,
       },
       cubeCount: this.cubes.length,
       patterns: { ...PATTERN_NAMES },
       formations: { ...FORMATION_NAMES },
       elementShapes: { ...ELEMENT_NAMES },
+      rotationAxes: { ...ROTATION_AXIS_NAMES },
     };
+  }
+
+  getProfile() {
+    return {
+      schema: PROFILE_SCHEMA,
+      version: PROFILE_VERSION,
+      settings: { ...this.settings },
+      camera: {
+        yaw: this.camera.yaw,
+        pitch: this.camera.pitch,
+        roll: this.camera.roll,
+        distance: this.camera.targetDistance,
+      },
+    };
+  }
+
+  exportProfile(space = 2) {
+    return JSON.stringify(this.getProfile(), null, clamp(Number(space) || 0, 0, 10));
+  }
+
+  importProfile(profile) {
+    let parsed = profile;
+    if (typeof profile === 'string') {
+      try {
+        parsed = JSON.parse(profile);
+      } catch (error) {
+        throw new TypeError(`Could not parse visualization profile: ${error.message}`);
+      }
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new TypeError('Visualization profile must be a JSON object or JSON string.');
+    }
+    if (parsed.schema && parsed.schema !== PROFILE_SCHEMA) {
+      throw new TypeError(`Unsupported visualization profile schema: ${parsed.schema}`);
+    }
+    if (Number(parsed.version || 1) > PROFILE_VERSION) {
+      throw new RangeError(`Visualization profile version ${parsed.version} is newer than supported version ${PROFILE_VERSION}.`);
+    }
+
+    const sourceSettings = parsed.settings && typeof parsed.settings === 'object'
+      ? parsed.settings
+      : parsed;
+    const settings = { ...sourceSettings };
+    const profileVersion = Number(parsed.version || 1);
+    if (profileVersion < 2 && settings.rotationAxis === undefined) settings.rotationAxis = 'y';
+    this.configure(settings);
+
+    if (parsed.camera && typeof parsed.camera === 'object') {
+      const yaw = Number(parsed.camera.yaw);
+      const pitch = Number(parsed.camera.pitch);
+      const roll = Number(parsed.camera.roll);
+      const distance = Number(parsed.camera.distance);
+      if (Number.isFinite(yaw)) this.camera.yaw = normalizeAngle(yaw);
+      if (Number.isFinite(pitch)) this.camera.pitch = normalizeAngle(pitch);
+      if (Number.isFinite(roll)) this.camera.roll = normalizeAngle(roll);
+      else if (profileVersion < 2) this.camera.roll = 0;
+      if (Number.isFinite(distance)) {
+        this.camera.distance = clamp(distance, 350, 980);
+        this.camera.targetDistance = this.camera.distance;
+      }
+      this.camera.dragVelocityX = 0;
+      this.camera.dragVelocityY = 0;
+    }
+
+    this.dispatchState('profile');
+    return this.getState();
   }
 
   dispatchState(reason) {
@@ -434,8 +553,8 @@ export class TalkingCubeRenderer extends EventTarget {
       if (!this.drag || event.pointerId !== this.drag.pointerId) return;
       const dx = event.clientX - this.drag.x;
       const dy = event.clientY - this.drag.y;
-      this.camera.yaw += dx * 0.006;
-      this.camera.pitch = clamp(this.camera.pitch + dy * 0.005, -1.25, 1.25);
+      this.camera.yaw = normalizeAngle(this.camera.yaw + dx * 0.006);
+      this.camera.pitch = normalizeAngle(this.camera.pitch + dy * 0.005);
       this.camera.dragVelocityX = dx * 0.0009;
       this.camera.dragVelocityY = dy * 0.00075;
       this.drag.x = event.clientX;
@@ -561,6 +680,11 @@ export class TalkingCubeRenderer extends EventTarget {
     for (const cube of this.cubes) {
       let target = this.patternValue(cube, this.time);
       target *= baseline + voiceBoost * 1.55 + this.settings.energy * 0.28;
+      if (this.settings.formation === 'polygon') {
+        // Keep all three orthogonal outlines legible while the selected voice
+        // pattern travels across them.
+        target += 0.13 + this.signal.level * 0.045;
+      }
 
       for (const pulse of this.pulses) {
         const progress = (now - pulse.start) / pulse.duration;
@@ -626,13 +750,21 @@ export class TalkingCubeRenderer extends EventTarget {
   }
 
   formationVisible(cube) {
-    const { formation, density } = this.settings;
+    const { formation, density, polygonSides, gridSize } = this.settings;
     const l1 = Math.abs(cube.nx) + Math.abs(cube.ny) + Math.abs(cube.nz);
     let inside = true;
 
     if (formation === 'focus') {
       const ellipse = (cube.nx / 1.04) ** 2 + (cube.ny / 0.84) ** 2;
       inside = Math.abs(cube.nz) <= 0.21 && ellipse <= 1;
+    }
+    if (formation === 'polygon') {
+      const half = Math.max((gridSize - 1) / 2, 1);
+      const shellThickness = Math.max(0.095, 0.48 / half);
+      const onXY = cube.z === 0 && onRegularPolygonBoundary(cube.nx, cube.ny, polygonSides, shellThickness);
+      const onXZ = cube.y === 0 && onRegularPolygonBoundary(cube.nx, cube.nz, polygonSides, shellThickness);
+      const onYZ = cube.x === 0 && onRegularPolygonBoundary(cube.ny, cube.nz, polygonSides, shellThickness);
+      inside = onXY || onXZ || onYZ;
     }
     if (formation === 'octahedron') inside = l1 <= 1.52;
     const retainedByDensity = cube.noise <= clamp(density, 0.08, 1) || cube.radius < 0.08;
@@ -649,6 +781,14 @@ export class TalkingCubeRenderer extends EventTarget {
         x: cube.nx * radius * 1.34 + cube.z * spacing * 0.16,
         y: cube.ny * radius * 0.88 + cube.z * spacing * 0.07,
         z: cube.z * spacing * 0.56 + shallowCurve,
+      };
+    }
+
+    if (this.settings.formation === 'polygon') {
+      return {
+        x: cube.nx * radius * 1.04,
+        y: cube.ny * radius * 1.04,
+        z: cube.nz * radius * 1.04,
       };
     }
 
@@ -671,16 +811,25 @@ export class TalkingCubeRenderer extends EventTarget {
       x: center.x + x,
       y: center.y + y,
       z: center.z + z,
-    }, this.camera.yaw, this.camera.pitch));
+    }, this.camera.yaw, this.camera.pitch, this.camera.roll));
     const projected = transformed.map((point) => this.project(point));
-    return { center: rotatePoint(center, this.camera.yaw, this.camera.pitch), transformed, projected };
+    return {
+      center: rotatePoint(center, this.camera.yaw, this.camera.pitch, this.camera.roll),
+      transformed,
+      projected,
+    };
   }
 
   drawBounds(context, extent) {
     const corners = [
       [-extent, -extent, -extent], [extent, -extent, -extent], [extent, extent, -extent], [-extent, extent, -extent],
       [-extent, -extent, extent], [extent, -extent, extent], [extent, extent, extent], [-extent, extent, extent],
-    ].map(([x, y, z]) => this.project(rotatePoint({ x, y, z }, this.camera.yaw, this.camera.pitch)));
+    ].map(([x, y, z]) => this.project(rotatePoint(
+      { x, y, z },
+      this.camera.yaw,
+      this.camera.pitch,
+      this.camera.roll,
+    )));
     const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
     context.lineWidth = 0.55;
     context.strokeStyle = rgba(
@@ -743,7 +892,7 @@ export class TalkingCubeRenderer extends EventTarget {
     const baseAlpha = (0.018 + this.settings.energy * 0.008) * visualOpacity;
 
     for (const face of faces) {
-      const normal = rotatePoint(face.normal, this.camera.yaw, this.camera.pitch);
+      const normal = rotatePoint(face.normal, this.camera.yaw, this.camera.pitch, this.camera.roll);
       if (normal.z >= 0.02) continue;
       const path = new Path2D();
       face.indices.forEach((index, faceIndex) => {
@@ -891,7 +1040,7 @@ export class TalkingCubeRenderer extends EventTarget {
         cube.screen = null;
         return cube;
       }
-      const center = rotatePoint(cube.world, this.camera.yaw, this.camera.pitch);
+      const center = rotatePoint(cube.world, this.camera.yaw, this.camera.pitch, this.camera.roll);
       cube.depth = center.z;
       cube.screen = this.project(center);
       return cube;
@@ -907,6 +1056,60 @@ export class TalkingCubeRenderer extends EventTarget {
 
   }
 
+  updateAutoRotation(delta) {
+    if (!this.settings.autoRotate || this.reducedMotion) return;
+
+    const { rotationAxis, rotationSpeed, formation } = this.settings;
+    const level = this.signal.level;
+
+    if (rotationAxis === 'voice') {
+      const average = (from, to) => {
+        let total = 0;
+        for (let index = from; index <= to; index += 1) total += this.signal.bands[index] || 0;
+        return total / (to - from + 1);
+      };
+      const low = average(0, 2);
+      const mid = average(3, 5);
+      const high = average(6, 8);
+      const scores = [
+        0.12 + low * 1.4 + (Math.sin(this.time * 0.43) + 1) * 0.06,
+        0.12 + mid * 1.4 + (Math.sin(this.time * 0.37 + 2.1) + 1) * 0.06,
+        0.12 + high * 1.4 + (Math.sin(this.time * 0.41 + 4.2) + 1) * 0.06,
+      ];
+      const dominant = scores.indexOf(Math.max(...scores));
+      const directions = [
+        Math.sin(this.time * 0.19 + low * 3.2) >= 0 ? 1 : -1,
+        Math.sin(this.time * 0.17 + mid * 3.2 + 2.2) >= 0 ? 1 : -1,
+        Math.sin(this.time * 0.21 + high * 3.2 + 4.4) >= 0 ? 1 : -1,
+      ];
+      const target = {
+        x: dominant === 0 ? directions[0] : 0,
+        y: dominant === 1 ? directions[1] : 0,
+        z: dominant === 2 ? directions[2] : 0,
+      };
+      const shiftRate = 1 - Math.exp(-delta * (0.72 + level * 5.4));
+      this.rotationVector.x = lerp(this.rotationVector.x, target.x, shiftRate);
+      this.rotationVector.y = lerp(this.rotationVector.y, target.y, shiftRate);
+      this.rotationVector.z = lerp(this.rotationVector.z, target.z, shiftRate);
+
+      const amount = delta * rotationSpeed * (0.28 + level * 0.58);
+      this.camera.pitch += amount * this.rotationVector.x;
+      this.camera.yaw += amount * this.rotationVector.y;
+      this.camera.roll += amount * this.rotationVector.z;
+    } else {
+      const amount = formation === 'focus'
+        ? delta * rotationSpeed * 0.34 * Math.cos(this.time * 0.22)
+        : delta * rotationSpeed * (0.14 + level * 0.18);
+      if (rotationAxis === 'x') this.camera.pitch += amount;
+      if (rotationAxis === 'y') this.camera.yaw += amount;
+      if (rotationAxis === 'z') this.camera.roll += amount;
+    }
+
+    this.camera.yaw = normalizeAngle(this.camera.yaw);
+    this.camera.pitch = normalizeAngle(this.camera.pitch);
+    this.camera.roll = normalizeAngle(this.camera.roll);
+  }
+
   frame(now) {
     if (this.destroyed) return;
     const delta = Math.min((now - this.lastFrame) / 1000, 0.05);
@@ -917,15 +1120,9 @@ export class TalkingCubeRenderer extends EventTarget {
     this.updateCubes(delta, now);
 
     if (!this.drag) {
-      if (this.settings.autoRotate && !this.reducedMotion) {
-        if (this.settings.formation === 'focus') {
-          this.camera.yaw += delta * this.settings.rotationSpeed * 0.34 * Math.cos(this.time * 0.22);
-        } else {
-          this.camera.yaw += delta * this.settings.rotationSpeed * (0.14 + this.signal.level * 0.18);
-        }
-      }
-      this.camera.yaw += this.camera.dragVelocityX;
-      this.camera.pitch = clamp(this.camera.pitch + this.camera.dragVelocityY, -1.25, 1.25);
+      this.updateAutoRotation(delta);
+      this.camera.yaw = normalizeAngle(this.camera.yaw + this.camera.dragVelocityX);
+      this.camera.pitch = normalizeAngle(this.camera.pitch + this.camera.dragVelocityY);
       this.camera.dragVelocityX *= Math.pow(0.9, delta * 60);
       this.camera.dragVelocityY *= Math.pow(0.9, delta * 60);
     }
@@ -949,4 +1146,13 @@ export class TalkingCubeRenderer extends EventTarget {
   }
 }
 
-export { DEFAULT_SETTINGS, PATTERN_NAMES, FORMATION_NAMES, ELEMENT_NAMES };
+export {
+  DEFAULT_PROFILE,
+  DEFAULT_SETTINGS,
+  PATTERN_NAMES,
+  FORMATION_NAMES,
+  ELEMENT_NAMES,
+  ROTATION_AXIS_NAMES,
+  PROFILE_SCHEMA,
+  PROFILE_VERSION,
+};

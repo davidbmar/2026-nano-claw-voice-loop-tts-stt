@@ -416,6 +416,10 @@ input[type="range"] {
     margin-top: 2px;
 }
 
+#visualization-panel .pipe-row.is-disabled label {
+    opacity: 0.55;
+}
+
 .visualization-slider output {
     color: var(--accent);
     font: inherit;
@@ -494,6 +498,28 @@ input[type="range"] {
 .visualization-actions button:hover {
     color: var(--accent);
     border-color: #2d454b;
+}
+
+.visualization-profile-actions {
+    margin-top: 7px;
+}
+
+.visualization-profile-status {
+    display: block;
+    margin-top: 7px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.1em;
+    text-align: right;
+}
+
+.visualization-profile-status.success {
+    color: var(--accent);
+}
+
+.visualization-profile-status.error {
+    color: #ff8b8b;
 }
 
 /* ── Debug iteration list ────────────────────────────────── */

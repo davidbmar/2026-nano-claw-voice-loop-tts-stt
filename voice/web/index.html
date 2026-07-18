@@ -143,9 +143,10 @@
           </div>
           <div class="pipe-row"><label for="cube-scene">PRESET</label>
             <select id="cube-scene">
-              <option value="calm" selected>Calm constellation</option>
+              <option value="calm" selected>Default profile</option>
               <option value="focus">Lens field</option>
               <option value="matrix">Halftone matrix</option>
+              <option value="polygon">Polygon axes</option>
               <option value="octahedron">Octahedron</option>
               <option value="classic">Classic cube</option>
               <option value="custom">Custom</option>
@@ -163,15 +164,31 @@
           </div>
           <div class="pipe-row"><label for="cube-formation">FORMATION</label>
             <select id="cube-formation">
-              <option value="focus" selected>Lens field</option>
-              <option value="octahedron">Octahedron</option>
+              <option value="focus">Lens field</option>
+              <option value="polygon">Polygon axes</option>
+              <option value="octahedron" selected>Octahedron</option>
               <option value="cube">Cube</option>
+            </select>
+          </div>
+          <div class="pipe-row is-disabled"><label for="cube-polygon-sides">POLYGON</label>
+            <select id="cube-polygon-sides" disabled>
+              <option value="3">Triangle</option>
+              <option value="5">Pentagon</option>
+              <option value="8" selected>Octagon</option>
+            </select>
+          </div>
+          <div class="pipe-row"><label for="cube-rotation-axis">ROTATION AXIS</label>
+            <select id="cube-rotation-axis">
+              <option value="x">X · Tumble</option>
+              <option value="y">Y · Orbit</option>
+              <option value="z">Z · Roll</option>
+              <option value="voice" selected>Voice shift</option>
             </select>
           </div>
           <div class="pipe-row"><label for="cube-element-shape">SHAPE</label>
             <select id="cube-element-shape">
-              <option value="orb" selected>Soft orb</option>
-              <option value="octagon">Octagon</option>
+              <option value="orb">Soft orb</option>
+              <option value="octagon" selected>Octagon</option>
               <option value="diamond">Diamond</option>
               <option value="voxel">3D voxel</option>
             </select>
@@ -181,51 +198,54 @@
               <option value="5">5 × 5 × 5</option>
               <option value="7">7 × 7 × 7</option>
               <option value="9">9 × 9 × 9</option>
-              <option value="11" selected>11 × 11 × 11</option>
+              <option value="11">11 × 11 × 11</option>
               <option value="13">13 × 13 × 13</option>
-              <option value="15">15 × 15 × 15</option>
+              <option value="15" selected>15 × 15 × 15</option>
             </select>
           </div>
           <div class="pipe-row"><label for="cube-palette">PALETTE</label>
             <select id="cube-palette">
-              <option value="nanoclaw" selected>nano-claw blue</option>
+              <option value="nanoclaw">nano-claw blue</option>
               <option value="electric">Electric blue</option>
               <option value="aurora">Aurora</option>
               <option value="violet">Ultraviolet</option>
-              <option value="sunset">Solar flare</option>
+              <option value="sunset" selected>Solar flare</option>
               <option value="mono">Moonlight</option>
               <option value="custom">Custom</option>
             </select>
           </div>
           <div class="pipe-row"><label for="cube-primary-color">COLORS</label>
             <span class="visualization-colors">
-              <input id="cube-primary-color" type="color" value="#2563eb" aria-label="Primary visualization color">
-              <input id="cube-secondary-color" type="color" value="#60a5fa" aria-label="Secondary visualization color">
+              <input id="cube-primary-color" type="color" value="#ff775f" aria-label="Primary visualization color">
+              <input id="cube-secondary-color" type="color" value="#ffca5c" aria-label="Secondary visualization color">
             </span>
           </div>
           <div class="pipe-row"><label for="cube-energy">ENERGY</label>
-            <span class="visualization-slider"><input id="cube-energy" data-cube-setting="energy" type="range" min="0" max="1" step="0.01" value="0.28"><output for="cube-energy">28%</output></span>
+            <span class="visualization-slider"><input id="cube-energy" data-cube-setting="energy" type="range" min="0" max="1" step="0.01" value="0.68"><output for="cube-energy">68%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-response">RESPONSE</label>
-            <span class="visualization-slider"><input id="cube-response" data-cube-setting="response" type="range" min="0" max="1" step="0.01" value="0.65"><output for="cube-response">65%</output></span>
+            <span class="visualization-slider"><input id="cube-response" data-cube-setting="response" type="range" min="0" max="1" step="0.01" value="0.78"><output for="cube-response">78%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-speed">SPEED</label>
-            <span class="visualization-slider"><input id="cube-speed" data-cube-setting="speed" type="range" min="0.08" max="1.4" step="0.01" value="0.18"><output for="cube-speed">8%</output></span>
+            <span class="visualization-slider"><input id="cube-speed" data-cube-setting="speed" type="range" min="0.08" max="1.4" step="0.01" value="0.5"><output for="cube-speed">32%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-opacity">OPACITY</label>
-            <span class="visualization-slider"><input id="cube-opacity" data-cube-setting="opacity" type="range" min="0.08" max="1" step="0.01" value="0.52"><output for="cube-opacity">52%</output></span>
+            <span class="visualization-slider"><input id="cube-opacity" data-cube-setting="opacity" type="range" min="0.08" max="1" step="0.01" value="0.7"><output for="cube-opacity">70%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-density">DENSITY</label>
-            <span class="visualization-slider"><input id="cube-density" data-cube-setting="density" type="range" min="0.2" max="1" step="0.01" value="0.72"><output for="cube-density">72%</output></span>
+            <span class="visualization-slider"><input id="cube-density" data-cube-setting="density" type="range" min="0.2" max="1" step="0.01" value="0.9"><output for="cube-density">90%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-bloom">GLOW</label>
-            <span class="visualization-slider"><input id="cube-bloom" data-cube-setting="bloom" type="range" min="0" max="1" step="0.01" value="0.38"><output for="cube-bloom">38%</output></span>
+            <span class="visualization-slider"><input id="cube-bloom" data-cube-setting="bloom" type="range" min="0" max="1" step="0.01" value="0.48"><output for="cube-bloom">48%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-spread">SPACING</label>
-            <span class="visualization-slider"><input id="cube-spread" data-cube-setting="spread" type="range" min="0.68" max="1.35" step="0.01" value="1.02"><output for="cube-spread">102%</output></span>
+            <span class="visualization-slider"><input id="cube-spread" data-cube-setting="spread" type="range" min="0.68" max="1.35" step="0.01" value="1.04"><output for="cube-spread">104%</output></span>
           </div>
           <div class="pipe-row"><label for="cube-rotation-speed">ROTATION</label>
-            <span class="visualization-slider"><input id="cube-rotation-speed" data-cube-setting="rotationSpeed" type="range" min="0" max="1.2" step="0.01" value="0.1"><output for="cube-rotation-speed">8%</output></span>
+            <span class="visualization-slider"><input id="cube-rotation-speed" data-cube-setting="rotationSpeed" type="range" min="0" max="1.2" step="0.01" value="0.22"><output for="cube-rotation-speed">18%</output></span>
+          </div>
+          <div class="pipe-row"><label for="cube-idle-level">IDLE LEVEL</label>
+            <span class="visualization-slider"><input id="cube-idle-level" data-cube-setting="idleLevel" type="range" min="0" max="0.2" step="0.01" value="0.06"><output for="cube-idle-level">6%</output></span>
           </div>
           <div class="visualization-checks">
             <label><input id="cube-show-frame" type="checkbox"> Frame</label>
@@ -236,6 +256,12 @@
             <button id="cube-pulse" type="button">Pulse</button>
             <button id="cube-reset" type="button">Reset</button>
           </div>
+          <div class="visualization-actions visualization-profile-actions">
+            <button id="cube-export-profile" type="button">Export JSON</button>
+            <button id="cube-import-profile" type="button">Import JSON</button>
+            <input id="cube-profile-file" type="file" accept="application/json,.json" hidden>
+          </div>
+          <output id="cube-profile-status" class="visualization-profile-status" aria-live="polite">PROFILE V2</output>
         </section>
 
         <section id="latency-panel" class="console-section" aria-labelledby="latency-heading">

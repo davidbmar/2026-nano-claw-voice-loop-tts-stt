@@ -1,4 +1,9 @@
-import { TalkingCubeRenderer } from "./talking-cube.js";
+import {
+    DEFAULT_PROFILE,
+    PROFILE_SCHEMA,
+    PROFILE_VERSION,
+    TalkingCubeRenderer,
+} from "./talking-cube.js";
 
 "use strict";
 
@@ -57,6 +62,8 @@ const talkingCubeStatus = document.getElementById("talking-cube-status");
 const cubeScene = document.getElementById("cube-scene");
 const cubePattern = document.getElementById("cube-pattern");
 const cubeFormation = document.getElementById("cube-formation");
+const cubePolygonSides = document.getElementById("cube-polygon-sides");
+const cubeRotationAxis = document.getElementById("cube-rotation-axis");
 const cubeElementShape = document.getElementById("cube-element-shape");
 const cubeGridSize = document.getElementById("cube-grid-size");
 const cubePalette = document.getElementById("cube-palette");
@@ -67,35 +74,20 @@ const cubeShowLinks = document.getElementById("cube-show-links");
 const cubeAutoRotate = document.getElementById("cube-auto-rotate");
 const cubePulse = document.getElementById("cube-pulse");
 const cubeReset = document.getElementById("cube-reset");
+const cubeExportProfile = document.getElementById("cube-export-profile");
+const cubeImportProfile = document.getElementById("cube-import-profile");
+const cubeProfileFile = document.getElementById("cube-profile-file");
+const cubeProfileStatus = document.getElementById("cube-profile-status");
 
 // ── Talking Cube visualization ───────────────────────────────
 // The renderer calls its sphere-like shallow constellation a "focus" field,
 // and its ripple animation a "wave". Keep those source API names here while
 // presenting them as the calm field and voice wave in the nano-claw UI.
-const VISUALIZATION_STORAGE_KEY = "nanoclaw.visualization";
-const CALM_VISUALIZATION_DEFAULTS = Object.freeze({
-    gridSize: 11,
-    pattern: "nebula",
-    formation: "focus",
-    elementShape: "orb",
-    primary: "#2563eb",
-    secondary: "#60a5fa",
-    energy: 0.28,
-    response: 0.65,
-    speed: 0.18,
-    bloom: 0.38,
-    opacity: 0.52,
-    density: 0.72,
-    spread: 1.02,
-    rotationSpeed: 0.1,
-    autoRotate: true,
-    showLinks: false,
-    showFrame: false,
-    idleLevel: 0.035,
-});
+const VISUALIZATION_STORAGE_KEY = "nanoclaw.visualization.profile.v2";
+const DEFAULT_VISUALIZATION_SETTINGS = DEFAULT_PROFILE.settings;
 
 const VISUALIZATION_SCENES = Object.freeze({
-    calm: CALM_VISUALIZATION_DEFAULTS,
+    calm: DEFAULT_VISUALIZATION_SETTINGS,
     focus: {
         gridSize: 15,
         pattern: "focus",
@@ -109,6 +101,7 @@ const VISUALIZATION_SCENES = Object.freeze({
         density: 1,
         spread: 1.02,
         rotationSpeed: 0.16,
+        rotationAxis: "y",
         showFrame: false,
         showLinks: false,
     },
@@ -125,6 +118,25 @@ const VISUALIZATION_SCENES = Object.freeze({
         density: 1,
         spread: 1,
         rotationSpeed: 0.1,
+        rotationAxis: "y",
+        showFrame: false,
+        showLinks: false,
+    },
+    polygon: {
+        gridSize: 15,
+        pattern: "wave",
+        formation: "polygon",
+        polygonSides: 8,
+        elementShape: "orb",
+        energy: 0.8,
+        response: 0.82,
+        speed: 0.46,
+        bloom: 0.52,
+        opacity: 0.82,
+        density: 1,
+        spread: 1.08,
+        rotationSpeed: 0.28,
+        rotationAxis: "voice",
         showFrame: false,
         showLinks: false,
     },
@@ -141,6 +153,7 @@ const VISUALIZATION_SCENES = Object.freeze({
         density: 0.9,
         spread: 1.04,
         rotationSpeed: 0.22,
+        rotationAxis: "voice",
         showFrame: false,
         showLinks: false,
     },
@@ -157,6 +170,7 @@ const VISUALIZATION_SCENES = Object.freeze({
         density: 1,
         spread: 1,
         rotationSpeed: 0.42,
+        rotationAxis: "y",
         showFrame: true,
         showLinks: true,
     },
@@ -173,7 +187,8 @@ const VISUALIZATION_PALETTES = Object.freeze({
 
 const VISUALIZATION_ENUMS = Object.freeze({
     pattern: ["focus", "wave", "spectrum", "helix", "scan", "nebula"],
-    formation: ["focus", "octahedron", "cube"],
+    formation: ["focus", "polygon", "octahedron", "cube"],
+    rotationAxis: ["x", "y", "z", "voice"],
     elementShape: ["orb", "octagon", "diamond", "voxel"],
 });
 const VISUALIZATION_RANGES = Object.freeze({
@@ -185,8 +200,10 @@ const VISUALIZATION_RANGES = Object.freeze({
     density: [0.2, 1],
     spread: [0.68, 1.35],
     rotationSpeed: [0, 1.2],
+    idleLevel: [0, 0.2],
 });
 const VISUALIZATION_GRID_SIZES = [5, 7, 9, 11, 13, 15];
+const VISUALIZATION_POLYGON_SIDES = [3, 5, 8];
 const VISUALIZATION_PATTERN_LABELS = Object.freeze({
     focus: "Lens drift",
     wave: "Voice wave",
@@ -202,7 +219,7 @@ function validVisualizationColor(value) {
 
 function normalizeVisualizationSettings(candidate) {
     var input = candidate && typeof candidate === "object" ? candidate : {};
-    var settings = Object.assign({}, CALM_VISUALIZATION_DEFAULTS);
+    var settings = Object.assign({}, DEFAULT_VISUALIZATION_SETTINGS);
     Object.keys(VISUALIZATION_ENUMS).forEach(function (key) {
         if (VISUALIZATION_ENUMS[key].indexOf(input[key]) >= 0) settings[key] = input[key];
     });
@@ -214,6 +231,8 @@ function normalizeVisualizationSettings(candidate) {
     });
     var gridSize = Number(input.gridSize);
     if (VISUALIZATION_GRID_SIZES.indexOf(gridSize) >= 0) settings.gridSize = gridSize;
+    var polygonSides = Number(input.polygonSides);
+    if (VISUALIZATION_POLYGON_SIDES.indexOf(polygonSides) >= 0) settings.polygonSides = polygonSides;
     if (validVisualizationColor(input.primary)) settings.primary = input.primary;
     if (validVisualizationColor(input.secondary)) settings.secondary = input.secondary;
     ["autoRotate", "showLinks", "showFrame"].forEach(function (key) {
@@ -222,22 +241,55 @@ function normalizeVisualizationSettings(candidate) {
     return settings;
 }
 
+function defaultVisualizationProfile() {
+    return {
+        schema: PROFILE_SCHEMA,
+        version: PROFILE_VERSION,
+        settings: Object.assign({}, DEFAULT_PROFILE.settings),
+        camera: Object.assign({}, DEFAULT_PROFILE.camera),
+    };
+}
+
+function validStoredVisualizationProfile(profile) {
+    if (!profile || typeof profile !== "object" || Array.isArray(profile)) return false;
+    if (profile.schema !== PROFILE_SCHEMA || profile.version !== PROFILE_VERSION) return false;
+    if (!profile.settings || typeof profile.settings !== "object" || Array.isArray(profile.settings)) return false;
+    if (!profile.camera || typeof profile.camera !== "object" || Array.isArray(profile.camera)) return false;
+    return ["yaw", "pitch", "roll", "distance"].every(function (key) {
+        return Number.isFinite(Number(profile.camera[key]));
+    });
+}
+
 function loadVisualizationSettings() {
+    var fallback = { scene: "calm", profile: defaultVisualizationProfile() };
     try {
         var stored = JSON.parse(localStorage.getItem(VISUALIZATION_STORAGE_KEY) || "null");
+        if (!validStoredVisualizationProfile(stored)) return fallback;
         var scene = stored && Object.prototype.hasOwnProperty.call(VISUALIZATION_SCENES, stored.scene)
             ? stored.scene
             : "custom";
-        if (!stored || !stored.settings) scene = "calm";
-        return { scene: scene, settings: normalizeVisualizationSettings(stored && stored.settings) };
+        return {
+            scene: scene,
+            profile: {
+                schema: PROFILE_SCHEMA,
+                version: PROFILE_VERSION,
+                settings: normalizeVisualizationSettings(stored.settings),
+                camera: {
+                    yaw: Number(stored.camera.yaw),
+                    pitch: Number(stored.camera.pitch),
+                    roll: Number(stored.camera.roll),
+                    distance: Number(stored.camera.distance),
+                },
+            },
+        };
     } catch (_e) {
-        return { scene: "calm", settings: Object.assign({}, CALM_VISUALIZATION_DEFAULTS) };
+        return fallback;
     }
 }
 
 var loadedVisualization = loadVisualizationSettings();
 var visualizationScene = loadedVisualization.scene;
-var visualizationSettings = loadedVisualization.settings;
+var visualizationSettings = loadedVisualization.profile.settings;
 var visualizationSpeaking = false;
 var callerVisualizationActive = false;
 var visualizationMoment = null;
@@ -252,6 +304,7 @@ var agentAudioSource = null;
 var agentAudioAnalyser = null;
 
 const talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+talkingCube.importProfile(loadedVisualization.profile);
 talkingCube.setPanelOpen(false);
 window.TalkingCube = talkingCube;
 window.VoiceCube = talkingCube;
@@ -296,13 +349,20 @@ function applyVisualizationLayers() {
     updateTalkingCubeStatus();
 }
 
+function currentVisualizationProfile() {
+    return {
+        schema: PROFILE_SCHEMA,
+        version: PROFILE_VERSION,
+        settings: Object.assign({}, visualizationSettings),
+        camera: Object.assign({}, talkingCube.getProfile().camera),
+    };
+}
+
 function persistVisualizationSettings() {
     try {
-        localStorage.setItem(VISUALIZATION_STORAGE_KEY, JSON.stringify({
-            version: 1,
-            scene: visualizationScene,
-            settings: visualizationSettings,
-        }));
+        var profile = currentVisualizationProfile();
+        profile.scene = visualizationScene;
+        localStorage.setItem(VISUALIZATION_STORAGE_KEY, JSON.stringify(profile));
     } catch (_e) {
         // Storage can be unavailable in privacy modes; live controls still work.
     }
@@ -332,6 +392,13 @@ function syncVisualizationControls() {
     cubeScene.value = visualizationScene;
     cubePattern.value = visualizationSettings.pattern;
     cubeFormation.value = visualizationSettings.formation;
+    cubePolygonSides.value = String(visualizationSettings.polygonSides);
+    cubePolygonSides.disabled = visualizationSettings.formation !== "polygon";
+    cubePolygonSides.closest(".pipe-row").classList.toggle(
+        "is-disabled",
+        visualizationSettings.formation !== "polygon",
+    );
+    cubeRotationAxis.value = visualizationSettings.rotationAxis;
     cubeElementShape.value = visualizationSettings.elementShape;
     cubeGridSize.value = String(visualizationSettings.gridSize);
     cubePalette.value = matchingVisualizationPalette();
@@ -350,8 +417,8 @@ function syncVisualizationControls() {
 function storeVisualizationChange(partial) {
     visualizationSettings = normalizeVisualizationSettings(Object.assign({}, visualizationSettings, partial));
     visualizationScene = "custom";
-    persistVisualizationSettings();
     applyVisualizationLayers();
+    persistVisualizationSettings();
     syncVisualizationControls();
 }
 
@@ -360,11 +427,12 @@ cubeScene.addEventListener("change", function () {
     var preset = VISUALIZATION_SCENES[name];
     if (!preset) return;
     visualizationSettings = name === "calm"
-        ? Object.assign({}, CALM_VISUALIZATION_DEFAULTS)
+        ? Object.assign({}, DEFAULT_VISUALIZATION_SETTINGS)
         : normalizeVisualizationSettings(Object.assign({}, visualizationSettings, preset));
     visualizationScene = name;
-    persistVisualizationSettings();
+    if (name === "calm") talkingCube.importProfile(DEFAULT_PROFILE);
     applyVisualizationLayers();
+    persistVisualizationSettings();
     syncVisualizationControls();
     talkingCube.pulse({ strength: 0.9, duration: 980 });
 });
@@ -375,6 +443,13 @@ cubePattern.addEventListener("change", function () {
 });
 cubeFormation.addEventListener("change", function () {
     storeVisualizationChange({ formation: cubeFormation.value });
+});
+cubePolygonSides.addEventListener("change", function () {
+    storeVisualizationChange({ polygonSides: Number(cubePolygonSides.value) });
+    talkingCube.pulse({ strength: 0.92, duration: 900 });
+});
+cubeRotationAxis.addEventListener("change", function () {
+    storeVisualizationChange({ rotationAxis: cubeRotationAxis.value });
 });
 cubeElementShape.addEventListener("change", function () {
     storeVisualizationChange({ elementShape: cubeElementShape.value });
@@ -426,13 +501,83 @@ cubePulse.addEventListener("click", function () {
     talkingCube.pulse({ strength: 1.25, duration: 1100 });
 });
 cubeReset.addEventListener("click", function () {
-    visualizationSettings = Object.assign({}, CALM_VISUALIZATION_DEFAULTS);
+    visualizationSettings = Object.assign({}, DEFAULT_VISUALIZATION_SETTINGS);
     visualizationScene = "calm";
-    persistVisualizationSettings();
+    talkingCube.importProfile(DEFAULT_PROFILE);
     applyVisualizationLayers();
+    persistVisualizationSettings();
     syncVisualizationControls();
-    talkingCube.resetCamera().pulse({ strength: 0.8, duration: 900 });
+    talkingCube.pulse({ strength: 0.8, duration: 900 });
 });
+
+var profileStatusTimer = 0;
+
+function showVisualizationProfileStatus(message, type) {
+    clearTimeout(profileStatusTimer);
+    cubeProfileStatus.textContent = message;
+    cubeProfileStatus.classList.toggle("success", type === "success");
+    cubeProfileStatus.classList.toggle("error", type === "error");
+    profileStatusTimer = window.setTimeout(function () {
+        cubeProfileStatus.textContent = "PROFILE V2";
+        cubeProfileStatus.classList.remove("success", "error");
+    }, 2800);
+}
+
+cubeExportProfile.addEventListener("click", function () {
+    var json = JSON.stringify(currentVisualizationProfile(), null, 2);
+    var blob = new Blob([json], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "voxels-profile-" + new Date().toISOString().slice(0, 10) + ".json";
+    link.click();
+    window.setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    showVisualizationProfileStatus("JSON SAVED", "success");
+});
+
+cubeImportProfile.addEventListener("click", function () {
+    cubeProfileFile.click();
+});
+
+cubeProfileFile.addEventListener("change", async function () {
+    var file = cubeProfileFile.files[0];
+    if (!file) return;
+    try {
+        var state = talkingCube.importProfile(await file.text());
+        visualizationSettings = normalizeVisualizationSettings(state.settings);
+        visualizationScene = "custom";
+        applyVisualizationLayers();
+        persistVisualizationSettings();
+        syncVisualizationControls();
+        talkingCube.pulse({ strength: 1.05, duration: 1000 });
+        showVisualizationProfileStatus("PROFILE LOADED", "success");
+    } catch (error) {
+        console.error(error);
+        showVisualizationProfileStatus("INVALID PROFILE", "error");
+    } finally {
+        cubeProfileFile.value = "";
+    }
+});
+
+var visualizationCameraDrag = false;
+var visualizationCameraPersistTimer = 0;
+
+function scheduleVisualizationCameraPersist() {
+    clearTimeout(visualizationCameraPersistTimer);
+    visualizationCameraPersistTimer = window.setTimeout(persistVisualizationSettings, 160);
+}
+
+talkingCubeCanvas.addEventListener("pointerdown", function () {
+    visualizationCameraDrag = true;
+});
+window.addEventListener("pointerup", function () {
+    if (!visualizationCameraDrag) return;
+    visualizationCameraDrag = false;
+    scheduleVisualizationCameraPersist();
+});
+talkingCubeCanvas.addEventListener("wheel", scheduleVisualizationCameraPersist);
+talkingCubeCanvas.addEventListener("dblclick", scheduleVisualizationCameraPersist);
+window.addEventListener("pagehide", persistVisualizationSettings);
 
 function startVisualizationMoment(options) {
     visualizationMomentVersion += 1;
