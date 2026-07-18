@@ -39,6 +39,7 @@ class AnthropicProvider:
     client: object | None = None
     provider: str = field(default="anthropic", init=False)
     api_key_env: str = field(default="ANTHROPIC_API_KEY", init=False)
+    _usage_totals: dict[str, float] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def provider_name(self) -> str:
@@ -91,12 +92,20 @@ class AnthropicProvider:
             "messages": messages,
         }
         response = self.ensure_client().messages.create(**request)
+        _merge_usage(self._usage_totals, _anthropic_usage(response))
         return _anthropic_plain_text(response), _anthropic_stop_reason(response)
 
     def _send(self, request: dict) -> tuple[str, str | None]:
         client = self.ensure_client()
         response = client.messages.create(**request)
+        _merge_usage(self._usage_totals, _anthropic_usage(response))
         return _anthropic_response_text(response), _anthropic_stop_reason(response)
+
+    def drain_usage(self) -> dict[str, float]:
+        """Return and clear usage accumulated across retries since last drain."""
+
+        usage, self._usage_totals = self._usage_totals, {}
+        return usage
 
     def ensure_client(self):
         """Construct the SDK client lazily when one was not injected."""
@@ -117,6 +126,7 @@ class OpenAICompatProvider:
     api_key_env: str
     _api_key: str = field(repr=False)
     timeout_s: float = 30.0
+    _usage_totals: dict[str, float] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def provider_name(self) -> str:
@@ -234,6 +244,10 @@ class OpenAICompatProvider:
 
         try:
             response_payload = json.loads(raw_response.decode("utf-8"))
+            _merge_usage(
+                self._usage_totals,
+                _openai_compat_usage(response_payload.get("usage")),
+            )
             choice = response_payload["choices"][0]
             content = choice["message"]["content"]
             finish_reason = choice.get("finish_reason")
@@ -257,6 +271,12 @@ class OpenAICompatProvider:
         if not isinstance(finish_reason, str):
             finish_reason = None
         return content, finish_reason
+
+    def drain_usage(self) -> dict[str, float]:
+        """Return and clear usage accumulated across retries since last drain."""
+
+        usage, self._usage_totals = self._usage_totals, {}
+        return usage
 
 
 _OPENAI_COMPAT_SPECS = {
@@ -365,6 +385,53 @@ def _anthropic_stop_reason(response) -> str | None:
     else:
         value = getattr(response, "stop_reason", None)
     return value if isinstance(value, str) else None
+
+
+def _anthropic_usage(response) -> dict[str, float]:
+    usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    cache_read = _usage_number(usage, "cache_read_input_tokens")
+    cache_write = _usage_number(usage, "cache_creation_input_tokens")
+    # Anthropic excludes cached tokens from input_tokens.  Normalizing prompt
+    # to the total lets the ledger split cached and uncached units consistently
+    # with nano-claw's TypeScript provider debug shape.
+    return {
+        "prompt": _usage_number(usage, "input_tokens") + cache_read + cache_write,
+        "completion": _usage_number(usage, "output_tokens"),
+        "cacheRead": cache_read,
+        "cacheWrite": cache_write,
+    }
+
+
+def _openai_compat_usage(usage) -> dict[str, float]:
+    details = (
+        usage.get("prompt_tokens_details", {})
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_tokens_details", {})
+    )
+    cache_read = _usage_number(details, "cached_tokens")
+    return {
+        "prompt": _usage_number(usage, "prompt_tokens"),
+        "completion": _usage_number(usage, "completion_tokens"),
+        "cacheRead": cache_read,
+        "cacheWrite": 0.0,
+    }
+
+
+def _usage_number(container, name: str) -> float:
+    if isinstance(container, dict):
+        value = container.get(name)
+    else:
+        value = getattr(container, name, None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return 0.0
+
+
+def _merge_usage(total: dict[str, float], usage: dict[str, float]) -> None:
+    if not any(usage.values()):
+        return
+    for key, value in usage.items():
+        total[key] = total.get(key, 0.0) + value
 
 
 # Descriptive aliases keep the implementation names discoverable without

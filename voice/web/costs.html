@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice AI Cost Console</title>
+  <style>
+    :root {
+      --bg: #050606;
+      --panel: rgba(16, 18, 19, 0.82);
+      --panel-strong: rgba(20, 22, 23, 0.94);
+      --line: rgba(255, 255, 255, 0.085);
+      --line-strong: rgba(255, 255, 255, 0.14);
+      --text: #f1f4f3;
+      --muted: #969e9b;
+      --faint: #5e6663;
+      --accent: #ff775f;
+      --accent-rgb: 255, 119, 95;
+      --accent-2: #ffca5c;
+      --good: #52f5a8;
+      --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      padding-bottom: 6rem;
+      background-image: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(var(--accent-rgb), 0.08), transparent);
+    }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 1.5rem; }
+    header.top { padding: 3rem 0 2rem; border-bottom: 1px solid var(--line); }
+    .eyebrow {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.72rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 0.75rem;
+    }
+    .eyebrow .sep { color: var(--faint); }
+    h1 {
+      font-size: clamp(1.9rem, 4vw, 2.8rem);
+      margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+      text-wrap: balance;
+    }
+    .sub { color: var(--muted); max-width: 62ch; margin: 0; }
+    .mockup-chip {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: 0.3rem 0.7rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.7rem;
+      letter-spacing: 0.14em;
+      color: var(--accent-2);
+    }
+    .glass {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(26px) saturate(130%);
+      -webkit-backdrop-filter: blur(26px) saturate(130%);
+    }
+    .state {
+      display: none;
+      margin: 1.25rem 0 0;
+      padding: 0.8rem 1rem;
+      border: 1px solid rgba(var(--accent-rgb), 0.35);
+      border-radius: 10px;
+      color: var(--accent-2);
+      background: rgba(var(--accent-rgb), 0.07);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+    }
+    .state.show { display: block; }
+    .state.error { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.55); }
+    .totals {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr 1fr;
+      gap: 1rem;
+      margin: 2rem 0;
+    }
+    .total-card { padding: 1.4rem 1.5rem; }
+    .total-card .k {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .total-card .v {
+      font-size: 2.2rem;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+    .total-card .v small { font-size: 1rem; color: var(--muted); font-weight: 400; }
+    .total-card.primary {
+      border-color: rgba(var(--accent-rgb), 0.45);
+      box-shadow: 0 0 40px rgba(var(--accent-rgb), 0.07) inset;
+    }
+    .total-card.primary .v { color: var(--accent); }
+    .total-card .d { color: var(--faint); font-size: 0.8rem; margin-top: 0.2rem; }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      margin: 0 0 2.5rem;
+    }
+    .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; }
+    .seg button {
+      background: transparent;
+      color: var(--muted);
+      border: 0;
+      padding: 0.55rem 1.1rem;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s var(--ease);
+    }
+    .seg button.on { background: rgba(var(--accent-rgb), 0.16); color: var(--accent); }
+    .ctl-label {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    select#sched-model {
+      background: var(--panel-strong);
+      color: var(--text);
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      padding: 0.5rem 0.7rem;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.78rem;
+    }
+    section { margin: 3rem 0; }
+    h2 { font-size: 1.15rem; letter-spacing: 0.01em; margin: 0 0 0.25rem; }
+    .h2row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 0.7rem;
+      margin-bottom: 1.2rem;
+    }
+    .h2row .note {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.16em;
+      color: var(--faint);
+      text-transform: uppercase;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th {
+      text-align: left;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-weight: 500;
+      font-size: 0.66rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--line-strong);
+    }
+    td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+    th.num, td.num { text-align: right; }
+    .tscroll { overflow-x: auto; }
+    tr.model-row { cursor: pointer; transition: background 0.15s var(--ease); }
+    tr.model-row:hover { background: rgba(255, 255, 255, 0.03); }
+    tr.model-row.sel { background: rgba(var(--accent-rgb), 0.09); }
+    tr.model-row.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+    .score-good { color: var(--good); }
+    .provider { color: var(--faint); font-size: 0.78rem; }
+    .empty-row { color: var(--faint); text-align: center; padding: 1.3rem; }
+    .stack {
+      display: flex;
+      height: 46px;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      margin: 1rem 0 0.5rem;
+    }
+    .stack div { min-width: 2px; transition: width 0.4s var(--ease); }
+    .legend { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; margin: 0.8rem 0 1.4rem; font-size: 0.8rem; color: var(--muted); }
+    .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 0.45rem; }
+    details.drill { border: 1px solid var(--line); border-radius: 10px; margin: 0.5rem 0; background: var(--panel); }
+    details.drill summary {
+      cursor: pointer;
+      padding: 0.75rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      font-size: 0.88rem;
+      list-style: none;
+    }
+    details.drill summary::-webkit-details-marker { display: none; }
+    details.drill summary::after { content: "+"; color: var(--faint); font-family: monospace; }
+    details.drill[open] summary::after { content: "–"; }
+    details.drill .body { padding: 0 1rem 1rem; color: var(--muted); font-size: 0.84rem; }
+    details.drill .math {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.78rem;
+      color: var(--text);
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      padding: 0.7rem 0.9rem;
+      margin-top: 0.5rem;
+      overflow-x: auto;
+    }
+    .cost-amt { font-variant-numeric: tabular-nums; color: var(--text); }
+    .biz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+    .biz { padding: 1.2rem 1.3rem; }
+    .biz h3 { margin: 0; font-size: 1rem; }
+    .biz .line {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.72rem;
+      color: var(--accent-2);
+      letter-spacing: 0.06em;
+      margin: 0.15rem 0 0.9rem;
+    }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.6rem 1rem; margin-bottom: 0.9rem; }
+    .stat .k {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.6rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .stat .v { font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .v small { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+    .biz .cost-line {
+      border-top: 1px solid var(--line);
+      padding-top: 0.8rem;
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .biz .cost-line strong { color: var(--accent); font-variant-numeric: tabular-nums; }
+    .biz table { font-size: 0.8rem; margin-top: 0.6rem; }
+    .biz td, .biz th { padding: 0.35rem 0.5rem; }
+    .spec { padding: 1.4rem 1.5rem; color: var(--muted); font-size: 0.9rem; }
+    .spec h3 { color: var(--text); font-size: 0.95rem; margin: 1.1rem 0 0.4rem; }
+    .spec h3:first-child { margin-top: 0; }
+    .spec code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.8rem;
+      color: var(--accent-2);
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.1rem 0.35rem;
+      border-radius: 5px;
+    }
+    .foot { color: var(--faint); font-size: 0.78rem; margin-top: 3rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+    @media (max-width: 820px) {
+      .totals { grid-template-columns: 1fr; }
+      .stat-grid { grid-template-columns: 1fr 1fr; }
+      .h2row { align-items: flex-start; gap: 0.75rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <p class="eyebrow">RIFF <span class="sep">×</span> NANO-CLAW <span class="sep">·</span> COST INTELLIGENCE</p>
+      <h1>Know what every minute of voice AI costs.</h1>
+      <p class="sub">One console that prices the whole stack — telephony, speech, and every model in the fleet —
+        then breaks it down by business, flow, and customer, so “should we switch supervisors?” is a
+        click, not a spreadsheet.</p>
+      <span class="mockup-chip" id="pricing-chip">LIVE LEDGER · LOADING PRICING</span>
+      <div class="state show" id="state-banner" role="status">Loading cost ledger…</div>
+    </header>
+
+    <div class="totals">
+      <div class="total-card glass primary">
+        <div class="k">Total monthly · all businesses</div>
+        <div class="v" id="grand-total">$—</div>
+        <div class="d" id="grand-detail">—</div>
+      </div>
+      <div class="total-card glass">
+        <div class="k">Cost per call</div>
+        <div class="v" id="per-call">$—</div>
+        <div class="d" id="per-call-detail">awaiting usage</div>
+      </div>
+      <div class="total-card glass">
+        <div class="k">Cost per booking</div>
+        <div class="v" id="per-booking">$—</div>
+        <div class="d">bookings ÷ spend, scheduler lines</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <span class="ctl-label">Scenario</span>
+      <span class="seg" id="scenario-seg">
+        <button type="button" data-s="real" class="on">Realistic · 13.9% duty</button>
+        <button type="button" data-s="full">24 × 7 × 30</button>
+      </span>
+      <span class="ctl-label">Scheduler model</span>
+      <select id="sched-model" aria-label="Scheduler model"></select>
+    </div>
+
+    <section id="fleet">
+      <div class="h2row">
+        <h2>The model fleet</h2>
+        <span class="note">CLICK A ROW TO PRICE THE WHOLE STACK WITH IT</span>
+      </div>
+      <div class="tscroll glass" style="padding: 0.3rem 0.5rem;">
+        <table id="fleet-table">
+          <thead>
+            <tr>
+              <th>Supervisor model</th><th>Provider</th>
+              <th class="num">$/1M in</th><th class="num">$/1M out</th>
+              <th class="num">Latency p50</th><th>Eval (11-case)</th>
+              <th class="num">Monthly <span id="fleet-scenario-label">realistic</span></th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="7" class="empty-row">Loading model pricing…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="components">
+      <div class="h2row">
+        <h2>Where a dollar goes</h2>
+        <span class="note">PER-MINUTE COMPONENT COSTS · DRILL INTO THE MATH</span>
+      </div>
+      <div class="stack" id="stack-bar"></div>
+      <div class="legend" id="stack-legend"></div>
+      <div id="component-drills"></div>
+    </section>
+
+    <section id="businesses">
+      <div class="h2row">
+        <h2>By business</h2>
+        <span class="note">USAGE · CUSTOMERS · PER-FLOW BREAKDOWN</span>
+      </div>
+      <div class="biz-grid" id="biz-grid"></div>
+    </section>
+
+    <section id="plumbing">
+      <div class="h2row">
+        <h2>Where the live numbers come from</h2>
+        <span class="note">AUDITABLE USAGE · VERSIONED RATES</span>
+      </div>
+      <div class="spec glass">
+        <h3>1 · Cost ledger</h3>
+        <p>Each completed call writes raw units to <code>cost_ledger</code>: connected minutes, STT audio-seconds,
+          provider token receipts, TTS characters, and infrastructure minutes. A ledger failure never interrupts a call.</p>
+        <h3>2 · Versioned pricing</h3>
+        <p><code>voice/pricing.json</code> records model input/output/cache rates, telephony rates, and an as-of date.
+          Call rows preserve the rate snapshot used for their auditable historical total.</p>
+        <h3>3 · Privacy-safe aggregation</h3>
+        <p><code>/api/costs</code> joins completed-call metadata for business, flow, duration, and customer frequency.
+          Caller numbers are HMAC-hashed before leaving the server and are never returned by this endpoint.</p>
+        <h3>4 · Client-side what-if arithmetic</h3>
+        <p>The scenario toggle and supervisor selector re-price this page without mutating the ledger, making
+          realistic-load and 24×7 comparisons immediate.</p>
+      </div>
+    </section>
+
+    <p class="foot">Rates are versioned in <span class="mono">voice/pricing.json</span>. Realistic duty and model
+      scenarios come from the scheduler-model-costs rate source; observed call usage comes only from the local metrics DB.</p>
+  </div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    let DATA = null;
+    let MODELS = [];
+    let COMPONENTS = [];
+    let BUSINESSES = [];
+    let DUTY = 1;
+    let DID_MONTH = 0;
+    let scenario = "real";
+    let schedId = "";
+
+    const $ = (selector) => document.querySelector(selector);
+    const finite = (value) => typeof value === "number" && Number.isFinite(value);
+    const fmt$ = (value, digits) => finite(value)
+      ? "$" + value.toLocaleString("en-US", {
+          minimumFractionDigits: digits === undefined ? 2 : digits,
+          maximumFractionDigits: digits === undefined ? 2 : digits,
+        })
+      : "$—";
+    const fmtNumber = (value, digits) => finite(value)
+      ? value.toLocaleString("en-US", { maximumFractionDigits: digits })
+      : "—";
+    const esc = (value) => String(value === null || value === undefined ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+    const color = (value) => /^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : "#969e9b";
+
+    function selectedModel() {
+      return MODELS.find((model) => model.id === schedId) || MODELS[0] || null;
+    }
+
+    function modelMonthly(model) {
+      return scenario === "full" ? model.m24 : model.mreal;
+    }
+
+    function schedFactor() {
+      const selected = selectedModel();
+      const referenceId = DATA && DATA.referenceModel;
+      const reference = MODELS.find((model) => model.id === referenceId) || MODELS[0];
+      if (!selected || !reference) return 1;
+      const selectedMonthly = modelMonthly(selected);
+      const referenceMonthly = modelMonthly(reference);
+      return finite(selectedMonthly) && finite(referenceMonthly) && referenceMonthly > 0
+        ? selectedMonthly / referenceMonthly
+        : 1;
+    }
+
+    function componentPerMinute(component) {
+      const base = finite(component.perMin) ? component.perMin : 0;
+      if (component.id !== "sched") return base;
+      const model = selectedModel();
+      const totals = DATA && DATA.totals;
+      const units = component.units;
+      if (model && totals && finite(totals.minutes) && totals.minutes > 0 && units && typeof units === "object") {
+        const input = finite(units.input_tokens) ? units.input_tokens : 0;
+        const output = finite(units.output_tokens) ? units.output_tokens : 0;
+        const cacheRead = finite(units.cache_read_tokens) ? units.cache_read_tokens : 0;
+        const cacheWrite = finite(units.cache_write_tokens) ? units.cache_write_tokens : 0;
+        const cacheReadRate = finite(model.pcache) ? model.pcache : model.pin;
+        const cacheWriteRate = finite(model.pcacheWrite) ? model.pcacheWrite : model.pin;
+        return (
+          input * model.pin + output * model.pout +
+          cacheRead * cacheReadRate + cacheWrite * cacheWriteRate
+        ) / 1000000 / totals.minutes;
+      }
+      return base * schedFactor();
+    }
+
+    function perMinuteTotal() {
+      return COMPONENTS.reduce((sum, component) => sum + componentPerMinute(component), 0);
+    }
+
+    function businessMonthly(business) {
+      const observedMinutes = finite(business.totalMin) ? business.totalMin : 0;
+      const minutes = scenario === "full" && DUTY > 0 ? observedMinutes / DUTY : observedMinutes;
+      return minutes * perMinuteTotal() + (finite(business.dids) ? business.dids : 0) * DID_MONTH;
+    }
+
+    function scenarioSummary() {
+      let grand = 0;
+      let calls = 0;
+      let bookings = 0;
+      let bookingSpend = 0;
+      for (const business of BUSINESSES) {
+        const monthly = businessMonthly(business);
+        grand += monthly;
+        const observedCalls = finite(business.calls) ? business.calls : 0;
+        calls += scenario === "full" && DUTY > 0 ? observedCalls / DUTY : observedCalls;
+        if (business.bookings) {
+          bookings += business.bookings;
+          bookingSpend += monthly;
+        }
+      }
+      return { grand, calls, bookings, bookingSpend };
+    }
+
+    function renderFleet() {
+      const tbody = $("#fleet-table tbody");
+      tbody.innerHTML = "";
+      if (!MODELS.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Pricing unavailable</td></tr>';
+        $("#fleet-scenario-label").textContent = scenario === "full" ? "24×7" : "realistic";
+        return;
+      }
+      for (const model of MODELS) {
+        const row = document.createElement("tr");
+        row.className = "model-row" + (model.id === schedId ? " sel" : "");
+        const monthly = modelMonthly(model);
+        row.innerHTML =
+          `<td>${esc(model.name)}${model.zero ? ' <span class="score-good" title="never dropped a case">●</span>' : ""}</td>` +
+          `<td class="provider">${esc(model.provider)}</td>` +
+          `<td class="num">${fmt$(model.pin)}</td><td class="num">${fmt$(model.pout)}</td>` +
+          `<td class="num">${esc(model.lat)}</td><td>${esc(model.score)}</td>` +
+          `<td class="num"><strong>${fmt$(monthly)}</strong>/mo</td>`;
+        row.addEventListener("click", () => {
+          schedId = model.id;
+          $("#sched-model").value = model.id;
+          render();
+        });
+        tbody.appendChild(row);
+      }
+      $("#fleet-scenario-label").textContent = scenario === "full" ? "24×7" : "realistic";
+    }
+
+    function renderComponents() {
+      const bar = $("#stack-bar");
+      const legend = $("#stack-legend");
+      const drills = $("#component-drills");
+      bar.innerHTML = "";
+      legend.innerHTML = "";
+      drills.innerHTML = "";
+      if (!DATA || DATA.awaitingCallData) {
+        legend.textContent = "Component mix will appear after the first completed call.";
+        return;
+      }
+      const total = perMinuteTotal();
+      if (!(total > 0)) {
+        legend.textContent = "No priced component usage is available yet.";
+        return;
+      }
+      for (const component of COMPONENTS) {
+        const value = componentPerMinute(component);
+        const componentColor = color(component.color);
+        const segment = document.createElement("div");
+        segment.style.width = (100 * value / total).toFixed(2) + "%";
+        segment.style.background = componentColor;
+        segment.title = `${component.label}: ${fmt$(value, 4)}/min`;
+        bar.appendChild(segment);
+
+        const item = document.createElement("span");
+        item.innerHTML = `<span class="sw" style="background:${componentColor}"></span>${esc(component.label)} · ` +
+          `<span class="cost-amt">${fmt$(value, 4)}/min</span> (${(100 * value / total).toFixed(0)}%)`;
+        legend.appendChild(item);
+
+        const detail = document.createElement("details");
+        detail.className = "drill";
+        const selected = selectedModel();
+        const selectedMath = component.id === "sched" && selected
+          ? `<br>selected token rates: ${fmt$(selected.pin)}/M in · ${fmt$(selected.pout)}/M out (${esc(selected.name)})`
+          : "";
+        detail.innerHTML = `<summary><span>${esc(component.label)}</span><span class="cost-amt">${fmt$(value, 4)}/min</span></summary>` +
+          `<div class="body">How it’s computed:<div class="math">${esc(component.math)}${selectedMath}</div></div>`;
+        drills.appendChild(detail);
+      }
+    }
+
+    function renderBusinesses() {
+      const grid = $("#biz-grid");
+      grid.innerHTML = "";
+      if (!BUSINESSES.length) {
+        const empty = document.createElement("div");
+        empty.className = "biz glass";
+        empty.innerHTML = "<h3>Awaiting call data</h3><p class=\"line\">Complete a phone call to populate usage, customer, and flow statistics.</p>";
+        grid.appendChild(empty);
+        return;
+      }
+      for (const business of BUSINESSES) {
+        const monthly = businessMonthly(business);
+        const observedCalls = finite(business.calls) ? business.calls : 0;
+        const scaledCalls = scenario === "full" && DUTY > 0
+          ? Math.round(observedCalls / DUTY)
+          : observedCalls;
+        const card = document.createElement("div");
+        card.className = "biz glass";
+        const bookingCost = business.bookings ? ` · ${fmt$(monthly / business.bookings, 2)}/booking` : "";
+        const flows = Array.isArray(business.flows) ? business.flows : [];
+        const flowRows = flows.map((flow) => {
+          const flowCalls = scenario === "full" && DUTY > 0 ? Math.round(flow.calls / DUTY) : flow.calls;
+          const flowMinutes = scenario === "full" && DUTY > 0 ? flow.min / DUTY : flow.min;
+          return `<tr><td>${esc(flow.flow)}</td><td class="num">${fmtNumber(flowCalls, 0)}</td>` +
+            `<td class="num">${fmtNumber(flowMinutes, 1)}</td><td class="num">${fmt$(monthly * flow.share)}</td></tr>`;
+        }).join("");
+        card.innerHTML =
+          `<h3>${esc(business.name)}</h3><p class="line">${esc(business.line)}</p>` +
+          `<div class="stat-grid">` +
+          `<span class="stat"><span class="k">Calls / mo</span><span class="v">${fmtNumber(scaledCalls, 0)}</span></span>` +
+          `<span class="stat"><span class="k">Unique customers</span><span class="v">${fmtNumber(business.customers, 0)}</span></span>` +
+          `<span class="stat"><span class="k">Calls / customer</span><span class="v">${fmtNumber(business.callsPerCustomer, 1)}</span></span>` +
+          `<span class="stat"><span class="k">Min call</span><span class="v">${fmtNumber(business.minMin, 1)}<small> min</small></span></span>` +
+          `<span class="stat"><span class="k">Median</span><span class="v">${fmtNumber(business.medMin, 1)}<small> min</small></span></span>` +
+          `<span class="stat"><span class="k">Max</span><span class="v">${fmtNumber(business.maxMin, 1)}<small> min</small></span></span>` +
+          `</div>` +
+          `<div class="cost-line"><span>${scaledCalls ? fmt$(monthly / scaledCalls, 3) : "$—"}/call${bookingCost}</span>` +
+          `<strong>${fmt$(monthly)}/mo</strong></div>` +
+          `<details class="drill" style="margin-top:0.8rem"><summary><span>Per-flow breakdown</span></summary>` +
+          `<div class="body"><table><thead><tr><th>Flow</th><th class="num">Calls</th><th class="num">Minutes</th>` +
+          `<th class="num">Cost</th></tr></thead><tbody>${flowRows}</tbody></table></div></details>`;
+        grid.appendChild(card);
+      }
+    }
+
+    function renderTotals() {
+      const summary = scenarioSummary();
+      const model = selectedModel();
+      if (!DATA || DATA.awaitingCallData || !BUSINESSES.length) {
+        $("#grand-total").textContent = "$—";
+        $("#grand-detail").textContent = "awaiting call data · model pricing is ready";
+        $("#per-call").textContent = "$—";
+        $("#per-booking").textContent = "$—";
+        $("#per-call-detail").textContent = "awaiting usage";
+        return;
+      }
+      $("#grand-total").innerHTML = fmt$(summary.grand) + "<small>/mo</small>";
+      $("#grand-detail").textContent =
+        (scenario === "full" ? "24×7×30 extrapolation" : "realistic business-hours load") +
+        ` · scheduler: ${model ? model.name : "pricing unavailable"}`;
+      $("#per-call").textContent = summary.calls ? fmt$(summary.grand / summary.calls, 3) : "$—";
+      $("#per-booking").textContent = summary.bookings ? fmt$(summary.bookingSpend / summary.bookings, 2) : "$—";
+      const totals = DATA.totals || {};
+      const avgMinutes = totals.calls ? totals.minutes / totals.calls : null;
+      $("#per-call-detail").textContent = finite(avgMinutes)
+        ? `avg ${avgMinutes.toFixed(1)} min · all lines`
+        : "all lines";
+    }
+
+    function render() {
+      renderFleet();
+      renderComponents();
+      renderBusinesses();
+      renderTotals();
+    }
+
+    function populateModelSelect() {
+      const select = $("#sched-model");
+      select.innerHTML = "";
+      for (const model of MODELS) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.name;
+        select.appendChild(option);
+      }
+      schedId = MODELS.some((model) => model.id === (DATA && DATA.referenceModel))
+        ? DATA.referenceModel
+        : MODELS.length ? MODELS[0].id : "";
+      select.value = schedId;
+      select.disabled = !MODELS.length;
+    }
+
+    function showState(message, isError) {
+      const banner = $("#state-banner");
+      banner.textContent = message || "";
+      banner.classList.toggle("show", Boolean(message));
+      banner.classList.toggle("error", Boolean(isError));
+    }
+
+    async function load() {
+      try {
+        const response = await fetch("/api/costs", { headers: { "Accept": "application/json" } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        DATA = await response.json();
+        MODELS = Array.isArray(DATA.models) ? DATA.models : [];
+        COMPONENTS = Array.isArray(DATA.components) ? DATA.components : [];
+        BUSINESSES = Array.isArray(DATA.businesses) ? DATA.businesses : [];
+        DUTY = finite(DATA.duty) && DATA.duty > 0 ? DATA.duty : 1;
+        DID_MONTH = DATA.pricing && finite(DATA.pricing.didMonth) ? DATA.pricing.didMonth : 0;
+        populateModelSelect();
+        if (!DATA.pricing || !DATA.pricing.available) {
+          $("#pricing-chip").textContent = "LIVE LEDGER · PRICING UNAVAILABLE";
+          showState("Pricing unavailable. Check voice/pricing.json; the call path is unaffected.", true);
+        } else {
+          $("#pricing-chip").textContent = `LIVE LEDGER · PRICING AS OF ${DATA.pricing.asOf}`;
+          showState(DATA.awaitingCallData ? "Awaiting call data · model fleet pricing is ready." : "", false);
+        }
+        render();
+      } catch (error) {
+        DATA = { awaitingCallData: true, totals: {}, referenceModel: null };
+        MODELS = [];
+        COMPONENTS = [];
+        BUSINESSES = [];
+        populateModelSelect();
+        $("#pricing-chip").textContent = "LIVE LEDGER · API UNAVAILABLE";
+        showState(`Cost API unavailable: ${error.message}`, true);
+        render();
+      }
+    }
+
+    $("#sched-model").addEventListener("change", (event) => {
+      schedId = event.target.value;
+      render();
+    });
+    $("#scenario-seg").addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      scenario = button.dataset.s;
+      for (const candidate of $("#scenario-seg").children) {
+        candidate.classList.toggle("on", candidate === button);
+      }
+      render();
+    });
+
+    load();
+  })();
+  </script>
+</body>
+</html>

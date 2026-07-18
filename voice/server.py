@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import httpx
 from aiohttp import web
 
-from voice import metrics_db
+from voice import cost_ledger, metrics_db
 from voice import voice_catalog
 from voice.flow_session import (
     FLOW_MODES,
@@ -67,6 +67,12 @@ _NO_CACHE = {"Cache-Control": "no-cache"}
 
 async def index_handler(request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
+
+
+async def costs_page_handler(request: web.Request) -> web.FileResponse:
+    """Serve the live cost console separately from the voice-control UI."""
+
+    return web.FileResponse(STATIC_DIR / "costs.html", headers=_NO_CACHE)
 
 
 async def static_handler(request: web.Request) -> web.FileResponse:
@@ -711,6 +717,12 @@ async def metrics_handler(request: web.Request) -> web.Response:
     })
 
 
+async def costs_handler(request: web.Request) -> web.Response:
+    """Return the privacy-safe cost ledger aggregation used by ``/costs``."""
+
+    return web.json_response(cost_ledger.build_report(METRICS))
+
+
 def _flow_api_payload() -> dict:
     return {
         "active": get_flow_mode(),
@@ -785,19 +797,31 @@ async def preview_handler(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
-    from voice.phone import register_phone_routes
+    from voice import phone
+
     app = web.Application()
+    cost_ledger.ensure_schema(METRICS)
     app.router.add_get("/", index_handler)
+    app.router.add_get("/costs", costs_page_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/voices", voices_handler)
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
     app.router.add_get("/api/metrics", metrics_handler)
+    app.router.add_get("/api/costs", costs_handler)
     app.router.add_get("/api/voice/flow", flow_get_handler)
     app.router.add_post("/api/voice/flow", flow_set_handler)
     app.router.add_get("/api/voice/region-model", region_model_get_handler)
     app.router.add_post("/api/voice/region-model", region_model_set_handler)
-    register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
+    phone.register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
+    # The gateway now lives in voice.phone (the original design predates that
+    # split).  Install a runtime adapter so call-end receipts remain isolated
+    # in the portable cost_ledger module and the phone hot path stays untouched.
+    cost_ledger.install_phone_tracking(
+        phone,
+        lambda: getattr(phone, "_metrics_conn", None) or METRICS,
+    )
+    cost_ledger.ensure_schema(getattr(phone, "_metrics_conn", None))
     app.router.add_get("/{filename}", static_handler)
     return app
 
