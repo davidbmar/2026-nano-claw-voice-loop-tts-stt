@@ -4,8 +4,9 @@ Nano-claw keeps authentication and conversation history in a dedicated SQLite
 database. `NANO_CLAW_AUTH_DB` selects the file and defaults to
 `/app/data/auth-history.db`; it must never point at `metrics.db`.
 
-This layer has no HTTP routes, Google integration, or browser UI. It is the
-storage and policy boundary those layers use later.
+The same database backs the owner-scoped conversation-history API. Google
+sign-in and HTTP adaptation remain separate from the portable session policy;
+there is no history UI until the console layer consumes this API.
 
 ## Tenant and store contract
 
@@ -53,10 +54,18 @@ transactional migrations; schema version 1 creates:
   turn_count)`
 - `conversation_turns(conversation_id, seq, role, text, ts)`
 
+Schema version 2 adds the non-null `conversations.history_incomplete` marker.
+It is returned by the API when a best-effort turn write failed, so a stored
+transcript is never presented as complete when the server knows it is not.
+
 Membership, session, and conversation ownership is protected by foreign keys.
 Deleting a user cascades through memberships, sessions, conversations, and
-conversation turns; deleting a conversation cascades its turns. The history
-tables are created here but are populated by the history task.
+conversation turns; deleting a conversation cascades its turns. The concrete
+SQLite store owns history operations in addition to the portable auth
+protocol. Every history read or mutation takes the trusted tenant and subject
+explicitly and includes both in its owner-filtered SQL statement. A
+conversation id supplied in a URL is only an additional selector; it never
+establishes ownership.
 
 Each operation opens a short-lived connection with `foreign_keys=ON`, WAL
 journaling, a bounded `busy_timeout`, and strict error propagation. There is an
@@ -218,6 +227,101 @@ plus the declared GIS script, frame, style, and connection endpoints. It does
 not permit a Google profile-image origin. They also carry
 `Referrer-Policy: strict-origin-when-cross-origin` and
 `X-Content-Type-Options: nosniff`.
+
+## Conversation capture contract
+
+History is identity-bound at WebSocket upgrade. A socket with no valid signed-in
+identity remains fully ephemeral and performs no conversation or turn writes.
+For a signed-in socket, the server creates a `conversations` row only when the
+first final user transcription is accepted. The server-generated WebSocket
+conversation id is the row id; neither it, the tenant, nor the subject is read
+from a browser message. The first utterance is also sequence 0. Its title
+collapses all whitespace to single spaces and is truncated to 200 characters.
+Turn text is limited to 100,000 characters; a larger voice or typed message is
+rejected before an agent request and the socket receives `message_too_long`.
+
+Every later sequence number is allocated under `BEGIN IMMEDIATE`. Updating
+`turn_count` and inserting `(conversation_id, seq)` share the same transaction,
+so an insert failure rolls back the counter and concurrent completions cannot
+reuse a sequence. `ended_at` is the timestamp of the latest successfully saved
+turn.
+
+Completion has an intentionally narrow meaning:
+
+- A user turn is complete at final speech transcription or acceptance of a
+  nonempty typed message. It remains stored even if no agent turn follows.
+- Streaming deltas are buffered only in memory. A terminal
+  `agent_reply_done`/`final` saves one agent turn. Deltas before one or more tool
+  approval pauses remain buffered and are joined with the eventual terminal
+  segment using a blank line; a pause by itself is not a completed turn.
+- A scheduler reply and a non-stream `final` response are complete once the
+  full reply has been sent to the browser. Audio playback may finish later. A
+  scheduler's one-time greeting and first reply are one stored agent turn.
+- Backend/error status text is not an agent turn. A streaming error, an
+  upstream stream ending without `final`, a committed barge-in before a
+  streaming final, or a disconnect discards buffered agent fragments. The
+  corresponding completed user turn is retained.
+
+Transcript writes are best-effort with explicit visibility. A failure does not
+break the live voice reply, but the socket receives one `history_write_failed`
+notice. If the conversation row exists, the store separately marks
+`history_incomplete=1`; the list and detail APIs expose this as
+`incomplete:true`. The process also retains an in-memory marker so a temporary
+failure of both writes remains visible after storage recovers during that
+process lifetime.
+
+Signed-in Node agent memory uses the same conversation id and is retained after
+socket disconnect for deletion with its saved history. Anonymous memory, and
+signed-in memory whose initial history row could not be created, is deleted on
+disconnect.
+
+## Conversation-history API
+
+All history responses, including errors, are `Cache-Control: no-store` and have
+no CORS allowance. The session cookie is resolved for every request; a missing,
+expired, or revoked session returns HTTP 401 and an operational auth/history
+store failure returns HTTP 503. As defined by the shared request-security
+middleware, both `DELETE` operations additionally require the exact same
+`Origin`, `Sec-Fetch-Site: same-origin`, and `X-NC-Auth: 1` mutation guard used
+by logout.
+
+- `GET /api/conversations?limit=&cursor=` returns
+  `{"conversations":[...],"nextCursor":...}` in descending
+  `(started_at,id)` order. The default page is 20 and the hard maximum is 50.
+  Each item contains `id`, `title`, UTC `startedAt`/`endedAt`, `turnCount`, and
+  `incomplete`.
+- `GET /api/conversations/{id}?limit=&cursor=` returns
+  `{"conversation":...,"turns":[...],"nextCursor":...}`. Turns are ascending
+  by immutable sequence; the default page is 50 and the hard maximum is 100.
+  A turn contains `seq`, `role`, bounded `text`, and UTC `ts`.
+- Invalid, oversized, cross-endpoint, or conversation-mismatched cursors and
+  page sizes outside the hard bounds return HTTP 400. Cursors are positions,
+  not authorization credentials. Keyset ordering keeps subsequent pages stable
+  when newer conversations or later turns are inserted.
+- Reading or deleting another owner or tenant's id returns the same HTTP 404 as
+  a nonexistent id. The implementation never performs an unscoped existence
+  lookup, so the route is not an existence oracle.
+
+## History deletion and periodic expiry
+
+`DELETE /api/conversations/{id}` first tombstones and closes a matching active
+owner socket, then executes one owner-filtered cascading delete and asks the
+Node service to remove that id's memory file. The tombstone prevents a task
+already being cancelled from appending after deletion. `DELETE
+/api/conversations` blocks new captures for that owner, closes all of the
+owner's active sockets, and deletes all owned rows in one transaction; foreign
+keys cascade every associated turn. It then removes every returned Node memory
+file. Other users and tenants are untouched. Node deletion is best-effort at
+request time, with the existing bounded orphan-memory sweep as the fallback if
+the Node service is temporarily unavailable.
+
+Application startup also installs a 60-second background cadence. Each pass
+calls `AuthStore.sweep(now)` to remove sessions past the absolute or idle
+deadline, then calls `AiohttpAuthAdapter.close_expired_sockets(now)`. Performing
+both prevents expired rows from accumulating and closes a socket at absolute
+expiry without waiting for its 24-hour idle watcher. Failures are logged and a
+later cadence retries; application cleanup cancels the task before closing the
+adapter.
 
 ## Deployment boundary
 

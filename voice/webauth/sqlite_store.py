@@ -17,7 +17,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Literal
 
 from .policy import SessionPolicy, normalize_datetime
 from .store import ResolvedSession
@@ -25,7 +25,7 @@ from .store import ResolvedSession
 DEFAULT_AUTH_DB_PATH = "/app/data/auth-history.db"
 DEFAULT_TENANT_ID = "nano-claw"
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_TOKEN_GENERATION_ATTEMPTS = 16
 
 MAX_SUB_LENGTH = 255
@@ -34,6 +34,11 @@ MAX_NAME_LENGTH = 256
 MAX_TENANT_LENGTH = 255
 MAX_TITLE_LENGTH = 200
 MAX_TURN_TEXT_LENGTH = 100_000
+MAX_CONVERSATION_ID_LENGTH = 128
+MAX_CONVERSATION_PAGE_SIZE = 50
+MAX_TURN_PAGE_SIZE = 100
+
+TurnRole = Literal["user", "agent"]
 
 
 class UnsupportedSchemaVersion(RuntimeError):
@@ -46,6 +51,10 @@ class MembershipNotFound(LookupError):
 
 class SessionTokenCollision(RuntimeError):
     """Raised if the injected RNG repeatedly generates an existing bearer."""
+
+
+class ConversationNotFound(LookupError):
+    """Raised when an owner-scoped conversation mutation finds no row."""
 
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -131,7 +140,14 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         """
         INSERT INTO tenants(id, name) VALUES('nano-claw', 'nano-claw')
         """,
-    )
+    ),
+    2: (
+        """
+        ALTER TABLE conversations
+          ADD COLUMN history_incomplete INTEGER NOT NULL DEFAULT 0
+            CHECK(history_incomplete IN (0, 1))
+        """,
+    ),
 }
 
 
@@ -153,6 +169,49 @@ def _validate_optional_text(
     if len(value) > maximum:
         raise ValueError(f"{field} must contain at most {maximum} characters")
     return value
+
+
+def _validate_conversation_id(value: str) -> str:
+    return _validate_required_text(
+        value, "conversation_id", MAX_CONVERSATION_ID_LENGTH
+    )
+
+
+def _validate_turn_role(value: str) -> TurnRole:
+    if value not in ("user", "agent"):
+        raise ValueError("role must be 'user' or 'agent'")
+    return value
+
+
+def _validate_turn_text(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("text must be a string")
+    if len(value) > MAX_TURN_TEXT_LENGTH:
+        raise ValueError(
+            f"text must contain at most {MAX_TURN_TEXT_LENGTH} characters"
+        )
+    return value
+
+
+def normalize_conversation_title(text: str) -> str:
+    """Collapse whitespace and bound the first utterance used as a title."""
+
+    value = _validate_turn_text(text)
+    normalized = " ".join(value.split())
+    return normalized[:MAX_TITLE_LENGTH]
+
+
+def _validate_query_limit(value: int, *, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("limit must be an integer")
+    # Callers request one extra row to determine whether a next page exists.
+    if value < 1 or value > maximum + 1:
+        raise ValueError(f"limit must be between 1 and {maximum + 1}")
+    return value
+
+
+def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
 
 
 def _timestamp(value: datetime) -> float:
@@ -554,6 +613,305 @@ class SQLiteAuthStore:
                 (current, idle_cutoff),
             )
             return max(cursor.rowcount, 0)
+
+    @staticmethod
+    def _history_owner(tenant: str, user_sub: str) -> tuple[str, str]:
+        tenant_id = _validate_required_text(
+            tenant, "tenant", MAX_TENANT_LENGTH
+        )
+        subject = _validate_required_text(
+            user_sub, "user_sub", MAX_SUB_LENGTH
+        )
+        return tenant_id, subject
+
+    @staticmethod
+    def _append_turn_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        conversation_id: str,
+        tenant_id: str,
+        subject: str,
+        role: TurnRole,
+        text: str,
+        timestamp: float,
+    ) -> int:
+        """Allocate and insert one sequence number in the current transaction."""
+
+        updated = connection.execute(
+            """
+            UPDATE conversations
+            SET turn_count=turn_count + 1, ended_at=?
+            WHERE id=? AND tenant_id=? AND user_sub=?
+            RETURNING turn_count
+            """,
+            (timestamp, conversation_id, tenant_id, subject),
+        ).fetchone()
+        if updated is None:
+            raise ConversationNotFound(conversation_id)
+        sequence = int(updated["turn_count"]) - 1
+        inserted = connection.execute(
+            """
+            INSERT INTO conversation_turns(conversation_id, seq, role, text, ts)
+            SELECT id, ?, ?, ?, ?
+            FROM conversations
+            WHERE id=? AND tenant_id=? AND user_sub=?
+            """,
+            (
+                sequence,
+                role,
+                text,
+                timestamp,
+                conversation_id,
+                tenant_id,
+                subject,
+            ),
+        )
+        if inserted.rowcount != 1:
+            raise ConversationNotFound(conversation_id)
+        return sequence
+
+    def open_conversation(
+        self,
+        conversation_id: str,
+        tenant: str,
+        user_sub: str,
+        first_utterance: str,
+        now: datetime,
+    ) -> int:
+        """Create an owned conversation and its first user turn atomically."""
+
+        identifier = _validate_conversation_id(conversation_id)
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        text = _validate_turn_text(first_utterance)
+        if not text.strip():
+            raise ValueError("first_utterance must not be blank")
+        timestamp = _timestamp(now)
+        title = normalize_conversation_title(text)
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversations(
+                  id, tenant_id, user_sub, started_at, ended_at, title,
+                  turn_count, history_incomplete
+                ) VALUES(?, ?, ?, ?, NULL, ?, 0, 0)
+                """,
+                (identifier, tenant_id, subject, timestamp, title),
+            )
+            return self._append_turn_in_transaction(
+                connection,
+                conversation_id=identifier,
+                tenant_id=tenant_id,
+                subject=subject,
+                role="user",
+                text=text,
+                timestamp=timestamp,
+            )
+
+    def append_conversation_turn(
+        self,
+        conversation_id: str,
+        tenant: str,
+        user_sub: str,
+        role: str,
+        text: str,
+        now: datetime,
+    ) -> int:
+        """Append one owned turn with an atomic counter/sequence allocation."""
+
+        identifier = _validate_conversation_id(conversation_id)
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        turn_role = _validate_turn_role(role)
+        bounded_text = _validate_turn_text(text)
+        timestamp = _timestamp(now)
+        with self._write_transaction() as connection:
+            return self._append_turn_in_transaction(
+                connection,
+                conversation_id=identifier,
+                tenant_id=tenant_id,
+                subject=subject,
+                role=turn_role,
+                text=bounded_text,
+                timestamp=timestamp,
+            )
+
+    def mark_conversation_incomplete(
+        self, conversation_id: str, tenant: str, user_sub: str
+    ) -> bool:
+        """Persist that at least one best-effort history write was lost."""
+
+        identifier = _validate_conversation_id(conversation_id)
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        with self._write_transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE conversations SET history_incomplete=1
+                WHERE id=? AND tenant_id=? AND user_sub=?
+                """,
+                (identifier, tenant_id, subject),
+            )
+            return cursor.rowcount == 1
+
+    def list_conversations(
+        self,
+        tenant: str,
+        user_sub: str,
+        *,
+        limit: int,
+        before_started_at: float | None = None,
+        before_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return one stable, descending owner-scoped conversation page."""
+
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        page_limit = _validate_query_limit(
+            limit, maximum=MAX_CONVERSATION_PAGE_SIZE
+        )
+        if (before_started_at is None) != (before_id is None):
+            raise ValueError("both conversation cursor fields are required")
+        if before_started_at is not None:
+            if (
+                isinstance(before_started_at, bool)
+                or not isinstance(before_started_at, (int, float))
+                or not math.isfinite(float(before_started_at))
+            ):
+                raise ValueError("before_started_at must be finite")
+            cursor_timestamp: float | None = float(before_started_at)
+            cursor_id = _validate_conversation_id(before_id)
+        else:
+            cursor_timestamp = None
+            cursor_id = None
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, started_at, ended_at, title, turn_count,
+                       history_incomplete
+                FROM conversations
+                WHERE tenant_id=? AND user_sub=?
+                  AND (
+                    ? IS NULL
+                    OR started_at < ?
+                    OR (started_at = ? AND id < ?)
+                  )
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    tenant_id,
+                    subject,
+                    cursor_timestamp,
+                    cursor_timestamp,
+                    cursor_timestamp,
+                    cursor_id,
+                    page_limit,
+                ),
+            ).fetchall()
+        return [_row_dict(row) for row in rows]
+
+    def get_conversation_page(
+        self,
+        conversation_id: str,
+        tenant: str,
+        user_sub: str,
+        *,
+        limit: int,
+        after_seq: int = -1,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        """Fetch owned metadata and a turn page with one filtered statement."""
+
+        identifier = _validate_conversation_id(conversation_id)
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        page_limit = _validate_query_limit(limit, maximum=MAX_TURN_PAGE_SIZE)
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int):
+            raise TypeError("after_seq must be an integer")
+        if after_seq < -1:
+            raise ValueError("after_seq must be at least -1")
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                WITH owned AS (
+                  SELECT id, started_at, ended_at, title, turn_count,
+                         history_incomplete
+                  FROM conversations
+                  WHERE id=? AND tenant_id=? AND user_sub=?
+                )
+                SELECT owned.id, owned.started_at, owned.ended_at, owned.title,
+                       owned.turn_count, owned.history_incomplete,
+                       conversation_turns.seq, conversation_turns.role,
+                       conversation_turns.text, conversation_turns.ts
+                FROM owned
+                LEFT JOIN conversation_turns
+                  ON conversation_turns.conversation_id=owned.id
+                 AND conversation_turns.seq > ?
+                ORDER BY conversation_turns.seq ASC
+                LIMIT ?
+                """,
+                (
+                    identifier,
+                    tenant_id,
+                    subject,
+                    after_seq,
+                    page_limit,
+                ),
+            ).fetchall()
+        if not rows:
+            return None
+        first = rows[0]
+        conversation = {
+            "id": first["id"],
+            "started_at": first["started_at"],
+            "ended_at": first["ended_at"],
+            "title": first["title"],
+            "turn_count": first["turn_count"],
+            "history_incomplete": first["history_incomplete"],
+        }
+        turns = [
+            {
+                "seq": row["seq"],
+                "role": row["role"],
+                "text": row["text"],
+                "ts": row["ts"],
+            }
+            for row in rows
+            if row["seq"] is not None
+        ]
+        return conversation, turns
+
+    def delete_conversation(
+        self, conversation_id: str, tenant: str, user_sub: str
+    ) -> bool:
+        """Delete one owner-scoped conversation and cascade all of its turns."""
+
+        identifier = _validate_conversation_id(conversation_id)
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                """
+                DELETE FROM conversations
+                WHERE id=? AND tenant_id=? AND user_sub=?
+                RETURNING id
+                """,
+                (identifier, tenant_id, subject),
+            ).fetchone()
+            return row is not None
+
+    def delete_all_conversations(
+        self, tenant: str, user_sub: str
+    ) -> list[str]:
+        """Delete all owner-scoped conversations in one cascading transaction."""
+
+        tenant_id, subject = self._history_owner(tenant, user_sub)
+        with self._write_transaction() as connection:
+            rows = connection.execute(
+                """
+                DELETE FROM conversations
+                WHERE tenant_id=? AND user_sub=?
+                RETURNING id
+                """,
+                (tenant_id, subject),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def backup(self, destination_path: str | os.PathLike[str]) -> Path:
         """Create a checked online backup of this auth/history database."""
