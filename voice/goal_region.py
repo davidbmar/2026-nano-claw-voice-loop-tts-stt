@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections.abc import Callable
@@ -11,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as wall_time, timedelta
 from zoneinfo import ZoneInfo
 
-import anthropic
+from voice.region_providers import AnthropicProvider, resolve_supervisor
 
 BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_START = wall_time(8, 0)
@@ -96,7 +95,16 @@ class GoalRegionRunner:
             key=lambda window: window.start,
         )
         self.clock = clock
-        self.client = client if client is not None else anthropic.Anthropic()
+        self._model = _runtime_region_model()
+        self._supervisor = resolve_supervisor(self._model)
+        # Preserve eager Anthropic client construction and the public-ish
+        # ``client`` attribute used by the existing fake-client tests.
+        if isinstance(self._supervisor, AnthropicProvider):
+            if client is not None:
+                self._supervisor.client = client
+            self.client = self._supervisor.ensure_client()
+        else:
+            self.client = client
         self._entered_at = clock()
         self._completed_turns = 0
         self._slots: dict = {}
@@ -129,32 +137,21 @@ class GoalRegionRunner:
 
         messages = [*self._transcript, {"role": "user", "content": caller_text}]
         started = self.clock()
-        request: dict = {
-            "model": os.environ.get("SCHED_EVAL_MODEL", "claude-haiku-4-5"),
-            "max_tokens": 4096,
-            "system": [{
-                "type": "text",
-                "text": self._system_prompt(),
-                "cache_control": {"type": "ephemeral"},
-            }],
-            "messages": messages,
-            "output_config": {
-                "format": {"type": "json_schema", "schema": _SUPERVISOR_SCHEMA}
-            },
-        }
-        # Latency knob: Sonnet 5 runs adaptive thinking when the field is
-        # omitted; SCHED_EVAL_THINKING=disabled turns it off for a fair
-        # per-turn latency comparison. (Omitted = off on Opus 4.8/Haiku 4.5.)
-        if os.environ.get("SCHED_EVAL_THINKING", "").strip() == "disabled":
-            request["thinking"] = {"type": "disabled"}
+        system = self._system_prompt()
+        self._sync_supervisor_model()
 
         payload = None
         for _attempt in range(2):
-            response = self.client.messages.create(**request)
-            if _response_stop_reason(response) == "max_tokens":
+            raw_text, stop_reason = self._supervisor.complete(
+                system=system,
+                messages=messages,
+                schema=_SUPERVISOR_SCHEMA,
+                max_tokens=4096,
+            )
+            if stop_reason == "max_tokens":
                 continue
             try:
-                payload = _structured_payload(response)
+                payload = _structured_payload(raw_text)
             except ValueError:
                 continue
             break
@@ -194,6 +191,22 @@ class GoalRegionRunner:
             supervisor_ms=supervisor_ms,
             rejected=rejected,
         )
+
+    def _sync_supervisor_model(self) -> None:
+        """Resolve a changed runtime selection at the start of each LLM turn."""
+
+        model = _runtime_region_model()
+        if model == self._model:
+            return
+        supervisor = resolve_supervisor(model)
+        if isinstance(supervisor, AnthropicProvider):
+            # Reuse the eagerly-created or injected Anthropic client when a
+            # live runner switches back to an Anthropic model.
+            if self.client is not None:
+                supervisor.client = self.client
+            self.client = supervisor.ensure_client()
+        self._model = model
+        self._supervisor = supervisor
 
     def _short_circuit(self, exit_name: str) -> RegionTurn:
         return RegionTurn(
@@ -341,6 +354,14 @@ def _local_wall_time(value: datetime) -> datetime:
     return value.astimezone(BUSINESS_TIMEZONE).replace(tzinfo=None)
 
 
+def _runtime_region_model() -> str:
+    # Import lazily because flow_session owns the registry and imports this
+    # runner. At turn time both modules are fully initialized.
+    from voice.flow_session import get_region_model
+
+    return get_region_model()
+
+
 def _parse_slot_start(value) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -351,23 +372,8 @@ def _parse_slot_start(value) -> datetime | None:
     return _local_wall_time(parsed)
 
 
-def _structured_payload(response) -> dict:
-    content = response.get("content", []) if isinstance(response, dict) else response.content
-    for block in content:
-        if isinstance(block, dict):
-            text = block.get("text")
-        else:
-            text = getattr(block, "text", None)
-        if isinstance(text, str):
-            payload = json.loads(text)
-            if isinstance(payload, dict):
-                return payload
+def _structured_payload(raw_text: str) -> dict:
+    payload = json.loads(raw_text)
+    if isinstance(payload, dict):
+        return payload
     raise ValueError("supervisor response did not contain a JSON object")
-
-
-def _response_stop_reason(response) -> str | None:
-    if isinstance(response, dict):
-        value = response.get("stop_reason")
-    else:
-        value = getattr(response, "stop_reason", None)
-    return value if isinstance(value, str) else None

@@ -1,3 +1,5 @@
+import { TalkingCubeRenderer } from "./talking-cube.js";
+
 "use strict";
 
 // ── DOM refs ─────────────────────────────────────────────────
@@ -28,6 +30,7 @@ const phoneSpeedValue = document.getElementById("phone-speed-value");
 const phoneCallStatus = document.getElementById("phone-call-status");
 const flowSelect = document.getElementById("flow-select");
 const flowWarning = document.getElementById("flow-warning");
+const regionModelSelect = document.getElementById("region-model-select");
 const goalRegionCard = document.getElementById("goal-region-card");
 const flowGoal = document.getElementById("flow-goal");
 const flowOutcome = document.getElementById("flow-outcome");
@@ -38,9 +41,538 @@ const flowSlotStartValue = document.getElementById("flow-slot-start-value");
 const flowSlotDuration = document.getElementById("flow-slot-duration");
 const flowSlotDurationValue = document.getElementById("flow-slot-duration-value");
 const flowBudget = document.getElementById("flow-budget");
+const flowModel = document.getElementById("flow-model");
 const flowLatency = document.getElementById("flow-latency");
 const flowRejections = document.getElementById("flow-rejections");
 const flowRejectionsList = document.getElementById("flow-rejections-list");
+const talkingCubeCanvas = document.getElementById("talking-cube");
+const talkingCubeStatus = document.getElementById("talking-cube-status");
+const cubeScene = document.getElementById("cube-scene");
+const cubePattern = document.getElementById("cube-pattern");
+const cubeFormation = document.getElementById("cube-formation");
+const cubeElementShape = document.getElementById("cube-element-shape");
+const cubeGridSize = document.getElementById("cube-grid-size");
+const cubePalette = document.getElementById("cube-palette");
+const cubePrimaryColor = document.getElementById("cube-primary-color");
+const cubeSecondaryColor = document.getElementById("cube-secondary-color");
+const cubeShowFrame = document.getElementById("cube-show-frame");
+const cubeShowLinks = document.getElementById("cube-show-links");
+const cubeAutoRotate = document.getElementById("cube-auto-rotate");
+const cubePulse = document.getElementById("cube-pulse");
+const cubeReset = document.getElementById("cube-reset");
+
+// ── Talking Cube visualization ───────────────────────────────
+// The renderer calls its sphere-like shallow constellation a "focus" field,
+// and its ripple animation a "wave". Keep those source API names here while
+// presenting them as the calm field and voice wave in the nano-claw UI.
+const VISUALIZATION_STORAGE_KEY = "nanoclaw.visualization";
+const CALM_VISUALIZATION_DEFAULTS = Object.freeze({
+    gridSize: 11,
+    pattern: "nebula",
+    formation: "focus",
+    elementShape: "orb",
+    primary: "#2563eb",
+    secondary: "#60a5fa",
+    energy: 0.28,
+    response: 0.65,
+    speed: 0.18,
+    bloom: 0.38,
+    opacity: 0.52,
+    density: 0.72,
+    spread: 1.02,
+    rotationSpeed: 0.1,
+    autoRotate: true,
+    showLinks: false,
+    showFrame: false,
+    idleLevel: 0.035,
+});
+
+const VISUALIZATION_SCENES = Object.freeze({
+    calm: CALM_VISUALIZATION_DEFAULTS,
+    focus: {
+        gridSize: 15,
+        pattern: "focus",
+        formation: "focus",
+        elementShape: "orb",
+        energy: 0.68,
+        response: 0.78,
+        speed: 0.36,
+        bloom: 0.5,
+        opacity: 0.68,
+        density: 1,
+        spread: 1.02,
+        rotationSpeed: 0.16,
+        showFrame: false,
+        showLinks: false,
+    },
+    matrix: {
+        gridSize: 15,
+        pattern: "spectrum",
+        formation: "focus",
+        elementShape: "octagon",
+        energy: 0.72,
+        response: 0.84,
+        speed: 0.45,
+        bloom: 0.34,
+        opacity: 0.76,
+        density: 1,
+        spread: 1,
+        rotationSpeed: 0.1,
+        showFrame: false,
+        showLinks: false,
+    },
+    octahedron: {
+        gridSize: 9,
+        pattern: "wave",
+        formation: "octahedron",
+        elementShape: "octagon",
+        energy: 0.68,
+        response: 0.78,
+        speed: 0.5,
+        bloom: 0.48,
+        opacity: 0.7,
+        density: 0.9,
+        spread: 1.04,
+        rotationSpeed: 0.22,
+        showFrame: false,
+        showLinks: false,
+    },
+    classic: {
+        gridSize: 7,
+        pattern: "wave",
+        formation: "cube",
+        elementShape: "voxel",
+        energy: 0.72,
+        response: 0.78,
+        speed: 0.78,
+        bloom: 0.68,
+        opacity: 0.78,
+        density: 1,
+        spread: 1,
+        rotationSpeed: 0.42,
+        showFrame: true,
+        showLinks: true,
+    },
+});
+
+const VISUALIZATION_PALETTES = Object.freeze({
+    nanoclaw: ["#2563eb", "#60a5fa"],
+    electric: ["#43e7ff", "#169fdf"],
+    aurora: ["#52f5a8", "#31d7ff"],
+    violet: ["#d86cff", "#715cff"],
+    sunset: ["#ff775f", "#ffca5c"],
+    mono: ["#f4f7f8", "#8da2ad"],
+});
+
+const VISUALIZATION_ENUMS = Object.freeze({
+    pattern: ["focus", "wave", "spectrum", "helix", "scan", "nebula"],
+    formation: ["focus", "octahedron", "cube"],
+    elementShape: ["orb", "octagon", "diamond", "voxel"],
+});
+const VISUALIZATION_RANGES = Object.freeze({
+    energy: [0, 1],
+    response: [0, 1],
+    speed: [0.08, 1.4],
+    bloom: [0, 1],
+    opacity: [0.08, 1],
+    density: [0.2, 1],
+    spread: [0.68, 1.35],
+    rotationSpeed: [0, 1.2],
+});
+const VISUALIZATION_GRID_SIZES = [5, 7, 9, 11, 13, 15];
+const VISUALIZATION_PATTERN_LABELS = Object.freeze({
+    focus: "Lens drift",
+    wave: "Voice wave",
+    spectrum: "Spectrum",
+    helix: "Double helix",
+    scan: "Signal scan",
+    nebula: "Nebula",
+});
+
+function validVisualizationColor(value) {
+    return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+}
+
+function normalizeVisualizationSettings(candidate) {
+    var input = candidate && typeof candidate === "object" ? candidate : {};
+    var settings = Object.assign({}, CALM_VISUALIZATION_DEFAULTS);
+    Object.keys(VISUALIZATION_ENUMS).forEach(function (key) {
+        if (VISUALIZATION_ENUMS[key].indexOf(input[key]) >= 0) settings[key] = input[key];
+    });
+    Object.keys(VISUALIZATION_RANGES).forEach(function (key) {
+        var value = Number(input[key]);
+        if (!Number.isFinite(value)) return;
+        var range = VISUALIZATION_RANGES[key];
+        settings[key] = Math.max(range[0], Math.min(range[1], value));
+    });
+    var gridSize = Number(input.gridSize);
+    if (VISUALIZATION_GRID_SIZES.indexOf(gridSize) >= 0) settings.gridSize = gridSize;
+    if (validVisualizationColor(input.primary)) settings.primary = input.primary;
+    if (validVisualizationColor(input.secondary)) settings.secondary = input.secondary;
+    ["autoRotate", "showLinks", "showFrame"].forEach(function (key) {
+        if (typeof input[key] === "boolean") settings[key] = input[key];
+    });
+    return settings;
+}
+
+function loadVisualizationSettings() {
+    try {
+        var stored = JSON.parse(localStorage.getItem(VISUALIZATION_STORAGE_KEY) || "null");
+        var scene = stored && Object.prototype.hasOwnProperty.call(VISUALIZATION_SCENES, stored.scene)
+            ? stored.scene
+            : "custom";
+        if (!stored || !stored.settings) scene = "calm";
+        return { scene: scene, settings: normalizeVisualizationSettings(stored && stored.settings) };
+    } catch (_e) {
+        return { scene: "calm", settings: Object.assign({}, CALM_VISUALIZATION_DEFAULTS) };
+    }
+}
+
+var loadedVisualization = loadVisualizationSettings();
+var visualizationScene = loadedVisualization.scene;
+var visualizationSettings = loadedVisualization.settings;
+var visualizationSpeaking = false;
+var callerVisualizationActive = false;
+var visualizationMoment = null;
+var visualizationMomentTimer = null;
+var visualizationMomentVersion = 0;
+var lastFlowOutcomeSignature = "";
+var lastFlowRejectionsSignature = "";
+var agentAudioContext = null;
+var agentAudioSource = null;
+var agentAudioAnalyser = null;
+
+const talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+talkingCube.setPanelOpen(false);
+window.TalkingCube = talkingCube;
+window.VoiceCube = talkingCube;
+
+function effectiveVisualizationSettings() {
+    var primary = visualizationSettings.primary;
+    var secondary = visualizationSettings.secondary;
+    if (callerVisualizationActive && !visualizationSpeaking) {
+        primary = visualizationSettings.secondary;
+        secondary = visualizationSettings.primary;
+    }
+    if (visualizationMoment) {
+        primary = visualizationMoment.primary;
+        secondary = visualizationMoment.secondary;
+    }
+    return Object.assign({}, visualizationSettings, {
+        pattern: visualizationSpeaking ? "wave" : visualizationSettings.pattern,
+        energy: visualizationSpeaking
+            ? Math.max(0.58, visualizationSettings.energy)
+            : visualizationSettings.energy,
+        primary: primary,
+        secondary: secondary,
+    });
+}
+
+function updateTalkingCubeStatus() {
+    if (visualizationSpeaking) {
+        talkingCubeStatus.textContent = "Agent speaking · Voice wave";
+    } else if (visualizationMoment && visualizationMoment.label) {
+        talkingCubeStatus.textContent = visualizationMoment.label;
+    } else if (callerVisualizationActive) {
+        talkingCubeStatus.textContent = "Caller speaking · Secondary color";
+    } else {
+        talkingCubeStatus.textContent = "Idle · " + VISUALIZATION_PATTERN_LABELS[visualizationSettings.pattern];
+    }
+}
+
+function applyVisualizationLayers() {
+    var effective = effectiveVisualizationSettings();
+    talkingCube.configure(effective);
+    talkingCube.setSpeaking(visualizationSpeaking);
+    updateTalkingCubeStatus();
+}
+
+function persistVisualizationSettings() {
+    try {
+        localStorage.setItem(VISUALIZATION_STORAGE_KEY, JSON.stringify({
+            version: 1,
+            scene: visualizationScene,
+            settings: visualizationSettings,
+        }));
+    } catch (_e) {
+        // Storage can be unavailable in privacy modes; live controls still work.
+    }
+}
+
+function visualizationRangeLabel(input) {
+    var value = Number(input.value);
+    if (input.dataset.cubeSetting === "spread") return Math.round(value * 100) + "%";
+    if (input.dataset.cubeSetting === "speed") {
+        return Math.round((value - Number(input.min)) / (Number(input.max) - Number(input.min)) * 100) + "%";
+    }
+    if (input.dataset.cubeSetting === "rotationSpeed") {
+        return Math.round(value / Number(input.max) * 100) + "%";
+    }
+    return Math.round(value * 100) + "%";
+}
+
+function matchingVisualizationPalette() {
+    return Object.keys(VISUALIZATION_PALETTES).find(function (name) {
+        var colors = VISUALIZATION_PALETTES[name];
+        return colors[0].toLowerCase() === visualizationSettings.primary.toLowerCase()
+            && colors[1].toLowerCase() === visualizationSettings.secondary.toLowerCase();
+    }) || "custom";
+}
+
+function syncVisualizationControls() {
+    cubeScene.value = visualizationScene;
+    cubePattern.value = visualizationSettings.pattern;
+    cubeFormation.value = visualizationSettings.formation;
+    cubeElementShape.value = visualizationSettings.elementShape;
+    cubeGridSize.value = String(visualizationSettings.gridSize);
+    cubePalette.value = matchingVisualizationPalette();
+    cubePrimaryColor.value = visualizationSettings.primary;
+    cubeSecondaryColor.value = visualizationSettings.secondary;
+    cubeShowFrame.checked = visualizationSettings.showFrame;
+    cubeShowLinks.checked = visualizationSettings.showLinks;
+    cubeAutoRotate.checked = visualizationSettings.autoRotate;
+    document.querySelectorAll("[data-cube-setting]").forEach(function (input) {
+        input.value = String(visualizationSettings[input.dataset.cubeSetting]);
+        var output = input.parentElement.querySelector("output");
+        if (output) output.textContent = visualizationRangeLabel(input);
+    });
+}
+
+function storeVisualizationChange(partial) {
+    visualizationSettings = normalizeVisualizationSettings(Object.assign({}, visualizationSettings, partial));
+    visualizationScene = "custom";
+    persistVisualizationSettings();
+    applyVisualizationLayers();
+    syncVisualizationControls();
+}
+
+cubeScene.addEventListener("change", function () {
+    var name = cubeScene.value;
+    var preset = VISUALIZATION_SCENES[name];
+    if (!preset) return;
+    visualizationSettings = name === "calm"
+        ? Object.assign({}, CALM_VISUALIZATION_DEFAULTS)
+        : normalizeVisualizationSettings(Object.assign({}, visualizationSettings, preset));
+    visualizationScene = name;
+    persistVisualizationSettings();
+    applyVisualizationLayers();
+    syncVisualizationControls();
+    talkingCube.pulse({ strength: 0.9, duration: 980 });
+});
+
+cubePattern.addEventListener("change", function () {
+    storeVisualizationChange({ pattern: cubePattern.value });
+    if (!visualizationSpeaking) talkingCube.setPattern(visualizationSettings.pattern);
+});
+cubeFormation.addEventListener("change", function () {
+    storeVisualizationChange({ formation: cubeFormation.value });
+});
+cubeElementShape.addEventListener("change", function () {
+    storeVisualizationChange({ elementShape: cubeElementShape.value });
+});
+cubeGridSize.addEventListener("change", function () {
+    storeVisualizationChange({ gridSize: Number(cubeGridSize.value) });
+    talkingCube.pulse({ strength: 0.8, duration: 780 });
+});
+
+cubePalette.addEventListener("change", function () {
+    var colors = VISUALIZATION_PALETTES[cubePalette.value];
+    if (!colors) return;
+    storeVisualizationChange({ primary: colors[0], secondary: colors[1] });
+    var effective = effectiveVisualizationSettings();
+    talkingCube.setColors(effective.primary, effective.secondary);
+    talkingCube.pulse({ strength: 0.55, color: colors[0], duration: 720 });
+});
+
+[cubePrimaryColor, cubeSecondaryColor].forEach(function (input) {
+    input.addEventListener("input", function () {
+        storeVisualizationChange({
+            primary: cubePrimaryColor.value,
+            secondary: cubeSecondaryColor.value,
+        });
+        var effective = effectiveVisualizationSettings();
+        talkingCube.setColors(effective.primary, effective.secondary);
+    });
+});
+
+document.querySelectorAll("[data-cube-setting]").forEach(function (input) {
+    input.addEventListener("input", function () {
+        var output = input.parentElement.querySelector("output");
+        if (output) output.textContent = visualizationRangeLabel(input);
+        storeVisualizationChange({ [input.dataset.cubeSetting]: Number(input.value) });
+    });
+});
+
+[
+    [cubeShowFrame, "showFrame"],
+    [cubeShowLinks, "showLinks"],
+    [cubeAutoRotate, "autoRotate"],
+].forEach(function (entry) {
+    entry[0].addEventListener("change", function () {
+        storeVisualizationChange({ [entry[1]]: entry[0].checked });
+    });
+});
+
+cubePulse.addEventListener("click", function () {
+    talkingCube.pulse({ strength: 1.25, duration: 1100 });
+});
+cubeReset.addEventListener("click", function () {
+    visualizationSettings = Object.assign({}, CALM_VISUALIZATION_DEFAULTS);
+    visualizationScene = "calm";
+    persistVisualizationSettings();
+    applyVisualizationLayers();
+    syncVisualizationControls();
+    talkingCube.resetCamera().pulse({ strength: 0.8, duration: 900 });
+});
+
+function startVisualizationMoment(options) {
+    visualizationMomentVersion += 1;
+    var version = visualizationMomentVersion;
+    if (visualizationMomentTimer) clearTimeout(visualizationMomentTimer);
+    visualizationMoment = {
+        primary: options.primary,
+        secondary: options.secondary,
+        label: options.label,
+    };
+    applyVisualizationLayers();
+    talkingCube.setColors(options.primary, options.secondary);
+    talkingCube.pulse({
+        strength: options.strength,
+        duration: options.pulseDuration,
+        color: options.primary,
+    });
+    visualizationMomentTimer = setTimeout(function () {
+        if (version !== visualizationMomentVersion) return;
+        visualizationMoment = null;
+        visualizationMomentTimer = null;
+        applyVisualizationLayers();
+    }, options.duration);
+}
+
+function updateFlowVisualization(state, outcome, rejected) {
+    var slots = state.slots && typeof state.slots === "object" ? state.slots : {};
+    var outcomeSignature = outcome ? JSON.stringify([
+        state.goal || "",
+        outcome,
+        slots.job || "",
+        slots.slot_start || "",
+        slots.duration_minutes || "",
+    ]) : "";
+    if (outcomeSignature && outcomeSignature !== lastFlowOutcomeSignature) {
+        if (outcome === "booked") {
+            startVisualizationMoment({
+                primary: "#22c55e",
+                secondary: "#86efac",
+                label: "Booked · Celebration",
+                strength: 1.3,
+                pulseDuration: 1500,
+                duration: 2000,
+            });
+        } else if (outcome === "escape" || outcome === "budget") {
+            startVisualizationMoment({
+                primary: "#64748b",
+                secondary: "#334155",
+                label: outcome === "escape" ? "Flow ended · Muted" : "Budget reached · Muted",
+                strength: 0.5,
+                pulseDuration: 700,
+                duration: 1400,
+            });
+        }
+    }
+    lastFlowOutcomeSignature = outcomeSignature;
+
+    var rejectionSignature = JSON.stringify(rejected);
+    if (rejected.length && rejectionSignature !== lastFlowRejectionsSignature) {
+        talkingCube.pulse({ strength: 0.38, duration: 480, color: "#ef4444" });
+    }
+    lastFlowRejectionsSignature = rejectionSignature;
+}
+
+function setVisualizationSpeaking(speaking) {
+    var next = Boolean(speaking);
+    if (next === visualizationSpeaking) return;
+    visualizationSpeaking = next;
+    callerVisualizationActive = false;
+    talkingCube.setSpeaking(next);
+    if (next) {
+        if (agentAudioAnalyser) talkingCube.connectAnalyser(agentAudioAnalyser);
+        if (agentAudioContext && agentAudioContext.state === "suspended") {
+            agentAudioContext.resume().catch(function () {});
+        }
+    } else {
+        talkingCube.disconnectAnalyser();
+    }
+    applyVisualizationLayers();
+    var effective = effectiveVisualizationSettings();
+    talkingCube.setPattern(effective.pattern, { energy: effective.energy });
+    talkingCube.setColors(effective.primary, effective.secondary);
+}
+
+function teardownAgentAudioAnalyser() {
+    if (agentAudioAnalyser) talkingCube.disconnectAnalyser();
+    if (agentAudioSource) {
+        try { agentAudioSource.disconnect(); } catch (_e) { /* already disconnected */ }
+    }
+    if (agentAudioAnalyser) {
+        try { agentAudioAnalyser.disconnect(); } catch (_e) { /* already disconnected */ }
+    }
+    if (agentAudioContext && agentAudioContext.state !== "closed") {
+        agentAudioContext.close().catch(function () {});
+    }
+    agentAudioSource = null;
+    agentAudioAnalyser = null;
+    agentAudioContext = null;
+}
+
+function setupAgentAudioAnalyser(stream) {
+    teardownAgentAudioAnalyser();
+    var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass || !stream) return;
+    try {
+        agentAudioContext = new AudioContextClass();
+        agentAudioSource = agentAudioContext.createMediaStreamSource(stream);
+        agentAudioAnalyser = agentAudioContext.createAnalyser();
+        agentAudioAnalyser.fftSize = 512;
+        agentAudioAnalyser.smoothingTimeConstant = 0.72;
+        agentAudioSource.connect(agentAudioAnalyser);
+        if (visualizationSpeaking) {
+            talkingCube.connectAnalyser(agentAudioAnalyser);
+            agentAudioContext.resume().catch(function () {});
+        }
+    } catch (_e) {
+        teardownAgentAudioAnalyser();
+    }
+}
+
+function stopCallerVisualization() {
+    if (!callerVisualizationActive) return;
+    callerVisualizationActive = false;
+    if (!visualizationSpeaking) applyVisualizationLayers();
+}
+
+function driveCallerVisualization(rms) {
+    if (visualizationSpeaking) return;
+    // Agent analysis uses a 4.2x RMS gain inside the renderer; 2.2x keeps the
+    // caller intentionally quieter while still making barge-in visible.
+    var level = Math.max(0, Math.min(1, Number(rms) * 2.2));
+    var active = level > 0.04;
+    if (active !== callerVisualizationActive) {
+        callerVisualizationActive = active;
+        applyVisualizationLayers();
+        if (active) {
+            talkingCube.setColors(visualizationSettings.secondary, visualizationSettings.primary);
+            talkingCube.pulse({ strength: 0.28, duration: 420, color: visualizationSettings.secondary });
+        }
+    }
+    talkingCube.pushAudioFrame({
+        level: level,
+        speaking: active,
+        source: "caller-mic",
+    });
+}
+
+syncVisualizationControls();
+applyVisualizationLayers();
 
 // VAD dropdown (phone line): mirrors the STT/LLM/Voice pipeline selectors.
 // Applies to NEW phone calls; served by GET/POST /api/phone/vad.
@@ -193,6 +725,66 @@ flowSelect.addEventListener("change", function () {
 });
 
 loadFlowConfig();
+var activeRegionModel = "";
+
+function renderRegionModelConfig(config) {
+    var options = Array.isArray(config.options) ? config.options : [];
+    var active = typeof config.active === "string" ? config.active : "";
+    regionModelSelect.innerHTML = "";
+    options.forEach(function (option) {
+        if (!option || typeof option.value !== "string") return;
+        var o = document.createElement("option");
+        o.value = option.value;
+        o.textContent = typeof option.label === "string" ? option.label : option.value;
+        regionModelSelect.appendChild(o);
+    });
+    if (active && !Array.from(regionModelSelect.options).some(function (o) { return o.value === active; })) {
+        var current = document.createElement("option");
+        current.value = active;
+        current.textContent = active + " — environment default";
+        regionModelSelect.insertBefore(current, regionModelSelect.firstChild);
+    }
+    regionModelSelect.value = active;
+    activeRegionModel = active;
+    flowModel.textContent = active ? "model " + active : "model —";
+}
+
+function loadRegionModelConfig() {
+    return fetch("/api/voice/region-model").then(function (r) {
+        if (!r.ok) throw new Error("scheduler model unavailable");
+        return r.json();
+    }).then(function (config) {
+        renderRegionModelConfig(config || {});
+        regionModelSelect.disabled = false;
+    }).catch(function () {
+        regionModelSelect.innerHTML = "";
+        var o = document.createElement("option");
+        o.textContent = "n/a";
+        regionModelSelect.appendChild(o);
+        regionModelSelect.disabled = true;
+        activeRegionModel = "";
+        flowModel.textContent = "model —";
+    });
+}
+
+regionModelSelect.addEventListener("change", function () {
+    regionModelSelect.disabled = true;
+    fetch("/api/voice/region-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: regionModelSelect.value }),
+    }).then(function (r) {
+        if (!r.ok) throw new Error("scheduler model update failed");
+        return r.json();
+    }).then(function (config) {
+        renderRegionModelConfig(config || {});
+        statusText.textContent = "Scheduler model updated — new turns use it immediately";
+    }).catch(loadRegionModelConfig).finally(function () {
+        regionModelSelect.disabled = false;
+    });
+});
+
+loadRegionModelConfig();
 const settingsBtn = document.getElementById("settings-btn");
 const pipelinePanel = document.getElementById("pipeline-panel");
 
@@ -388,6 +980,7 @@ function renderFlowState(state) {
     var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
     var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
     flowBudget.textContent = "turn " + turnsUsed + " / " + maxTurns;
+    flowModel.textContent = activeRegionModel ? "model " + activeRegionModel : "model —";
     flowLatency.textContent = typeof state.supervisor_ms === "number"
         ? "supervisor " + Math.round(state.supervisor_ms) + " ms"
         : "supervisor —";
@@ -423,6 +1016,7 @@ function renderFlowState(state) {
     if (flowOutcome.textContent) {
         flowOutcome.className = "flow-outcome flow-outcome-" + outcome;
     }
+    updateFlowVisualization(state, outcome, rejected);
 }
 
 // ── Tool approval card ───────────────────────────────────────
@@ -862,12 +1456,14 @@ function handleMessage(msg) {
 
         case "agent_audio_start":
             setAgentSpeaking(true);
+            setVisualizationSpeaking(true);
             setPhoneStatus("Speaking to the phone...");
             break;
 
         case "agent_audio_end":
             finalizeAgentBubble();
             setAgentSpeaking(false);
+            setVisualizationSpeaking(false);
             if (bargeDetector) bargeDetector.reset();
             rearmPhoneMode("Waiting for the phone side...");
             break;
@@ -875,6 +1471,7 @@ function handleMessage(msg) {
         case "tool_pending":
             showToolCard(msg.requestId, msg.tools);
             setAgentSpeaking(false);
+            setVisualizationSpeaking(false);
             setPhoneStatus("Tool approval required before the call can continue");
             break;
 
@@ -896,6 +1493,7 @@ function handleMessage(msg) {
         case "error":
             console.error("Server error:", msg.message);
             finalizeAgentBubble();
+            setVisualizationSpeaking(false);
             rearmPhoneMode("Voice error; listening again...");
             break;
     }
@@ -944,8 +1542,10 @@ async function startWebRTC() {
         audioEl = document.createElement("audio");
         audioEl.autoplay = true;
         audioEl.playsInline = true;
-        audioEl.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+        var agentStream = ev.streams[0] || new MediaStream([ev.track]);
+        audioEl.srcObject = agentStream;
         document.body.appendChild(audioEl);
+        setupAgentAudioAnalyser(agentStream);
     };
 
     var offer = await pc.createOffer();
@@ -974,6 +1574,9 @@ async function handleWebRTCAnswer(sdp) {
 
 function cleanupWebRTC() {
     stopPhoneMode({sendCancel: false, status: false});
+    stopCallerVisualization();
+    setVisualizationSpeaking(false);
+    teardownAgentAudioAnalyser();
     if (pc) { pc.close(); pc = null; }
     if (audioEl) { audioEl.srcObject = null; audioEl.remove(); audioEl = null; }
     if (micStream) {
@@ -1040,6 +1643,7 @@ function monitorPhoneAudio(timestamp) {
     if (!phoneModeEnabled) return;
 
     const rms = currentMicRms();
+    driveCallerVisualization(rms);
     if (timestamp < vadCalibrationUntil) {
         vadCalibration.push(rms);
     } else if (vadCalibration.length) {
@@ -1116,6 +1720,7 @@ function stopPhoneMode(options) {
     isRecording = false;
     autoTurnPending = false;
     if (vadGate) vadGate.reset();
+    stopCallerVisualization();
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
     talkBtn.textContent = "Start Hands-Free Phone Mode";
@@ -1150,7 +1755,14 @@ textInput.addEventListener("keydown", function (e) {
 // Stop agent audio
 stopBtn.addEventListener("click", function () {
     sendMsg("stop_speaking");
+    setVisualizationSpeaking(false);
     setPhoneStatus("Stopping Claude audio...");
+});
+
+window.addEventListener("beforeunload", function () {
+    if (visualizationMomentTimer) clearTimeout(visualizationMomentTimer);
+    teardownAgentAudioAnalyser();
+    talkingCube.destroy();
 });
 
 // Keepalive

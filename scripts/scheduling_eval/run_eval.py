@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run the goal-region scheduling evaluation (API calls, no calendar writes).
 
-Generate availability first, then load the Anthropic key before running:
+Generate availability first, then load the selected providers' keys before
+running:
 
     ~/src/riff/.venv/bin/python scripts/scheduling_eval/fetch_availability.py
     set -a; source .env; set +a
@@ -17,8 +18,6 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import anthropic
-
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -30,6 +29,7 @@ from voice.flow_session import (
     scheduler_region_config,
 )
 from voice.goal_region import GoalRegionRunner
+from voice.region_providers import AnthropicProvider, resolve_supervisor
 
 HERE = Path(__file__).resolve().parent
 AVAILABILITY_PATH = HERE / "availability.json"
@@ -39,16 +39,27 @@ RESULTS_PATH = HERE / "results.json"
 
 CONFIRMATION = "You're all set. We'll send the appointment details shortly."
 DEFAULT_MODEL = "claude-haiku-4-5"
+MISSING_API_KEY_MESSAGE = "ANTHROPIC_API_KEY is required to run the goal-region eval."
 
 
-def _response_text(response) -> str:
-    for block in response.content:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            cleaned = text.strip().strip('"')
-            if cleaned:
-                return cleaned
-    return ""
+def _caller_completion(
+    client,
+    *,
+    model: str,
+    system: str,
+    messages: list[dict],
+    max_tokens: int,
+) -> str:
+    """Call the selected caller model without the supervisor JSON schema."""
+    provider = resolve_supervisor(model)
+    if isinstance(provider, AnthropicProvider) and client is not None:
+        provider.client = client
+    raw_text, _stop_reason = provider.complete_text(
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+    )
+    return raw_text.strip().strip('"')
 
 
 def _caller_turn(
@@ -64,17 +75,13 @@ def _caller_turn(
     next_messages = [*messages, {"role": "user", "content": agent_text}]
     caller_text = ""
     for _attempt in range(2):
-        response = client.messages.create(
+        caller_text = _caller_completion(
+            client,
             model=os.environ.get("SCHED_EVAL_CALLER_MODEL", DEFAULT_MODEL),
-            max_tokens=160,
-            system=[{
-                "type": "text",
-                "text": prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
+            system=prompt,
             messages=next_messages,
+            max_tokens=160,
         )
-        caller_text = _response_text(response)
         if caller_text:
             break
     if not caller_text:
@@ -286,14 +293,38 @@ def _print_table(results: list[dict]) -> None:
         print("  ".join(str(value).ljust(widths[i]) for i, value in enumerate(row)))
 
 
-def main() -> None:
+def main() -> int:
+    supervisor_model = os.environ.get("SCHED_EVAL_MODEL", DEFAULT_MODEL)
+    caller_model = os.environ.get("SCHED_EVAL_CALLER_MODEL", DEFAULT_MODEL)
+    try:
+        supervisor_provider = resolve_supervisor(supervisor_model)
+        caller_provider = resolve_supervisor(caller_model)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if (
+        supervisor_provider.provider == "anthropic"
+        or caller_provider.provider == "anthropic"
+    ) and not api_key:
+        print(MISSING_API_KEY_MESSAGE, file=sys.stderr)
+        return 2
+
     if not AVAILABILITY_PATH.exists():
         raise SystemExit(
             "availability.json is missing; run fetch_availability.py with riff's venv first"
         )
     availability = json.loads(AVAILABILITY_PATH.read_text())
     scenarios = _load_scenarios()
-    client = anthropic.Anthropic()
+    client = None
+    if (
+        supervisor_provider.provider == "anthropic"
+        or caller_provider.provider == "anthropic"
+    ):
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
     results = []
     for scenario in scenarios:
         try:
@@ -318,8 +349,12 @@ def main() -> None:
     passed = sum(bool(result.get("passed")) for result in results)
     output = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "supervisor_model": os.environ.get("SCHED_EVAL_MODEL", DEFAULT_MODEL),
-        "caller_model": os.environ.get("SCHED_EVAL_CALLER_MODEL", DEFAULT_MODEL),
+        "supervisor_model": supervisor_model,
+        "supervisor_provider": supervisor_provider.provider,
+        "supervisor_resolved_model": supervisor_provider.model,
+        "caller_model": caller_model,
+        "caller_provider": caller_provider.provider,
+        "caller_resolved_model": caller_provider.model,
         "overall": {
             "passed": passed,
             "failed": len(results) - passed,
@@ -335,7 +370,8 @@ def main() -> None:
     _print_table(results)
     print(f"\nOverall: {passed}/{len(results)} passed")
     print(f"results → {RESULTS_PATH}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

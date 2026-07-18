@@ -10,10 +10,14 @@ from aiohttp.test_utils import TestClient, TestServer
 from scripts.scheduling_eval import run_eval
 from voice import flow_session, phone, server
 from voice.flow_session import (
+    DEFAULT_REGION_MODEL,
+    REGION_MODELS,
     FlowReply,
     FlowSession,
     SCHEDULER_GREETING,
+    get_region_model,
     scheduler_region_config,
+    set_region_model,
 )
 from voice.goal_region import RegionTurn
 
@@ -21,6 +25,7 @@ from voice.goal_region import RegionTurn
 @pytest.fixture(autouse=True)
 def reset_flow_mode(monkeypatch):
     monkeypatch.setattr(flow_session, "_flow_mode", None)
+    monkeypatch.setattr(flow_session, "_region_model", None)
 
 
 def run(coro):
@@ -593,6 +598,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "scheduler")
     monkeypatch.setenv("NANO_CLAW_FLOW_AVAILABILITY", str(availability))
     monkeypatch.setenv("NANO_CLAW_PHONE", "0")
+    monkeypatch.delenv("SCHED_EVAL_MODEL", raising=False)
 
     async def exercise():
         client = TestClient(TestServer(server.create_app()))
@@ -622,10 +628,80 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             )
             response = await client.get("/api/voice/flow")
             assert (await response.json())["availability_ok"] is False
+
+            response = await client.get("/api/voice/region-model")
+            assert response.status == 200
+            assert await response.json() == {
+                "active": DEFAULT_REGION_MODEL,
+                "options": [
+                    {"value": value, "label": label}
+                    for value, label in REGION_MODELS.items()
+                ],
+            }
+
+            response = await client.post(
+                "/api/voice/region-model", json={"model": "xai/grok-4.3"}
+            )
+            assert response.status == 200
+            assert (await response.json())["active"] == "xai/grok-4.3"
+
+            response = await client.post(
+                "/api/voice/region-model", json={"model": "grok-4-1-fast"}
+            )
+            assert response.status == 400
         finally:
             await client.close()
 
     run(exercise())
+
+
+def test_region_model_registry_uses_env_until_valid_runtime_override(monkeypatch):
+    monkeypatch.setenv("SCHED_EVAL_MODEL", "environment-supervisor")
+
+    assert get_region_model() == "environment-supervisor"
+    assert set_region_model("deepseek/deepseek-v4-flash") is True
+    assert get_region_model() == "deepseek/deepseek-v4-flash"
+    assert set_region_model("grok-4-1-fast") is False
+    assert get_region_model() == "deepseek/deepseek-v4-flash"
+
+
+def test_region_model_default_is_haiku(monkeypatch):
+    monkeypatch.delenv("SCHED_EVAL_MODEL", raising=False)
+
+    assert get_region_model() == DEFAULT_REGION_MODEL
+
+
+def test_region_model_handlers_get_post_and_reject_invalid_without_socket(monkeypatch):
+    monkeypatch.delenv("SCHED_EVAL_MODEL", raising=False)
+
+    class Request:
+        def __init__(self, body):
+            self.body = body
+
+        async def json(self):
+            return self.body
+
+    response = run(server.region_model_get_handler(Request(None)))
+    assert response.status == 200
+    assert json.loads(response.body) == {
+        "active": DEFAULT_REGION_MODEL,
+        "options": [
+            {"value": value, "label": label}
+            for value, label in REGION_MODELS.items()
+        ],
+    }
+
+    response = run(
+        server.region_model_set_handler(Request({"model": "xai/grok-4.3"}))
+    )
+    assert response.status == 200
+    assert json.loads(response.body)["active"] == "xai/grok-4.3"
+
+    response = run(
+        server.region_model_set_handler(Request({"model": "grok-4-1-fast"}))
+    )
+    assert response.status == 400
+    assert get_region_model() == "xai/grok-4.3"
 
 
 def test_browser_flow_turn_emits_live_flow_state(monkeypatch):

@@ -16,7 +16,15 @@ from aiohttp import web
 
 from voice import metrics_db
 from voice import voice_catalog
-from voice.flow_session import FLOW_MODES, FlowSession, get_flow_mode, set_flow_mode
+from voice.flow_session import (
+    FLOW_MODES,
+    REGION_MODELS,
+    FlowSession,
+    get_flow_mode,
+    get_region_model,
+    set_flow_mode,
+    set_region_model,
+)
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
@@ -732,6 +740,37 @@ async def flow_set_handler(request: web.Request) -> web.Response:
     return web.json_response(_flow_api_payload())
 
 
+def _region_model_api_payload() -> dict:
+    return {
+        "active": get_region_model(),
+        "options": [
+            {"value": value, "label": label}
+            for value, label in REGION_MODELS.items()
+        ],
+    }
+
+
+async def region_model_get_handler(request: web.Request) -> web.Response:
+    """Report the supervisor model used when the next scheduler turn starts."""
+
+    return web.json_response(_region_model_api_payload())
+
+
+async def region_model_set_handler(request: web.Request) -> web.Response:
+    """Set the supervisor model used when the next scheduler turn starts."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.Response(status=400, text="bad json")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="bad json")
+    model = body.get("model", "")
+    if not set_region_model(model):
+        return web.Response(status=400, text=f"unknown model: {model}")
+    return web.json_response(_region_model_api_payload())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -756,6 +795,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/metrics", metrics_handler)
     app.router.add_get("/api/voice/flow", flow_get_handler)
     app.router.add_post("/api/voice/flow", flow_set_handler)
+    app.router.add_get("/api/voice/region-model", region_model_get_handler)
+    app.router.add_post("/api/voice/region-model", region_model_set_handler)
     register_phone_routes(app)  # no-op unless NANO_CLAW_PHONE=1
     app.router.add_get("/{filename}", static_handler)
     return app

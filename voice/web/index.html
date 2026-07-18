@@ -5,6 +5,107 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>nano-claw voice</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="modulepreload" href="talking-cube.js">
+  <style>
+    #talking-cube-stage {
+      position: relative;
+      flex: 0 0 170px;
+      min-height: 130px;
+      overflow: hidden;
+      border-bottom: 1px solid #1e293b;
+      background: #080b12;
+      isolation: isolate;
+    }
+    #talking-cube {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+    #talking-cube-stage .cube-hero-copy {
+      position: absolute;
+      top: 10px;
+      left: 14px;
+      z-index: 1;
+      color: #64748b;
+      font: 600 9px/1.4 "SF Mono", "Fira Code", monospace;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+    #talking-cube-stage .cube-hero-copy strong {
+      display: block;
+      margin-top: 2px;
+      color: #93c5fd;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+    }
+    #pipeline-panel {
+      max-height: min(54vh, 620px);
+      overflow-y: auto;
+      padding-right: 3px;
+    }
+    #visualization-panel { --accent: #38bdf8; }
+    #visualization-panel > summary {
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    #visualization-panel > summary::-webkit-details-marker { display: none; }
+    #visualization-panel > summary .pipe-card-tag::after { content: " +"; }
+    #visualization-panel[open] > summary .pipe-card-tag::after { content: " −"; }
+    .visualization-slider {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 3rem;
+      align-items: center;
+      gap: 0.4rem;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .visualization-slider input { width: 100%; min-width: 0; }
+    .visualization-slider output {
+      color: #64748b;
+      font: 10px/1 "SF Mono", "Fira Code", monospace;
+      text-align: right;
+    }
+    .visualization-colors {
+      display: flex;
+      flex: 1 1 auto;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .visualization-colors input[type="color"] {
+      width: 2.4rem;
+      height: 1.7rem;
+      padding: 1px;
+      border: 1px solid #2a2a2a;
+      border-radius: 0.35rem;
+      background: #111;
+    }
+    .visualization-checks {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.4rem;
+      color: #9ca3af;
+      font-size: 0.72rem;
+    }
+    .visualization-checks label { display: flex; align-items: center; gap: 0.3rem; }
+    .visualization-actions { display: flex; gap: 0.45rem; }
+    .visualization-actions button {
+      flex: 1;
+      padding: 0.4rem 0.5rem;
+      border: 1px solid #2a2a2a;
+      border-radius: 0.4rem;
+      background: #202020;
+      color: #cbd5e1;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.72rem;
+    }
+    @media (max-height: 720px), (max-width: 460px) {
+      #talking-cube-stage { flex-basis: 125px; min-height: 100px; }
+    }
+  </style>
 </head>
 <body>
   <div id="app">
@@ -39,11 +140,19 @@
       </div>
       <div class="flow-meta">
         <span id="flow-budget">turn 0 / 0</span>
-        <span id="flow-latency">supervisor —</span>
+        <span><span id="flow-model">model —</span> · <span id="flow-latency">supervisor —</span></span>
       </div>
       <div id="flow-rejections" class="flow-rejections hidden">
         <div class="flow-rejections-title">Validator rejected</div>
         <ul id="flow-rejections-list"></ul>
+      </div>
+    </section>
+
+    <section id="talking-cube-stage" aria-label="Live voice visualization">
+      <canvas id="talking-cube" aria-label="Voice-reactive constellation; drag to orbit and scroll to zoom"></canvas>
+      <div class="cube-hero-copy" aria-hidden="true">
+        Voice constellation
+        <strong id="talking-cube-status">Idle · Nebula</strong>
       </div>
     </section>
 
@@ -111,7 +220,95 @@
               <select id="flow-select"></select>
               <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
             </div></div>
+          <div class="pipe-row"><label for="region-model-select" title="Goal-region supervisor — applies when the next scheduler turn starts">Scheduler model</label>
+            <select id="region-model-select"></select></div>
         </section>
+        <details id="visualization-panel" class="pipe-card">
+          <summary class="pipe-card-head">
+            <span class="pipe-card-title">Visualization</span>
+            <span class="pipe-card-tag">live canvas</span>
+          </summary>
+          <div class="pipe-row"><label for="cube-scene">Scene</label>
+            <select id="cube-scene">
+              <option value="calm" selected>Calm constellation</option>
+              <option value="focus">Lens field</option>
+              <option value="matrix">Halftone matrix</option>
+              <option value="octahedron">Octahedron</option>
+              <option value="classic">Classic cube</option>
+              <option value="custom">Custom</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-pattern">Pattern</label>
+            <select id="cube-pattern">
+              <option value="focus">Lens drift</option>
+              <option value="wave">Voice wave</option>
+              <option value="spectrum">Spectrum</option>
+              <option value="helix">Double helix</option>
+              <option value="scan">Signal scan</option>
+              <option value="nebula" selected>Nebula</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-formation">Formation</label>
+            <select id="cube-formation">
+              <option value="focus" selected>Lens field</option>
+              <option value="octahedron">Octahedron</option>
+              <option value="cube">Cube</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-element-shape">Light shape</label>
+            <select id="cube-element-shape">
+              <option value="orb" selected>Soft orb</option>
+              <option value="octagon">Octagon</option>
+              <option value="diamond">Diamond</option>
+              <option value="voxel">3D voxel</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-grid-size">Grid</label>
+            <select id="cube-grid-size">
+              <option value="5">5 × 5 × 5</option>
+              <option value="7">7 × 7 × 7</option>
+              <option value="9">9 × 9 × 9</option>
+              <option value="11" selected>11 × 11 × 11</option>
+              <option value="13">13 × 13 × 13</option>
+              <option value="15">15 × 15 × 15</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-palette">Palette</label>
+            <select id="cube-palette">
+              <option value="nanoclaw" selected>nano-claw blue</option>
+              <option value="electric">Electric blue</option>
+              <option value="aurora">Aurora</option>
+              <option value="violet">Ultraviolet</option>
+              <option value="sunset">Solar flare</option>
+              <option value="mono">Moonlight</option>
+              <option value="custom">Custom</option>
+            </select></div>
+          <div class="pipe-row"><label for="cube-primary-color">Colors</label>
+            <span class="visualization-colors">
+              <input id="cube-primary-color" type="color" value="#2563eb" aria-label="Primary visualization color">
+              <input id="cube-secondary-color" type="color" value="#60a5fa" aria-label="Secondary visualization color">
+            </span></div>
+          <div class="pipe-row"><label for="cube-energy">Energy</label>
+            <span class="visualization-slider"><input id="cube-energy" data-cube-setting="energy" type="range" min="0" max="1" step="0.01" value="0.28"><output for="cube-energy">28%</output></span></div>
+          <div class="pipe-row"><label for="cube-response">Response</label>
+            <span class="visualization-slider"><input id="cube-response" data-cube-setting="response" type="range" min="0" max="1" step="0.01" value="0.65"><output for="cube-response">65%</output></span></div>
+          <div class="pipe-row"><label for="cube-speed">Speed</label>
+            <span class="visualization-slider"><input id="cube-speed" data-cube-setting="speed" type="range" min="0.08" max="1.4" step="0.01" value="0.18"><output for="cube-speed">8%</output></span></div>
+          <div class="pipe-row"><label for="cube-opacity">Opacity</label>
+            <span class="visualization-slider"><input id="cube-opacity" data-cube-setting="opacity" type="range" min="0.08" max="1" step="0.01" value="0.52"><output for="cube-opacity">52%</output></span></div>
+          <div class="pipe-row"><label for="cube-density">Density</label>
+            <span class="visualization-slider"><input id="cube-density" data-cube-setting="density" type="range" min="0.2" max="1" step="0.01" value="0.72"><output for="cube-density">72%</output></span></div>
+          <div class="pipe-row"><label for="cube-bloom">Glow</label>
+            <span class="visualization-slider"><input id="cube-bloom" data-cube-setting="bloom" type="range" min="0" max="1" step="0.01" value="0.38"><output for="cube-bloom">38%</output></span></div>
+          <div class="pipe-row"><label for="cube-spread">Spacing</label>
+            <span class="visualization-slider"><input id="cube-spread" data-cube-setting="spread" type="range" min="0.68" max="1.35" step="0.01" value="1.02"><output for="cube-spread">102%</output></span></div>
+          <div class="pipe-row"><label for="cube-rotation-speed">Rotation</label>
+            <span class="visualization-slider"><input id="cube-rotation-speed" data-cube-setting="rotationSpeed" type="range" min="0" max="1.2" step="0.01" value="0.1"><output for="cube-rotation-speed">8%</output></span></div>
+          <div class="visualization-checks">
+            <label><input id="cube-show-frame" type="checkbox"> Frame</label>
+            <label><input id="cube-show-links" type="checkbox"> Links</label>
+            <label><input id="cube-auto-rotate" type="checkbox" checked> Auto orbit</label>
+          </div>
+          <div class="visualization-actions">
+            <button id="cube-pulse" type="button">Sweep the field</button>
+            <button id="cube-reset" type="button">Reset to default</button>
+          </div>
+        </details>
       </div>
       <button id="stop-btn" class="hidden">Stop</button>
       <button id="talk-btn" type="button" aria-pressed="false" disabled>Start Hands-Free Phone Mode</button>
@@ -131,6 +328,6 @@
   <script src="voice-ui.js"></script>
   <script src="barge-in.js"></script>
   <script src="pipeline.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

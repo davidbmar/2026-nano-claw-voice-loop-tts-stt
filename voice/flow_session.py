@@ -29,6 +29,16 @@ SCHEDULER_GREETING = (
 FlowOutcome = Literal["booked", "escape", "budget"]
 FLOW_MODES = ("off", "scheduler")
 _flow_mode: str | None = None
+# Keep the provider-verified dropdown registry centralized here. These exact
+# IDs were checked against the live provider /v1/models endpoints on 2026-07-17.
+REGION_MODELS = {
+    "claude-haiku-4-5": "Claude Haiku 4.5 — proven",
+    "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash — cheapest",
+    "xai/grok-4.20-0309-non-reasoning": "Grok 4.20 fast",
+    "xai/grok-4.3": "Grok 4.3",
+}
+DEFAULT_REGION_MODEL = "claude-haiku-4-5"
+_region_model: str | None = None
 _AVAILABILITY_ERRORS = (
     OSError,
     json.JSONDecodeError,
@@ -72,6 +82,26 @@ def set_flow_mode(mode: str) -> bool:
         return False
     _flow_mode = mode
     log.info("Voice flow switched to %s (applies to new sessions/calls)", mode)
+    return True
+
+
+def get_region_model() -> str:
+    """Return the runtime scheduler model or its environment/default fallback."""
+
+    if _region_model is not None:
+        return _region_model
+    configured = os.environ.get("SCHED_EVAL_MODEL", "").strip()
+    return configured or DEFAULT_REGION_MODEL
+
+
+def set_region_model(name: str) -> bool:
+    """Select the supervisor model used when the next scheduler turn starts."""
+
+    global _region_model
+    if not isinstance(name, str) or name not in REGION_MODELS:
+        return False
+    _region_model = name
+    log.info("Scheduler model switched to %s (applies to new turns)", name)
     return True
 
 

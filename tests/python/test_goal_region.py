@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from voice import flow_session
 from voice.goal_region import FreeWindow, GoalRegionRunner, RegionConfig
 
 
@@ -320,6 +321,25 @@ def test_transcript_and_structured_api_shape_grow_across_turns(monkeypatch):
         {"role": "assistant", "content": "How long will the job take?"},
         {"role": "user", "content": "It should take an hour."},
         {"role": "assistant", "content": "Which day works?"},
+    ]
+
+
+def test_runtime_region_model_switch_applies_to_existing_runner(monkeypatch):
+    monkeypatch.setattr(flow_session, "_region_model", None)
+    monkeypatch.setenv("SCHED_EVAL_MODEL", "environment-supervisor")
+    client = FakeClient([
+        response(reply="What day works?"),
+        response(reply="What time works?"),
+    ])
+    runner = GoalRegionRunner(config(), [], client=client)
+
+    runner.turn("I need a plumber.")
+    assert flow_session.set_region_model("claude-haiku-4-5") is True
+    runner.turn("Monday works.")
+
+    assert [call["model"] for call in client.messages.calls] == [
+        "environment-supervisor",
+        "claude-haiku-4-5",
     ]
 
 
