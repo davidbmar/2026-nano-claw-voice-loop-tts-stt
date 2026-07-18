@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,7 +54,6 @@ def _on_agent_task_done(task: asyncio.Task) -> None:
 
 
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
-SESSION_ID = "voice-default"
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
 METRICS = metrics_db.init_db()
@@ -84,6 +84,9 @@ async def static_handler(request: web.Request) -> web.FileResponse:
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    # The browser never supplies this value. A fresh, unguessable id for each
+    # socket keeps agent memory and pending tool approvals conversation-local.
+    conversation_id = f"voice-{uuid.uuid4().hex}"
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     log.info("WebSocket connected")
@@ -132,6 +135,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 from voice.webrtc import Session
 
                 session = Session()
+                session._agent_session_id = conversation_id
                 session._backoff = Backoff()          # per-session backoff
                 session._resume_task = None            # pending false-alarm resume timer
                 session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
@@ -164,7 +168,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text:
                     await ws.send_json({"type": "transcription", "text": ""})
                     continue
-                turn_state = {"t0": t0, "asked": text, "stt_ms": stt_ms,
+                turn_state = {"t0": t0, "stt_ms": stt_ms,
                               "stt_size": session.stt_size, "voice_id": session.voice_id,
                               "model": session.model}
                 await ws.send_json({"type": "transcription", "text": text})
@@ -179,7 +183,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if not text or not session:
                     continue
                 await ws.send_json({"type": "transcription", "text": text})
-                turn_state = {"t0": time.monotonic(), "asked": text, "stt_ms": None,
+                turn_state = {"t0": time.monotonic(), "stt_ms": None,
                               "stt_size": session.stt_size, "voice_id": session.voice_id,
                               "model": session.model}
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text), turn_state)
@@ -285,12 +289,51 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await session._stream_task
             except BaseException:
                 pass  # CancelledError (expected) or the task's own error — we're tearing down
-        await http_client.aclose()
         if session:
-            await session.close()
+            try:
+                await session.close()
+            except Exception:
+                # Memory deletion is the privacy boundary; a WebRTC teardown
+                # failure must not prevent it from running.
+                log.exception("WebRTC session close failed")
+        await _delete_agent_session(http_client, conversation_id)
+        await http_client.aclose()
         log.info("WebSocket disconnected")
 
     return ws
+
+
+def _agent_session_id(session: Session) -> str:
+    """Return the server-owned Node session id for a browser conversation."""
+
+    session_id = getattr(session, "_agent_session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        # Direct unit-level callers do not pass through websocket_handler, so
+        # lazily give their synthetic Session the same server-owned identity.
+        session_id = f"voice-{uuid.uuid4().hex}"
+        session._agent_session_id = session_id
+    return session_id
+
+
+async def _delete_agent_session(client: httpx.AsyncClient, session_id: str) -> None:
+    """Best-effort deletion of an anonymous conversation's Node memory."""
+
+    try:
+        response = await client.request(
+            "DELETE",
+            f"{NANO_CLAW_URL}/api/session",
+            json={"sessionId": session_id},
+            timeout=10.0,
+        )
+        if response.status_code >= 300:
+            log.warning(
+                "nano-claw session cleanup failed: status=%d",
+                response.status_code,
+            )
+    except Exception:
+        # The Node service may be restarting. Its startup/TTL orphan sweep is
+        # the fallback, so disconnect cleanup must never break WebSocket close.
+        log.warning("nano-claw session cleanup request failed", exc_info=True)
 
 
 async def _handle_agent_request(
@@ -307,7 +350,7 @@ async def _handle_agent_request(
         async with client.stream(
             "POST",
             f"{NANO_CLAW_URL}/api/chat",
-            json={"message": text, "sessionId": SESSION_ID, **({"model": session.model} if session.model else {})},
+            json={"message": text, "sessionId": _agent_session_id(session), **({"model": session.model} if session.model else {})},
             headers={"Accept": "text/event-stream"},
         ) as resp:
             ctype = resp.headers.get("content-type", "")
@@ -436,7 +479,6 @@ async def _consume_sse(
         req_start = time.monotonic()
     first_delta = None
     first_audio = None
-    said_parts = []
     chunker = TextChunker()
     loop = asyncio.get_running_loop()
     total_bytes = 0
@@ -445,7 +487,6 @@ async def _consume_sse(
 
     async def speak_chunk(chunk: str):
         nonlocal total_bytes, first_audio
-        said_parts.append(chunk)
         await ws.send_json({"type": "agent_reply_delta", "text": chunk})
         queued_bytes = await loop.run_in_executor(
             None, session.enqueue_chunk, chunk, session.voice_id, session.speed
@@ -475,7 +516,7 @@ async def _consume_sse(
                     if tail:
                         await speak_chunk(tail)
                     _stash_turn_metrics(
-                        session, req_start, first_delta, first_audio, said_parts, obj.get("debug") or {}
+                        session, req_start, first_delta, first_audio, obj.get("debug") or {}
                     )
                     await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
                     await ws.send_json({"type": "agent_audio_end"})
@@ -487,7 +528,7 @@ async def _consume_sse(
                     debug = obj.get("debug") or {}
                     if debug:
                         await ws.send_json({"type": "debug", **debug})
-                    _write_turn_metrics(session, req_start, first_delta, first_audio, said_parts, debug)
+                    _write_turn_metrics(session, req_start, first_delta, first_audio, debug)
                     await ws.send_json({"type": "agent_reply_done"})
                 elif ev == "error":
                     await ws.send_json({"type": "agent_reply", "text": f"Error: {obj.get('error', 'agent error')}"})
@@ -525,7 +566,7 @@ def _generation_ms(debug):
     return max(1, total_ms - first_token_ms)
 
 
-def _stash_turn_metrics(session, req_start, first_delta, first_audio, said_parts, debug):
+def _stash_turn_metrics(session, req_start, first_delta, first_audio, debug):
     """Best-effort accumulation for a turn paused on tool approval."""
     try:
         turn = getattr(session, "_turn", None)
@@ -537,11 +578,7 @@ def _stash_turn_metrics(session, req_start, first_delta, first_audio, said_parts
         usage = debug.get("tokenUsage") or {}
         tokens_out = usage.get("completion")
         current_gen_ms = _generation_ms(debug)
-        prior_said = partial.get("said_parts")
-        if not isinstance(prior_said, list):
-            prior_said = []
         turn["_metrics"] = {
-            "said_parts": [*prior_said, *said_parts],
             "tokens_in": _sum_metric_values(partial.get("tokens_in"), usage.get("prompt")),
             "tokens_out": _sum_metric_values(partial.get("tokens_out"), tokens_out),
             "llm_total_ms": _sum_metric_values(partial.get("llm_total_ms"), debug.get("durationMs")),
@@ -557,15 +594,13 @@ def _stash_turn_metrics(session, req_start, first_delta, first_audio, said_parts
         log.exception("metrics: failed to stash partial turn")
 
 
-def _write_turn_metrics(session, req_start, first_delta, first_audio, said_parts, debug):
+def _write_turn_metrics(session, req_start, first_delta, first_audio, debug):
     try:
         turn = getattr(session, "_turn", {}) or {}
         partial = turn.get("_metrics") or {}
         usage = debug.get("tokenUsage") or {}
         current_tokens_out = usage.get("completion")
         current_gen_ms = _generation_ms(debug)
-        accumulated_said = partial.get("said_parts") if isinstance(partial.get("said_parts"), list) else []
-        said_parts = [*accumulated_said, *said_parts]
         req_start = partial.get("req_start", req_start)
         first_delta = partial.get("first_delta") if partial.get("first_delta") is not None else first_delta
         first_audio = partial.get("first_audio") if partial.get("first_audio") is not None else first_audio
@@ -584,10 +619,9 @@ def _write_turn_metrics(session, req_start, first_delta, first_audio, said_parts
         provider = model.split("/")[0] if "/" in model else None
         rec = {
             "ts": datetime.now().isoformat(timespec="seconds"),
-            "session_id": SESSION_ID, "provider": provider, "model": model,
+            "session_id": _agent_session_id(session), "provider": provider, "model": model,
             "model_version": debug.get("model"),
             "stt_size": turn.get("stt_size"), "voice_id": turn.get("voice_id"),
-            "asked_text": turn.get("asked"), "said_text": " ".join(said_parts).strip() or None,
             "stt_ms": turn.get("stt_ms"),
             "llm_ttft_ms": _ms(req_start, first_delta),
             "llm_total_ms": total_ms,
@@ -616,7 +650,7 @@ async def _handle_tool_decision(
         async with client.stream(
             "POST",
             endpoint,
-            json={"requestId": request_id, "sessionId": SESSION_ID},
+            json={"requestId": request_id, "sessionId": _agent_session_id(session)},
             headers={"Accept": "text/event-stream"},
         ) as resp:
             ctype = resp.headers.get("content-type", "")
@@ -677,9 +711,9 @@ async def _process_api_response(
             first_audio = await _speak_with_events(ws, session, reply)
         else:
             await ws.send_json({"type": "agent_audio_end"})
-        _write_turn_metrics(session, req_start, None, first_audio, [reply] if reply else [], debug or {})
+        _write_turn_metrics(session, req_start, None, first_audio, debug or {})
     elif data.get("type") == "tool_pending":
-        _stash_turn_metrics(session, req_start, None, None, [], debug or {})
+        _stash_turn_metrics(session, req_start, None, None, debug or {})
         await ws.send_json({
             "type": "tool_pending",
             "requestId": data["requestId"],
@@ -711,8 +745,12 @@ async def models_handler(request: web.Request) -> web.Response:
 async def metrics_handler(request: web.Request) -> web.Response:
     if METRICS is None:
         return web.json_response({"recent": [], "byModel": []})
+    recent = [
+        {key: value for key, value in row.items() if key not in {"asked_text", "said_text"}}
+        for row in metrics_db.recent(METRICS, 50)
+    ]
     return web.json_response({
-        "recent": metrics_db.recent(METRICS, 50),
+        "recent": recent,
         "byModel": metrics_db.aggregates(METRICS),
     })
 

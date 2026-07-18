@@ -12,7 +12,14 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { AgentConfig, ToolCall, StreamEvent, LLMResponse } from '../types';
 import { ProviderManager } from '../providers/index';
-import { Memory } from '../agent/memory';
+import {
+  Memory,
+  assertValidSessionId,
+  deleteMemoryFile,
+  isEphemeralSessionId,
+  isValidSessionId,
+  sweepEphemeralMemory,
+} from '../agent/memory';
 import { ContextBuilder } from '../agent/context';
 import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
@@ -43,6 +50,7 @@ interface DebugInfo {
 }
 
 interface PendingToolState {
+  sessionId: string;
   memory: Memory;
   toolCalls: ToolCall[];
   assistantContent: string;
@@ -60,6 +68,7 @@ const pendingRequests = new Map<string, PendingToolState>();
 
 // Clean up stale pending requests after 10 minutes
 const PENDING_TTL_MS = 10 * 60 * 1000;
+const EPHEMERAL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const pendingTimestamps = new Map<string, number>();
 
 function cleanupStale(): void {
@@ -70,6 +79,11 @@ function cleanupStale(): void {
       pendingTimestamps.delete(id);
     }
   }
+
+  for (const [sessionId, lastUsed] of sessionLastUsed) {
+    if (now - lastUsed > EPHEMERAL_SESSION_TTL_MS) deleteSession(sessionId);
+  }
+  sweepEphemeralMemory(new Set(sessionMemories.keys()), EPHEMERAL_SESSION_TTL_MS, now);
 }
 
 // ── Shared instances ─────────────────────────────────────────
@@ -228,6 +242,7 @@ async function stepLoop(
       // Pause — return tool calls for browser approval
       const requestId = crypto.randomUUID();
       pendingRequests.set(requestId, {
+        sessionId: memory.getSessionId(),
         memory,
         toolCalls: response.toolCalls,
         assistantContent: response.content || '',
@@ -322,7 +337,14 @@ export async function* stepLoopStream(
     if (toolCalls && toolCalls.length > 0) {
       memory.addMessage({ role: 'assistant', content: text, tool_calls: toolCalls });
       const requestId = crypto.randomUUID();
-      pendingRequests.set(requestId, { memory, toolCalls, assistantContent: text, iteration, agentConfig });
+      pendingRequests.set(requestId, {
+        sessionId: memory.getSessionId(),
+        memory,
+        toolCalls,
+        assistantContent: text,
+        iteration,
+        agentConfig,
+      });
       pendingTimestamps.set(requestId, Date.now());
       yield {
         type: 'tool_pending',
@@ -344,21 +366,38 @@ export async function* stepLoopStream(
 // ── Session memory cache ─────────────────────────────────────
 
 const sessionMemories = new Map<string, Memory>();
+const sessionLastUsed = new Map<string, number>();
 
-function getMemory(sessionId: string): Memory {
+export function getMemory(sessionId: string): Memory {
+  assertValidSessionId(sessionId);
   let memory = sessionMemories.get(sessionId);
   if (!memory) {
     memory = new Memory(sessionId);
     sessionMemories.set(sessionId, memory);
   }
+  if (isEphemeralSessionId(sessionId)) sessionLastUsed.set(sessionId, Date.now());
   return memory;
+}
+
+function deleteSession(sessionId: string): void {
+  const memory = sessionMemories.get(sessionId);
+  if (memory) memory.delete();
+  else deleteMemoryFile(sessionId);
+  sessionMemories.delete(sessionId);
+  sessionLastUsed.delete(sessionId);
+
+  for (const [requestId, pending] of pendingRequests) {
+    if (pending.sessionId !== sessionId) continue;
+    pendingRequests.delete(requestId);
+    pendingTimestamps.delete(requestId);
+  }
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────
 
 function setCorsHeaders(res: http.ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -452,7 +491,11 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
     return;
   }
-  const sessionId = body.sessionId || 'default';
+  if (body.sessionId !== undefined && !isValidSessionId(body.sessionId)) {
+    sendJson(res, 400, { error: 'Invalid "sessionId" field' });
+    return;
+  }
+  const sessionId = body.sessionId ?? 'default';
   const memory = getMemory(sessionId);
 
   memory.addMessage({ role: 'user', content: body.message });
@@ -468,19 +511,22 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
 async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const body = parseJsonBody(await readBody(req)) as { requestId?: string; sessionId?: string } | null;
-  if (!body || typeof body.requestId !== 'string') {
-    sendJson(res, 400, { error: 'Missing "requestId" field' });
+  if (!body || typeof body.requestId !== 'string' || typeof body.sessionId !== 'string') {
+    sendJson(res, 400, { error: 'Missing "requestId" or "sessionId" field' });
     return;
   }
   const pending = pendingRequests.get(body.requestId);
 
-  if (!pending) {
+  if (!pending || pending.sessionId !== body.sessionId) {
     sendJson(res, 404, { error: 'Unknown or expired requestId' });
     return;
   }
 
   pendingRequests.delete(body.requestId);
   pendingTimestamps.delete(body.requestId);
+  if (isEphemeralSessionId(pending.sessionId)) {
+    sessionLastUsed.set(pending.sessionId, Date.now());
+  }
 
   // Execute approved tools
   const toolRegistry = createToolRegistry();
@@ -518,19 +564,22 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
 
 async function handleReject(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const body = parseJsonBody(await readBody(req)) as { requestId?: string; sessionId?: string } | null;
-  if (!body || typeof body.requestId !== 'string') {
-    sendJson(res, 400, { error: 'Missing "requestId" field' });
+  if (!body || typeof body.requestId !== 'string' || typeof body.sessionId !== 'string') {
+    sendJson(res, 400, { error: 'Missing "requestId" or "sessionId" field' });
     return;
   }
   const pending = pendingRequests.get(body.requestId);
 
-  if (!pending) {
+  if (!pending || pending.sessionId !== body.sessionId) {
     sendJson(res, 404, { error: 'Unknown or expired requestId' });
     return;
   }
 
   pendingRequests.delete(body.requestId);
   pendingTimestamps.delete(body.requestId);
+  if (isEphemeralSessionId(pending.sessionId)) {
+    sessionLastUsed.set(pending.sessionId, Date.now());
+  }
 
   // Add tool rejection messages so LLM knows tools were denied
   for (const toolCall of pending.toolCalls) {
@@ -551,10 +600,29 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
   sendJson(res, 200, result);
 }
 
+async function handleDeleteSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = parseJsonBody(await readBody(req)) as { sessionId?: string } | null;
+  if (!body || typeof body.sessionId !== 'string' || !isEphemeralSessionId(body.sessionId)) {
+    sendJson(res, 400, { error: 'Invalid anonymous sessionId' });
+    return;
+  }
+
+  deleteSession(body.sessionId);
+  sendJson(res, 200, { deleted: true });
+}
+
 // ── Server ───────────────────────────────────────────────────
 
 export function createServer(): http.Server {
   initShared();
+
+  // Sweep anonymous files that outlived their cleanup callback. The age bound
+  // avoids deleting a live conversation owned by another API process during a
+  // rolling restart; periodic cleanup applies the same explicit 24-hour TTL.
+  sweepEphemeralMemory(new Set(sessionMemories.keys()), EPHEMERAL_SESSION_TTL_MS);
 
   // Periodic cleanup of stale pending requests
   const cleanupInterval = setInterval(cleanupStale, 60_000);
@@ -586,6 +654,13 @@ export function createServer(): http.Server {
         if (url === '/api/chat') await handleChat(req, res);
         else if (url === '/api/chat/approve') await handleApprove(req, res);
         else await handleReject(req, res);
+      } else if (method === 'DELETE' && url === '/api/session') {
+        const ct = req.headers['content-type'] || '';
+        if (!ct.includes('application/json')) {
+          sendJson(res, 415, { error: 'Content-Type must be application/json' });
+          return;
+        }
+        await handleDeleteSession(req, res);
       } else {
         sendJson(res, 404, { error: 'Not found' });
       }
