@@ -1,10 +1,10 @@
-"""Phone-audio primitives: G.711 μ-law codec, resampling, and endpointing.
+"""Phone-audio primitives: PCMU/L16 codecs, resampling, and endpointing.
 
-The Telnyx media WebSocket carries base64 μ-law @ 8 kHz in both directions;
-the rest of nano-claw speaks PCM16 (STT accepts any rate via X-Sample-Rate,
-TTS emits 48 kHz). This module owns every conversion in between, plus the
-silence-based utterance endpointer phone callers need (there is no mic
-button on a phone).
+The Telnyx media WebSocket carries base64 PCMU @ 8 kHz by default or raw L16
+PCM @ 16 kHz when wideband audio is enabled. The rest of nano-claw speaks
+PCM16 (STT accepts any rate via X-Sample-Rate, TTS emits 48 kHz). This module
+owns every conversion in between, plus the silence-based utterance endpointer
+phone callers need (there is no mic button on a phone).
 
 μ-law kernels adapted from riff/phone/audio_codec.py (same owner) — they
 have carried live PSTN traffic on this exact number.
@@ -56,6 +56,7 @@ def ulaw_decode(ulaw_bytes: bytes) -> np.ndarray:
 
 
 _FIR_48K_TO_8K: np.ndarray | None = None
+_FIR_48K_TO_16K: np.ndarray | None = None
 
 
 def _fir_48k_to_8k() -> np.ndarray:
@@ -75,6 +76,25 @@ def _fir_48k_to_8k() -> np.ndarray:
         taps /= taps.sum()
         _FIR_48K_TO_8K = taps
     return _FIR_48K_TO_8K
+
+
+def _fir_48k_to_16k() -> np.ndarray:
+    """Unity-gain Hamming-windowed sinc lowpass for 48k→16k decimation.
+
+    A 7.8 kHz cutoff preserves the wideband speech range while remaining
+    below the 8 kHz Nyquist frequency of the 16 kHz output.
+    """
+    global _FIR_48K_TO_16K
+    if _FIR_48K_TO_16K is None:
+        num_taps = 127
+        cutoff_hz = 7800.0
+        n = np.arange(num_taps, dtype=np.float64) - ((num_taps - 1) / 2.0)
+        normalized = cutoff_hz / TTS_RATE
+        taps = 2.0 * normalized * np.sinc(2.0 * normalized * n)
+        taps *= np.hamming(num_taps)
+        taps /= taps.sum()
+        _FIR_48K_TO_16K = taps
+    return _FIR_48K_TO_16K
 
 
 def resample_8k_to_16k(pcm16_8k: np.ndarray) -> np.ndarray:
@@ -102,8 +122,17 @@ def resample_48k_to_8k(pcm16_48k: np.ndarray) -> np.ndarray:
     return np.clip(decimated, -32768, 32767).astype(np.int16)
 
 
+def resample_48k_to_16k(pcm16_48k: np.ndarray) -> np.ndarray:
+    """Downsample 48 kHz PCM16 to 16 kHz: FIR lowpass then decimate by 3."""
+    if len(pcm16_48k) == 0:
+        return np.zeros(0, dtype=np.int16)
+    filtered = np.convolve(pcm16_48k.astype(np.float64), _fir_48k_to_16k(), mode="same")
+    decimated = filtered[::3]
+    return np.clip(decimated, -32768, 32767).astype(np.int16)
+
+
 class UtteranceEndpointer:
-    """Energy-based end-of-utterance detection for 8 kHz phone frames.
+    """Energy-based end-of-utterance detection for PCM16 phone frames.
 
     feed() consumes PCM16 frames and returns a completed utterance's PCM
     bytes when the caller has spoken and then gone quiet, else None.
@@ -121,12 +150,16 @@ class UtteranceEndpointer:
         end_silence_ms: int = 700,
         max_utterance_ms: int = 15_000,
         preroll_ms: int = 240,
+        rate_hz: int = 8000,
     ) -> None:
         self.rms_threshold = rms_threshold
         self.min_speech_ms = min_speech_ms
         self.end_silence_ms = end_silence_ms
         self.max_utterance_ms = max_utterance_ms
-        self._preroll_frames = max(1, preroll_ms // FRAME_MS)
+        self.rate_hz = rate_hz
+        frame_samples = max(1, rate_hz * FRAME_MS // 1000)
+        preroll_samples = rate_hz * preroll_ms // 1000
+        self._preroll_frames = max(1, preroll_samples // frame_samples)
         self.reset()
 
     def reset(self) -> None:
@@ -144,16 +177,16 @@ class UtteranceEndpointer:
             return
         self._in_utterance = True
         self._frames = list(frames)
-        self._speech_ms = sum(len(f) for f in frames) * 1000 // TELNYX_RATE
+        self._speech_ms = sum(len(f) for f in frames) * 1000 // self.rate_hz
         self._silence_ms = 0
 
     def feed(self, frame: np.ndarray, is_speech: bool | None = None) -> bytes | None:
-        """Consume one PCM16 frame (any length ≥ 1 sample at 8 kHz).
+        """Consume one PCM16 frame (any length ≥ 1 sample at ``rate_hz``).
 
         is_speech: externally-decided speech flag (e.g. Silero VAD). When
         None, falls back to the internal RMS threshold (energy mode).
         """
-        frame_ms = len(frame) * 1000 // TELNYX_RATE
+        frame_ms = len(frame) * 1000 // self.rate_hz
         if is_speech is None:
             rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
             is_speech = rms >= self.rms_threshold
@@ -178,7 +211,7 @@ class UtteranceEndpointer:
         else:
             self._silence_ms += frame_ms
 
-        utterance_ms = sum(len(f) for f in self._frames) * 1000 // TELNYX_RATE
+        utterance_ms = sum(len(f) for f in self._frames) * 1000 // self.rate_hz
         ended = (
             self._silence_ms >= self.end_silence_ms
             or utterance_ms >= self.max_utterance_ms
@@ -251,9 +284,11 @@ class BargeInDetector:
         rms_threshold: float = 550.0,
         trigger_ms: int = 240,
         window_ms: int = 800,
+        rate_hz: int = 8000,
     ) -> None:
         self.rms_threshold = rms_threshold
         self.trigger_ms = trigger_ms
+        self.rate_hz = rate_hz
         self._window_frames = max(1, window_ms // FRAME_MS)
         self.reset()
 
@@ -273,7 +308,7 @@ class BargeInDetector:
         self._recent.append((frame, is_speech))
         if len(self._recent) > self._window_frames:
             self._recent.pop(0)
-        speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // TELNYX_RATE
+        speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // self.rate_hz
         return speech_ms >= self.trigger_ms
 
     def take_frames(self) -> list[np.ndarray]:
@@ -289,3 +324,14 @@ def pcm48k_to_ulaw_frames(pcm48k_bytes: bytes) -> list[bytes]:
     pcm8k = resample_48k_to_8k(pcm48k)
     ulaw = ulaw_encode(pcm8k)
     return [ulaw[i : i + FRAME_SAMPLES] for i in range(0, len(ulaw), FRAME_SAMPLES)]
+
+
+def pcm48k_to_l16_frames(pcm48k_bytes: bytes) -> list[bytes]:
+    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in 20 ms Telnyx frames."""
+    pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
+    pcm16k = resample_48k_to_16k(pcm48k)
+    frame_samples = 16000 * FRAME_MS // 1000
+    return [
+        pcm16k[i : i + frame_samples].tobytes()
+        for i in range(0, len(pcm16k), frame_samples)
+    ]

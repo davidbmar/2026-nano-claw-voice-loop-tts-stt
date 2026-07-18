@@ -21,6 +21,7 @@ def phone_env(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_BARGE_IN", "0")
     monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "0")
     monkeypatch.setenv("NANO_CLAW_PHONE_VAD", "energy")
+    monkeypatch.delenv("NANO_CLAW_PHONE_CODEC", raising=False)
     monkeypatch.setattr(phone, "_vad_mode", None)
     phone._answered.clear()
     phone._overrides.clear()
@@ -107,6 +108,62 @@ def test_call_initiated_answers_with_streaming(monkeypatch):
     assert (cid, command) == ("cc-123", "answer")
     assert payload["stream_url"] == "wss://nano.example.com/ws/phone-media?token=sekrit"
     assert payload["stream_bidirectional_codec"] == "PCMU"
+
+
+def test_l16_call_answers_with_wideband_streaming(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_CODEC", "l16")
+    commands = []
+
+    async def fake_cmd(client, cid, command, payload):
+        commands.append((cid, command, payload))
+        return True
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_cmd)
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/phone/incoming?token=sekrit",
+                json=initiated_event("cc-l16"),
+            )
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    run(_run())
+    assert len(commands) == 1
+    cid, command, payload = commands[0]
+    assert (cid, command) == ("cc-l16", "answer")
+    assert payload["stream_codec"] == "L16"
+    assert payload["stream_bidirectional_codec"] == "L16"
+    assert payload["stream_bidirectional_sampling_rate"] == 16000
+
+
+def test_l16_media_is_decoded_as_raw_pcm16(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_CODEC", "l16")
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-l16-media")
+        captured = []
+
+        def capture_frame(frame, is_speech=None):
+            captured.append(frame.copy())
+            return None
+
+        call.endpointer.feed = capture_frame
+        source = np.arange(-160, 160, dtype=np.int16)
+        try:
+            call.feed_media(base64.b64encode(source.tobytes()).decode())
+            assert call.endpointer.rate_hz == 16000
+            assert len(captured) == 1
+            assert len(captured[0]) == len(source)
+            assert np.array_equal(captured[0], source)
+        finally:
+            await call.close()
+
+    run(_run())
 
 
 def test_media_ws_rejects_bad_token():

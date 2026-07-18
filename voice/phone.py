@@ -4,9 +4,9 @@ Call flow (mirrors riff's proven shape, minus the flow engine):
 
     caller → Telnyx Call Control app → POST /api/phone/incoming (webhook)
            → answer_with_streaming() → Telnyx opens WS to /ws/phone-media
-           → μ-law 8k frames in → UtteranceEndpointer → STT service
+           → PCMU 8k or L16 16k frames in → UtteranceEndpointer → STT service
            → nano-claw /api/chat (knowledge persona, tools disabled)
-           → TTS 48k PCM → μ-law 8k frames out → caller hears the answer
+           → TTS 48k PCM → configured phone codec → caller hears the answer
 
 Enabled only when NANO_CLAW_PHONE=1. Required env:
     TELNYX_API_KEY                  answer/hangup Call Control commands
@@ -22,6 +22,7 @@ Optional:
                                     is slow or unstable)
     NANO_CLAW_PHONE_STT_SIZE        Whisper size for phone turns (default
                                     base; "tiny" for low-powered nodes)
+    NANO_CLAW_PHONE_CODEC           pcmu (default) or l16 (16 kHz wideband)
     NANO_CLAW_PHONE_BARGE_IN        1 = caller can interrupt the agent
                                     mid-speech (buffer-flush via Telnyx
                                     "clear"); unset = half-duplex
@@ -45,9 +46,9 @@ from voice import metrics_db, silero_vad
 from voice.flow_session import FlowSession, get_flow_mode
 from voice.phone_audio import (
     FRAME_MS,
-    TELNYX_RATE,
     BargeInDetector,
     UtteranceEndpointer,
+    pcm48k_to_l16_frames,
     pcm48k_to_ulaw_frames,
     transcript_looks_incomplete,
     ulaw_decode,
@@ -91,6 +92,16 @@ def _cfg(name: str, default: str = "") -> str:
     if name in _overrides:
         return _overrides[name].strip()
     return os.environ.get(name, default).strip()
+
+
+def phone_codec() -> str:
+    """'pcmu' (default, 8 kHz μ-law) or 'l16' (16 kHz wideband PCM)."""
+    codec = _cfg("NANO_CLAW_PHONE_CODEC", "pcmu").lower()
+    return "l16" if codec == "l16" else "pcmu"
+
+
+def phone_rate() -> int:
+    return 16000 if phone_codec() == "l16" else 8000
 
 
 def phone_enabled() -> bool:
@@ -172,15 +183,23 @@ class PhoneCall:
         # check can rescue fragments; fixed mode keeps the safer 700 ms.
         self.dynamic = dynamic_endpoint_enabled()
         self.endpointer = UtteranceEndpointer(
-            end_silence_ms=450 if self.dynamic else 700
+            end_silence_ms=450 if self.dynamic else 700,
+            rate_hz=phone_rate(),
         )
         self._tail_extensions = 0
         self._primed_len = 0
         self._primed_text = ""
-        self.barge = BargeInDetector()
+        self.barge = BargeInDetector(rate_hz=phone_rate())
         # Neural VAD (one streaming instance per call; None = energy mode)
         self.vad_mode = get_vad_mode()
-        self.vad = silero_vad.SileroVAD() if self.vad_mode == "silero" else None
+        if self.vad_mode == "silero":
+            self.vad = (
+                silero_vad.SileroVAD(sample_rate=16000)
+                if phone_codec() == "l16"
+                else silero_vad.SileroVAD()
+            )
+        else:
+            self.vad = None
         self._vad_frames = 0
         log.info("[phone %s] VAD: %s", call_id[:8], self.vad_mode)
         self.speaking = False
@@ -264,7 +283,12 @@ class PhoneCall:
     def feed_media(self, payload_b64: str) -> None:
         if self.closed:
             return
-        pcm = ulaw_decode(base64.b64decode(payload_b64))
+        payload = base64.b64decode(payload_b64)
+        pcm = (
+            np.frombuffer(payload, dtype=np.int16)
+            if phone_codec() == "l16"
+            else ulaw_decode(payload)
+        )
         # Feed the neural VAD continuously (its recurrent state needs every
         # frame); both detectors then share one speech decision per frame.
         is_speech = self.vad.feed_speech(pcm) if self.vad else None
@@ -362,17 +386,17 @@ class PhoneCall:
 
     # ── One conversational turn ──────────────────────────────────
 
-    async def _run_turn(self, pcm8k: bytes) -> None:
+    async def _run_turn(self, pcm: bytes) -> None:
         try:
             # If we extended the window and the caller stayed quiet (<600 ms
             # of new audio), don't re-transcribe near-identical audio — they
             # trailed off; answer what we already heard.
-            new_audio_bytes = len(pcm8k) - self._primed_len
-            if self._tail_extensions and new_audio_bytes < int(TELNYX_RATE * 2 * 0.6):
+            new_audio_bytes = len(pcm) - self._primed_len
+            if self._tail_extensions and new_audio_bytes < int(phone_rate() * 2 * 0.6):
                 text = self._primed_text
                 self._tail_extensions = 2  # no further extensions
             else:
-                text = await self._transcribe(pcm8k)
+                text = await self._transcribe(pcm)
             if not text.strip():
                 self._tail_extensions = 0
                 return
@@ -387,16 +411,19 @@ class PhoneCall:
                 and transcript_looks_incomplete(text)
             ):
                 self._tail_extensions += 1
-                self._primed_len = len(pcm8k)
+                self._primed_len = len(pcm)
                 self._primed_text = text
                 log.info(
                     "[phone %s] tail-incomplete (%r…) — extending listen window (%d)",
                     self.call_id[:8], text[-30:], self._tail_extensions,
                 )
-                pcm = np.frombuffer(pcm8k, dtype=np.int16)
-                frame = TELNYX_RATE * FRAME_MS // 1000
+                pcm_samples = np.frombuffer(pcm, dtype=np.int16)
+                frame = phone_rate() * FRAME_MS // 1000
                 self.endpointer.prime(
-                    [pcm[i : i + frame] for i in range(0, len(pcm), frame)]
+                    [
+                        pcm_samples[i : i + frame]
+                        for i in range(0, len(pcm_samples), frame)
+                    ]
                 )
                 return
             self._tail_extensions = 0
@@ -506,14 +533,14 @@ class PhoneCall:
             out.append(tail)
         return out
 
-    async def _transcribe(self, pcm8k: bytes) -> str:
+    async def _transcribe(self, pcm: bytes) -> str:
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
         resp = await self._http.post(
             f"{stt_url}/transcribe",
-            content=pcm8k,
+            content=pcm,
             headers={
                 "Content-Type": "application/octet-stream",
-                "X-Sample-Rate": "8000",
+                "X-Sample-Rate": str(phone_rate()),
                 # Lower-powered nodes (M1 failover) run "tiny" for speed.
                 "X-Model-Size": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
             },
@@ -523,7 +550,7 @@ class PhoneCall:
     # ── Outbound audio ───────────────────────────────────────────
 
     async def _speak_chunk(self, sentence: str) -> None:
-        """TTS one sentence → paced μ-law frames. Caller manages `speaking`."""
+        """TTS one sentence → paced phone frames. Caller manages `speaking`."""
         if self.closed or not self.speaking or not sentence:
             return
         voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
@@ -534,7 +561,12 @@ class PhoneCall:
         loop = asyncio.get_running_loop()
         try:
             pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, speed)
-            for frame in pcm48k_to_ulaw_frames(pcm48k):
+            frames = (
+                pcm48k_to_l16_frames(pcm48k)
+                if phone_codec() == "l16"
+                else pcm48k_to_ulaw_frames(pcm48k)
+            )
+            for frame in frames:
                 if self.closed or not self.speaking:
                     return  # hung up or barged in
                 await self.ws.send_json(
@@ -615,15 +647,16 @@ async def incoming_handler(request: web.Request) -> web.Response:
         metrics_db.record_call_start(
             _metrics_conn, cid, caller, payload.get("to", "?"), _node()
         )
+        codec = phone_codec()
         async with httpx.AsyncClient() as client:
             await _telnyx_cmd(client, cid, "answer", {
                 "command_id": f"answer-{cid}",
                 "stream_url": ws_url,
                 "stream_track": "inbound_track",
-                "stream_codec": "PCMU",
+                "stream_codec": "L16" if codec == "l16" else "PCMU",
                 "stream_bidirectional_mode": "rtp",
-                "stream_bidirectional_codec": "PCMU",
-                "stream_bidirectional_sampling_rate": 8000,
+                "stream_bidirectional_codec": "L16" if codec == "l16" else "PCMU",
+                "stream_bidirectional_sampling_rate": phone_rate(),
             })
     elif event == "call.hangup":
         log.info("[phone] hangup cid=%s", cid[:16])
