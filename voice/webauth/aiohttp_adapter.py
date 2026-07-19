@@ -68,7 +68,10 @@ CONTENT_SECURITY_POLICY = (
     "frame-src https://accounts.google.com/gsi/; "
     "connect-src 'self' ws://localhost:9090 "
     "wss://nano.chattychapters.com https://accounts.google.com/gsi/; "
-    "style-src 'self' https://accounts.google.com/gsi/style; "
+    # 'unsafe-inline' is required for GIS's dynamically-generated button styles
+    # (per-render, so hashes don't apply). Style-only — script-src stays strict,
+    # so this does not weaken XSS protection on executable code.
+    "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; "
     "img-src 'self' data:; "
     "media-src 'self' blob:; "
     "object-src 'none'; "
