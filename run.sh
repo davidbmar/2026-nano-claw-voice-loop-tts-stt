@@ -166,24 +166,23 @@ else
   echo "LuxTTS service not set up (optional) — run lux-service/setup.sh to enable the cloned voice"
 fi
 
-# Clean up services on exit
+# On exit, DO NOT kill the STT/TTS/Lux host services. run.sh exits on every
+# container rebuild (docker stop → the foreground `docker run` returns), and
+# killing the services there silently breaks transcription until the next
+# manual restart — a real outage hit on 2026-07-19. The services are designed
+# to be reused (the /health check above reuses a running one), so leaving them
+# up makes a rebuild a seamless swap instead of a service-down window.
+# To stop them deliberately, use NANO_CLAW_STOP_SERVICES=1.
 cleanup() {
-  if [ -n "$STT_PID" ]; then
-    echo ""
-    echo "Stopping STT service (pid $STT_PID)..."
-    kill $STT_PID 2>/dev/null
-    wait $STT_PID 2>/dev/null
+  if [ "${NANO_CLAW_STOP_SERVICES:-}" != "1" ]; then
+    return 0
   fi
-  if [ -n "$TTS_PID" ]; then
-    echo "Stopping TTS service (pid $TTS_PID)..."
-    kill $TTS_PID 2>/dev/null
-    wait $TTS_PID 2>/dev/null
-  fi
-  if [ -n "$LUX_PID" ]; then
-    echo "Stopping LuxTTS service (pid $LUX_PID)..."
-    kill $LUX_PID 2>/dev/null
-    wait $LUX_PID 2>/dev/null
-  fi
+  for pid in "$STT_PID" "$TTS_PID" "$LUX_PID"; do
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    fi
+  done
 }
 trap cleanup EXIT
 
