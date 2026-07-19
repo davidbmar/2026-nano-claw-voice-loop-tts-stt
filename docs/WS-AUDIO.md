@@ -1,9 +1,35 @@
 # Browser audio over WebSocket
 
-Browser WebSocket audio is an alternative transport for the existing voice
-pipeline. Set `NANO_CLAW_WS_AUDIO=1` before a browser connects to enable it for
-that connection. The default is off, so the existing WebRTC path remains the
-default.
+Browser WebSocket audio is the default transport for the existing voice
+pipeline. `run.sh` assigns `NANO_CLAW_WS_AUDIO=1` when the variable is unset and
+forwards the value into the voice container, so remote browsers carry voice and
+text through the same tunnel-safe `/ws` connection.
+
+WebRTC is retained as an explicit same-LAN, lower-latency compatibility path.
+Set `NANO_CLAW_WS_AUDIO=0` (also accepts `false`, `off`, or `no`) before running
+`run.sh` to select it. Processes started without `run.sh` should set the flag
+explicitly. WebRTC was not retired because its direct peer-to-peer path remains
+useful on a local network; it is not suitable for the remote tunnel path unless
+STUN/TURN is added separately.
+
+## Readiness contract
+
+The browser treats text and voice as independent capabilities:
+
+- **Link ready** means the application `/ws` WebSocket is open. The text input,
+  Send button, and `text_message` path are available. A message entered during
+  the brief transport initialization window is queued until the server Session
+  exists. Link readiness never depends on mic permission, Web Audio, WebRTC
+  ICE, or the WS-audio handshake.
+- **Audio ready** means mic capture and the selected audio transport have both
+  connected. Only the mic/talk button depends on this state.
+
+The dock renders these as separate `TEXT` and `VOICE` indicators. If mic access
+is denied, an audio format is rejected, or ICE/audio setup fails, `TEXT` remains
+`READY`, `VOICE` reads unavailable, and the text conversation remains usable.
+In the browser implementation, `syncReadinessControls()` is the single control
+gate that enforces this ownership: link state owns text controls and audio state
+owns only the talk control.
 
 ## Wire format
 

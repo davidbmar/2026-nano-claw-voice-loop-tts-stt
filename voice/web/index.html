@@ -400,7 +400,19 @@
             <span class="talk-button-label">Start mic</span>
           </button>
           <span class="pill-divider" aria-hidden="true"></span>
-          <span class="connection-status"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Connecting…</span></span>
+          <span class="connection-status" role="status" aria-label="Text and voice readiness">
+            <span id="link-status" class="connection-state" data-state="connecting">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="connection-state-label">Text</span>
+              <span id="link-status-text" class="connection-state-value">Connecting</span>
+            </span>
+            <span class="connection-state-divider" aria-hidden="true"></span>
+            <span id="audio-status" class="connection-state" data-state="waiting">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="connection-state-label">Voice</span>
+              <span id="status-text" class="connection-state-value">Waiting for link</span>
+            </span>
+          </span>
           <button id="stop-btn" class="hidden" type="button">Stop audio</button>
         </div>
         <p id="phone-mode-help">Start the mic before dialing. The assistant listens, answers, and resumes listening automatically.</p>

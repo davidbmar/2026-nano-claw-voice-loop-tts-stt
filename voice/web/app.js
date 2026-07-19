@@ -17,6 +17,9 @@ import { Pcm16AudioPlayer } from "./ws-audio-player.js";
 
 // ── DOM refs ─────────────────────────────────────────────────
 const statusText = document.getElementById("status-text");
+const linkStatus = document.getElementById("link-status");
+const linkStatusText = document.getElementById("link-status-text");
+const audioStatus = document.getElementById("audio-status");
 const chatLog = document.getElementById("chat-log");
 const talkBtn = document.getElementById("talk-btn");
 const stopBtn = document.getElementById("stop-btn");
@@ -1035,7 +1038,10 @@ let isRecording = false;
 let agentSpeaking = false;
 let phoneModeEnabled = false;
 let autoTurnPending = false;
+let linkReady = false;
 let audioConnected = false;
+let textTransportReady = false;
+let pendingTextMessages = [];
 let vadAudioContext = null;
 let vadAnalyser = null;
 let vadSamples = null;
@@ -1054,6 +1060,49 @@ let sttRequestStartedAt = null;
 let firstAgentTextAt = null;
 let authHistory = null;
 let connectionGeneration = 0;
+
+// Readiness contract: an OPEN /ws link owns text input + Send. Audio readiness
+// owns only the mic/talk control. Keep all three controls synchronized here so
+// an audio failure can never lock a text-ready console again.
+function syncReadinessControls() {
+    textInput.disabled = !linkReady;
+    sendBtn.disabled = !linkReady;
+    talkBtn.disabled = !audioConnected;
+}
+
+function renderReadinessState(element, state, textElement, text) {
+    element.dataset.state = state;
+    textElement.textContent = text;
+}
+
+function setLinkState(state, text) {
+    linkReady = state === "ready";
+    renderReadinessState(linkStatus, state, linkStatusText, text);
+    syncReadinessControls();
+}
+
+function setAudioState(state, text) {
+    audioConnected = state === "ready";
+    renderReadinessState(audioStatus, state, statusText, text);
+    syncReadinessControls();
+}
+
+function setAudioUnavailable(reason) {
+    setAudioState(
+        "unavailable",
+        reason + (linkReady ? " · type below" : ""),
+    );
+}
+
+function setTextTransportReady(ready) {
+    textTransportReady = ready;
+    if (!ready || !linkReady || pendingTextMessages.length === 0) return;
+    const queued = pendingTextMessages;
+    pendingTextMessages = [];
+    queued.forEach(function (text) {
+        if (!sendMsg("text_message", { text: text })) pendingTextMessages.push(text);
+    });
+}
 
 const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
@@ -1779,8 +1828,13 @@ function setPhoneStatus(text) {
 
 // ── WebSocket ────────────────────────────────────────────────
 function sendMsg(type, payload) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify(Object.assign({ type: type }, payload || {})));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+        ws.send(JSON.stringify(Object.assign({ type: type }, payload || {})));
+        return true;
+    } catch (_error) {
+        return false;
+    }
 }
 
 // ── Voice picker ─────────────────────────────────────────────
@@ -1914,7 +1968,10 @@ sttSelect.addEventListener("change", function () {
 
 function connect() {
     const generation = ++connectionGeneration;
-    statusText.textContent = "Connecting...";
+    setTextTransportReady(false);
+    pendingTextMessages = [];
+    setLinkState("connecting", "Connecting");
+    setAudioState("waiting", "Waiting for link");
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(proto + "//" + location.host + "/ws");
     socket.binaryType = "arraybuffer";
@@ -1922,7 +1979,8 @@ function connect() {
 
     socket.onopen = function () {
         if (socket !== ws || generation !== connectionGeneration) return;
-        statusText.textContent = "Authenticating...";
+        setLinkState("ready", "Text ready");
+        setAudioState("connecting", "Starting voice");
         sendMsg("hello");
         loadVoices();
         loadModels();
@@ -1944,15 +2002,22 @@ function connect() {
 
     socket.onerror = function () {
         if (socket !== ws || generation !== connectionGeneration) return;
-        statusText.textContent = "Connection failed";
+        if (socket.readyState === WebSocket.OPEN) {
+            setLinkState("ready", "Text ready");
+        } else {
+            setTextTransportReady(false);
+            setLinkState("offline", "Link failed");
+            cleanupAudioTransport();
+        }
     };
 
     socket.onclose = function () {
         if (socket !== ws || generation !== connectionGeneration) return;
         ws = null;
         connectionGeneration += 1;
-        statusText.textContent = "Disconnected";
-        talkBtn.disabled = true;
+        setTextTransportReady(false);
+        pendingTextMessages = [];
+        setLinkState("offline", "Offline");
         cleanupAudioTransport();
     };
 }
@@ -1981,35 +2046,40 @@ function handleMessage(msg, generation) {
             syncBargeInControls();
             createBargeInController();
             wsAudioEnabled = msg.wsAudio === true;
+            if (wsAudioEnabled) setTextTransportReady(true);
             const startAudio = wsAudioEnabled
                 ? startWsAudio(generation, msg.wsAudioFormat)
                 : startWebRTC(generation);
             startAudio.catch(function () {
                 if (generation === connectionGeneration) {
-                    statusText.textContent = "Audio connection failed";
                     if (wsAudioEnabled) cleanupWsAudio();
+                    else cleanupWebRTC();
+                    setAudioUnavailable("Connection failed");
                 }
             });
             break;
 
         case "webrtc_answer":
-            handleWebRTCAnswer(msg.sdp);
+            // The server creates the legacy WebRTC Session before answering,
+            // so queued text can flow even if applying the audio answer fails.
+            setTextTransportReady(true);
+            handleWebRTCAnswer(msg.sdp).catch(function () {
+                if (generation !== connectionGeneration) return;
+                cleanupWebRTC();
+                setAudioUnavailable("Connection failed");
+            });
             break;
 
         case "mic_audio_ready":
             if (!wsAudioEnabled) break;
-            audioConnected = true;
-            statusText.textContent = "Connected";
-            talkBtn.disabled = false;
-            textInput.disabled = false;
-            sendBtn.disabled = false;
+            setAudioState("ready", "Voice ready");
             if (wsAudioPlayer) wsAudioPlayer.resume().catch(function () {});
             break;
 
         case "mic_audio_error":
             if (wsAudioEnabled) {
-                statusText.textContent = "Audio format rejected";
                 cleanupWsAudio();
+                setAudioUnavailable("Format rejected");
             }
             break;
 
@@ -2107,7 +2177,7 @@ function handleMessage(msg, generation) {
 
 // ── WebSocket audio ───────────────────────────────────────────
 async function startWsAudio(generation, announcedFormat) {
-    statusText.textContent = "Requesting mic...";
+    setAudioState("connecting", "Requesting mic");
     const format = announcedFormat || {};
     const micFormat = format.mic || {};
     const agentFormat = format.agent || {};
@@ -2128,7 +2198,7 @@ async function startWsAudio(generation, announcedFormat) {
             },
         });
     } catch (_error) {
-        if (generation === connectionGeneration) statusText.textContent = "Mic access denied";
+        if (generation === connectionGeneration) setAudioUnavailable("Mic denied");
         return;
     }
 
@@ -2137,7 +2207,7 @@ async function startWsAudio(generation, announcedFormat) {
         return;
     }
     micStream = requestedStream;
-    statusText.textContent = "Connecting audio...";
+    setAudioState("connecting", "Connecting voice");
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass || typeof AudioWorkletNode === "undefined") {
@@ -2238,62 +2308,88 @@ function cleanupWsAudio() {
         micStream = null;
     }
 
-    audioConnected = false;
     isRecording = false;
     setTalkButtonLabel("Start mic");
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
-    talkBtn.disabled = true;
-    textInput.disabled = true;
-    sendBtn.disabled = true;
+    setAudioUnavailable("Audio unavailable");
     setAgentSpeaking(false);
     wsAudioEnabled = false;
 }
 
 // ── WebRTC ───────────────────────────────────────────────────
 async function startWebRTC(generation) {
-    statusText.textContent = "Requesting mic...";
-
-    let requestedStream;
-    try {
-        requestedStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
-        });
-    } catch (_e) {
-        if (generation === connectionGeneration) statusText.textContent = "Mic access denied";
-        return;
-    }
-
-    if (generation !== connectionGeneration) {
-        requestedStream.getTracks().forEach(function (track) { track.stop(); });
-        return;
-    }
-    micStream = requestedStream;
-
-    statusText.textContent = "Connecting audio...";
-
+    setAudioState("connecting", "Requesting mic");
     const peerConnection = new RTCPeerConnection();
     pc = peerConnection;
-    peerConnection.addTrack(micStream.getAudioTracks()[0], micStream);
+    micStream = null;
+    let iceReady = false;
+    let micPermissionDenied = false;
+    // Negotiate the Session immediately, before the permission prompt settles.
+    // A later mic grant can attach to this already-negotiated sendrecv slot.
+    const micTransceiver = peerConnection.addTransceiver("audio", {
+        direction: "sendrecv",
+    });
+
+    function syncWebRtcReadiness() {
+        if (generation !== connectionGeneration || pc !== peerConnection) return;
+        if (micStream && iceReady) {
+            setAudioState("ready", "Voice ready");
+        } else if (micPermissionDenied) {
+            setAudioUnavailable("Mic denied");
+        } else {
+            setAudioState(
+                "connecting",
+                micStream ? "Connecting voice" : "Mic permission pending",
+            );
+        }
+    }
+
+    navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+        },
+    }).then(async function (requestedStream) {
+        if (generation !== connectionGeneration || pc !== peerConnection) {
+            requestedStream.getTracks().forEach(function (track) { track.stop(); });
+            return;
+        }
+        const micTrack = requestedStream.getAudioTracks()[0];
+        if (!micTrack) {
+            requestedStream.getTracks().forEach(function (track) { track.stop(); });
+            throw new Error("Microphone stream has no audio track");
+        }
+        micStream = requestedStream;
+        try {
+            await micTransceiver.sender.replaceTrack(micTrack);
+        } catch (error) {
+            requestedStream.getTracks().forEach(function (track) { track.stop(); });
+            if (micStream === requestedStream) micStream = null;
+            throw error;
+        }
+        syncWebRtcReadiness();
+    }).catch(function () {
+        if (generation !== connectionGeneration || pc !== peerConnection) return;
+        micPermissionDenied = true;
+        setAudioUnavailable("Mic denied");
+    });
 
     peerConnection.oniceconnectionstatechange = function () {
         if (generation !== connectionGeneration || pc !== peerConnection) return;
         var state = peerConnection.iceConnectionState;
         if (state === "connected" || state === "completed") {
-            audioConnected = true;
-            statusText.textContent = "Connected";
-            talkBtn.disabled = false;
-            textInput.disabled = false;
-            sendBtn.disabled = false;
+            iceReady = true;
+            syncWebRtcReadiness();
             if (audioEl) audioEl.play().catch(function () {});
-        } else if (state === "failed") {
-            audioConnected = false;
-            statusText.textContent = "Audio failed";
+        } else if (state === "failed" || state === "disconnected" || state === "closed") {
+            iceReady = false;
             cleanupWebRTC();
+            setAudioUnavailable("Connection failed");
+        } else if (state === "new" || state === "checking") {
+            iceReady = false;
+            syncWebRtcReadiness();
         }
     };
 
@@ -2314,7 +2410,9 @@ async function startWebRTC(generation) {
     await peerConnection.setLocalDescription(offer);
     await waitForIceGathering(peerConnection);
     if (generation !== connectionGeneration || pc !== peerConnection) return;
-    sendMsg("webrtc_offer", { sdp: peerConnection.localDescription.sdp });
+    if (!sendMsg("webrtc_offer", { sdp: peerConnection.localDescription.sdp })) {
+        throw new Error("WebSocket closed before WebRTC offer");
+    }
 }
 
 function waitForIceGathering(peerConn) {
@@ -2340,20 +2438,21 @@ function cleanupWebRTC() {
     stopCallerVisualization();
     setVisualizationSpeaking(false);
     teardownAgentAudioAnalyser();
-    if (pc) { pc.close(); pc = null; }
+    if (pc) {
+        const closingPeer = pc;
+        pc = null;
+        closingPeer.close();
+    }
     if (audioEl) { audioEl.srcObject = null; audioEl.remove(); audioEl = null; }
     if (micStream) {
         micStream.getTracks().forEach(function (t) { t.stop(); });
         micStream = null;
     }
-    audioConnected = false;
     isRecording = false;
     setTalkButtonLabel("Start mic");
     talkBtn.classList.remove("recording", "phone-active");
     talkBtn.setAttribute("aria-pressed", "false");
-    talkBtn.disabled = true;
-    textInput.disabled = true;
-    sendBtn.disabled = true;
+    setAudioUnavailable("Audio unavailable");
     setAgentSpeaking(false);
 }
 
@@ -2516,7 +2615,14 @@ talkBtn.addEventListener("click", function () {
 // ── Text input ───────────────────────────────────────────────
 function sendTextMessage() {
     var text = textInput.value.trim();
-    if (!text) return;
+    if (!text || !linkReady) return;
+    if (textTransportReady) {
+        if (!sendMsg("text_message", { text: text })) return;
+    } else {
+        // `hello` is sent first on the socket. Hold a very early user message
+        // until the server has created the selected transport's Session.
+        pendingTextMessages.push(text);
+    }
     if (wsAudioEnabled && wsAudioPlayer) {
         wsAudioPlayer.resume().catch(function () {});
     }
@@ -2526,7 +2632,6 @@ function sendTextMessage() {
         autoTurnPending = true;
         setPhoneStatus("Thinking...");
     }
-    sendMsg("text_message", { text: text });
 }
 
 sendBtn.addEventListener("click", sendTextMessage);

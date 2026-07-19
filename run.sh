@@ -209,6 +209,10 @@ export NANO_CLAW_KNOWLEDGE
 if [ -n "$NANO_CLAW_KNOWLEDGE" ]; then
   echo "Knowledge: $NANO_CLAW_KNOWLEDGE"
 fi
+# WebSocket audio survives the same HTTP tunnel as text and is the remote-safe
+# default. Set NANO_CLAW_WS_AUDIO=0 (or false/off/no) to retain WebRTC for a
+# same-LAN, lower-latency deployment.
+NANO_CLAW_WS_AUDIO="${NANO_CLAW_WS_AUDIO:-1}"
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
@@ -230,6 +234,7 @@ docker run $TTY_FLAGS --rm \
   -e OPENAI_API_KEY \
   -e NANO_CLAW_BARGE_IN \
   -e NANO_CLAW_STREAM \
+  -e NANO_CLAW_WS_AUDIO="$NANO_CLAW_WS_AUDIO" \
   -e NANO_CLAW_KNOWLEDGE \
   -e NANO_CLAW_DISABLE_TOOLS \
   -e NANO_CLAW_PHONE \
