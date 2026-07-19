@@ -27,6 +27,36 @@ const textInput = document.getElementById("text-input");
 const sendBtn = document.getElementById("send-btn");
 const debugPanel = document.getElementById("debug-panel");
 const debugToggle = document.getElementById("debug-toggle");
+
+// On-page diagnostic log — enable by adding ?diag to the URL (e.g.
+// nano.chattychapters.com/?diag). Renders a readable, tappable-to-copy log
+// overlay on the device itself, for debugging where a browser console isn't
+// reachable (phones). No-op when the flag is absent, so normal users see
+// nothing.
+var DIAG_ON = /(^|[?&])diag\b/.test(location.search);
+var _diagEl = null;
+function pageLog(msg) {
+    if (!DIAG_ON) return;
+    try {
+        if (!_diagEl) {
+            _diagEl = document.createElement("div");
+            _diagEl.id = "diag-log";
+            _diagEl.style.cssText =
+                "position:fixed;z-index:99999;left:6px;right:6px;bottom:6px;max-height:42vh;" +
+                "overflow:auto;background:rgba(5,6,6,0.92);color:#8fc9bc;border:1px solid #ff775f;" +
+                "border-radius:8px;padding:8px 10px;font:11px/1.5 SFMono-Regular,Menlo,monospace;" +
+                "white-space:pre-wrap;word-break:break-word;";
+            _diagEl.title = "tap to copy";
+            _diagEl.addEventListener("click", function () {
+                try { navigator.clipboard.writeText(_diagEl.textContent); } catch (_e) {}
+            });
+            (document.body || document.documentElement).appendChild(_diagEl);
+        }
+        var t = new Date().toISOString().slice(11, 23);
+        _diagEl.textContent = t + "  " + msg + "\n" + _diagEl.textContent;
+    } catch (_e) {}
+}
+pageLog("diag on · ua=" + navigator.userAgent.slice(0, 40));
 const debugContent = document.getElementById("debug-content");
 const debugModalOverlay = document.getElementById("debug-modal-overlay");
 const debugModalBody = document.getElementById("debug-modal-body");
@@ -1977,8 +2007,10 @@ function connect() {
     socket.binaryType = "arraybuffer";
     ws = socket;
 
+    pageLog("WS connecting gen=" + generation);
     socket.onopen = function () {
         if (socket !== ws || generation !== connectionGeneration) return;
+        pageLog("WS OPEN gen=" + generation);
         setLinkState("ready", "Text ready");
         setAudioState("connecting", "Starting voice");
         sendMsg("hello");
@@ -2002,6 +2034,7 @@ function connect() {
 
     socket.onerror = function () {
         if (socket !== ws || generation !== connectionGeneration) return;
+        pageLog("WS ERROR readyState=" + socket.readyState);
         if (socket.readyState === WebSocket.OPEN) {
             setLinkState("ready", "Text ready");
         } else {
@@ -2011,8 +2044,11 @@ function connect() {
         }
     };
 
-    socket.onclose = function () {
+    socket.onclose = function (event) {
         if (socket !== ws || generation !== connectionGeneration) return;
+        pageLog("WS CLOSE code=" + (event && event.code) +
+            " reason=" + ((event && event.reason) || "(none)") +
+            " clean=" + (event && event.wasClean));
         ws = null;
         connectionGeneration += 1;
         setTextTransportReady(false);
@@ -2046,6 +2082,8 @@ function handleMessage(msg, generation) {
             syncBargeInControls();
             createBargeInController();
             wsAudioEnabled = msg.wsAudio === true;
+            pageLog("hello_ack wsAudio=" + wsAudioEnabled + " -> " +
+                (wsAudioEnabled ? "WS-audio" : "WebRTC") + " path");
             if (wsAudioEnabled) setTextTransportReady(true);
             const startAudio = wsAudioEnabled
                 ? startWsAudio(generation, msg.wsAudioFormat)
@@ -2072,11 +2110,13 @@ function handleMessage(msg, generation) {
 
         case "mic_audio_ready":
             if (!wsAudioEnabled) break;
+            pageLog("mic_audio_ready -> Voice ready (mic btn enabled)");
             setAudioState("ready", "Voice ready");
             if (wsAudioPlayer) wsAudioPlayer.resume().catch(function () {});
             break;
 
         case "mic_audio_error":
+            pageLog("mic_audio_error: " + (msg.error || "?"));
             if (wsAudioEnabled) {
                 cleanupWsAudio();
                 setAudioUnavailable("Format rejected");
@@ -2198,9 +2238,11 @@ async function startWsAudio(generation, announcedFormat) {
             },
         });
     } catch (_error) {
+        pageLog("getUserMedia FAILED: " + (_error && _error.name) + " " + (_error && _error.message || ""));
         if (generation === connectionGeneration) setAudioUnavailable("Mic denied");
         return;
     }
+    pageLog("getUserMedia OK -> sending mic_audio_start");
 
     if (generation !== connectionGeneration || !wsAudioEnabled) {
         requestedStream.getTracks().forEach(function (track) { track.stop(); });
