@@ -39,8 +39,8 @@ audio unambiguous:
 
 - Browser to server binary: mono signed PCM16 little-endian at 16 kHz. Each
   normal message contains 320 samples (640 bytes, about 20 ms).
-- Server to browser binary: mono signed PCM16 little-endian at 16 kHz, normally
-  framed as 320 samples (640 bytes, about 20 ms).
+- Server to browser binary: mono signed PCM16 little-endian at 48 kHz, normally
+  framed as 960 samples (1,920 bytes, about 20 ms). This is about 96 KB/s.
 
 After `hello`, an enabled server returns `wsAudio: true` and a
 `wsAudioFormat` object in `hello_ack`. Before its first binary mic message, the
@@ -63,9 +63,13 @@ announcement, odd-length PCM16, empty frames, and incorrectly sized frames are
 also rejected. Each binary mic frame must match the announced 320-sample size.
 
 The existing `agent_audio_start` and `agent_audio_end` JSON messages bracket
-agent playback. TTS is still synthesized at 48 kHz, then converted with
-`voice.phone_audio.resample_48k_to_16k` and sent as binary frames. The browser
-queues those frames on a contiguous Web Audio timeline. Existing
+agent playback. TTS is synthesized at 48 kHz and sent unchanged, preserving
+the full band and avoiding per-frame resampling on the common 48 kHz Web Audio
+context. The browser reads this rate from `wsAudioFormat.agent` and queues the
+frames on a contiguous Web Audio timeline with a bounded 150 ms initial lead
+to absorb tunnel and cellular jitter. A device whose native AudioContext rate
+is not 48 kHz still requires browser resampling, so it remains a residual
+device-specific quality case. Existing
 `barge_in`, `barge_in_commit`, `barge_in_false`, and `stop_speaking` messages
 remain the playback-control protocol.
 

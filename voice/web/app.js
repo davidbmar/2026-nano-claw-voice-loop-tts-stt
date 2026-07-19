@@ -2333,8 +2333,8 @@ async function startWsAudio(generation, announcedFormat) {
     const agentFormat = format.agent || {};
     if (micFormat.format !== "pcm_s16le" || micFormat.sampleRate !== 16000
             || micFormat.channels !== 1 || micFormat.frameSamples !== 320
-            || agentFormat.format !== "pcm_s16le" || agentFormat.sampleRate !== 16000
-            || agentFormat.channels !== 1 || agentFormat.frameSamples !== 320) {
+            || agentFormat.format !== "pcm_s16le" || agentFormat.sampleRate !== 48000
+            || agentFormat.channels !== 1 || agentFormat.frameSamples !== 960) {
         throw new Error("Server announced an unsupported WebSocket audio format");
     }
 

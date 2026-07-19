@@ -9,9 +9,9 @@ from aiohttp import web
 
 from voice import server, tts, webrtc
 from voice.audio.webrtc_audio_source import WebRTCAudioSource
-from voice.phone_audio import resample_48k_to_16k
 from voice.ws_audio import (
-    FRAME_BYTES,
+    AGENT_FRAME_BYTES,
+    MIC_FRAME_BYTES,
     WsAudioFormatError,
     WsAudioTransport,
     wire_format,
@@ -125,6 +125,23 @@ def test_ws_mic_uses_the_same_accumulator_as_a_webrtc_track():
     run(exercise())
 
 
+def test_wire_format_keeps_mic_at_16k_and_announces_agent_at_48k():
+    assert wire_format() == {
+        "mic": {
+            "format": "pcm_s16le",
+            "sampleRate": 16000,
+            "channels": 1,
+            "frameSamples": 320,
+        },
+        "agent": {
+            "format": "pcm_s16le",
+            "sampleRate": 48000,
+            "channels": 1,
+            "frameSamples": 960,
+        },
+    }
+
+
 def test_handler_binds_binary_audio_to_its_server_owned_session(monkeypatch):
     base_session = webrtc.Session
 
@@ -199,14 +216,16 @@ def test_ws_mic_stt_uses_the_announced_native_rate(monkeypatch):
             text, duration, stt_ms = await session.stop_recording()
             assert (text, duration, stt_ms) == ("native rate", 0.02, 7)
             assert captured["headers"]["X-Sample-Rate"] == "16000"
-            assert len(captured["content"]) == FRAME_BYTES
+            assert len(captured["content"]) == MIC_FRAME_BYTES
+            assert session._mic_sample_rate == 16000
+            assert session._playback_sample_rate == 48000
         finally:
             await session.close()
 
     run(exercise())
 
 
-def test_agent_pcm_is_resampled_and_framed_to_the_socket(monkeypatch):
+def test_agent_pcm_stays_at_48k_and_is_framed_to_the_socket(monkeypatch):
     pcm_48k = np.arange(960, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "synthesize", lambda *_args: pcm_48k)
 
@@ -214,16 +233,14 @@ def test_agent_pcm_is_resampled_and_framed_to_the_socket(monkeypatch):
         socket = FakeWebSocket()
         transport = WsAudioTransport(socket)
         session = webrtc.Session(transport)
-        expected = resample_48k_to_16k(
-            np.frombuffer(pcm_48k, dtype=np.int16)
-        ).tobytes()
         try:
+            assert transport.prepare_tts(pcm_48k) == pcm_48k
             session.begin_stream()
             outbound_bytes = session.enqueue_chunk("test", "voice", 1.0)
             await asyncio.wait_for(socket.sent.wait(), timeout=1)
-            assert socket.binary == [expected]
-            assert len(socket.binary[0]) == FRAME_BYTES
-            assert outbound_bytes == len(expected)
+            assert socket.binary == [pcm_48k]
+            assert len(socket.binary[0]) == AGENT_FRAME_BYTES
+            assert outbound_bytes == len(pcm_48k)
             await session.end_stream(outbound_bytes)
         finally:
             await session.close()

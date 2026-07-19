@@ -1,9 +1,9 @@
 """PCM16 browser audio transport carried by the main application WebSocket.
 
 This mirrors the media-WebSocket structure proven by ``voice.phone`` while
-keeping browser audio on the already-authenticated ``/ws`` connection.  TTS
-conversion reuses ``voice.phone_audio.resample_48k_to_16k``; no phone DSP is
-forked here.
+keeping browser audio on the already-authenticated ``/ws`` connection.  The
+mic remains at the STT-native 16 kHz rate while agent TTS stays at its native
+48 kHz rate for full-band browser playback.
 """
 
 from __future__ import annotations
@@ -12,10 +12,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
-from voice.phone_audio import resample_48k_to_16k
-
 if TYPE_CHECKING:
     from voice.webrtc import QueuedGenerator, Session
 
@@ -23,11 +19,14 @@ if TYPE_CHECKING:
 log = logging.getLogger("ws-audio")
 
 PCM_FORMAT = "pcm_s16le"
-SAMPLE_RATE = 16_000
 CHANNELS = 1
 FRAME_DURATION_SECONDS = 0.020
-FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_DURATION_SECONDS)
-FRAME_BYTES = FRAME_SAMPLES * 2
+MIC_SAMPLE_RATE = 16_000
+MIC_FRAME_SAMPLES = int(MIC_SAMPLE_RATE * FRAME_DURATION_SECONDS)
+MIC_FRAME_BYTES = MIC_FRAME_SAMPLES * 2
+AGENT_SAMPLE_RATE = 48_000
+AGENT_FRAME_SAMPLES = int(AGENT_SAMPLE_RATE * FRAME_DURATION_SECONDS)
+AGENT_FRAME_BYTES = AGENT_FRAME_SAMPLES * 2
 OUTBOUND_PREBUFFER_FRAMES = 5
 
 
@@ -38,13 +37,19 @@ class WsAudioFormatError(ValueError):
 def wire_format() -> dict[str, dict[str, int | str]]:
     """Return the fixed mic and agent PCM formats advertised to the browser."""
 
-    stream = {
+    mic = {
         "format": PCM_FORMAT,
-        "sampleRate": SAMPLE_RATE,
+        "sampleRate": MIC_SAMPLE_RATE,
         "channels": CHANNELS,
-        "frameSamples": FRAME_SAMPLES,
+        "frameSamples": MIC_FRAME_SAMPLES,
     }
-    return {"mic": dict(stream), "agent": dict(stream)}
+    agent = {
+        "format": PCM_FORMAT,
+        "sampleRate": AGENT_SAMPLE_RATE,
+        "channels": CHANNELS,
+        "frameSamples": AGENT_FRAME_SAMPLES,
+    }
+    return {"mic": mic, "agent": agent}
 
 
 class WsAudioTransport:
@@ -56,8 +61,10 @@ class WsAudioTransport:
     which transport drains its TTS queue.
     """
 
-    sample_rate = SAMPLE_RATE
-    frame_samples = FRAME_SAMPLES
+    sample_rate = MIC_SAMPLE_RATE
+    frame_samples = MIC_FRAME_SAMPLES
+    playback_sample_rate = AGENT_SAMPLE_RATE
+    playback_frame_samples = AGENT_FRAME_SAMPLES
 
     def __init__(self, ws: Any):
         self.ws = ws
@@ -73,6 +80,9 @@ class WsAudioTransport:
         if self._session is not None and self._session is not session:
             raise RuntimeError("WebSocket audio transport is already attached")
         self._session = session
+        # Session's legacy transport seam initializes both directions from
+        # sample_rate. Correct its playback clock while leaving mic/STT at 16 kHz.
+        session._playback_sample_rate = self.playback_sample_rate
 
     def start_mic(self, message: dict[str, Any]) -> None:
         """Validate the mandatory format announcement before accepting PCM."""
@@ -93,8 +103,8 @@ class WsAudioTransport:
         log.info(
             "WebSocket mic ready: %s mono %d Hz, %d samples/frame",
             PCM_FORMAT,
-            SAMPLE_RATE,
-            FRAME_SAMPLES,
+            MIC_SAMPLE_RATE,
+            MIC_FRAME_SAMPLES,
         )
 
     def receive_mic_frame(self, data: bytes | bytearray | memoryview) -> None:
@@ -109,19 +119,16 @@ class WsAudioTransport:
             raise WsAudioFormatError(
                 "mic audio frame must contain non-empty, complete PCM16 samples"
             )
-        if len(pcm) != FRAME_BYTES:
+        if len(pcm) != MIC_FRAME_BYTES:
             raise WsAudioFormatError(
-                f"mic audio frame must be exactly {FRAME_BYTES} bytes"
+                f"mic audio frame must be exactly {MIC_FRAME_BYTES} bytes"
             )
         self._session.receive_mic_pcm(pcm)
 
     def prepare_tts(self, pcm_48k: bytes) -> bytes:
-        """Convert synthesized 48 kHz PCM16 to the outbound 16 kHz wire rate."""
+        """Keep synthesized 48 kHz PCM16 unchanged for full-band playback."""
 
-        if not pcm_48k:
-            return b""
-        pcm = np.frombuffer(pcm_48k, dtype=np.int16)
-        return resample_48k_to_16k(pcm).tobytes()
+        return pcm_48k
 
     def set_generator(self, generator: QueuedGenerator) -> None:
         """Attach Session's queue and start its paced binary-frame pump."""
@@ -169,7 +176,7 @@ class WsAudioTransport:
 
                 if self._generator is not generator or self._closed:
                     break
-                pcm = generator.queue.read(FRAME_BYTES)
+                pcm = generator.queue.read(AGENT_FRAME_BYTES)
                 await self.ws.send_bytes(pcm)
                 paced_frames += 1
         except asyncio.CancelledError:

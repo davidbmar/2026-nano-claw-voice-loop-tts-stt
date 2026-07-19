@@ -1,6 +1,9 @@
 // This module intentionally has no top-level browser side effects so it can be
 // syntax-checked outside a page. It schedules every PCM frame immediately after
-// the previous one, using a small initial lead to absorb WebSocket jitter.
+// the previous one, using a bounded initial lead to absorb WebSocket jitter.
+
+export const DEFAULT_INITIAL_LEAD_SECONDS = 0.15;
+const MAX_INITIAL_LEAD_SECONDS = 0.18;
 
 export class Pcm16AudioPlayer {
     constructor(options) {
@@ -8,7 +11,10 @@ export class Pcm16AudioPlayer {
         const AudioContextClass = config.AudioContextClass || window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) throw new Error("Web Audio is unavailable");
 
-        this.sampleRate = Number(config.sampleRate) || 16000;
+        this.sampleRate = Number(config.sampleRate);
+        if (!Number.isFinite(this.sampleRate) || this.sampleRate <= 0) {
+            throw new Error("Agent PCM sample rate was not announced");
+        }
         this.context = new AudioContextClass({ latencyHint: "interactive" });
         this.analyser = this.context.createAnalyser();
         this.analyser.fftSize = 512;
@@ -16,7 +22,11 @@ export class Pcm16AudioPlayer {
         this.analyser.connect(this.context.destination);
         this.sources = new Set();
         this.nextStartTime = 0;
-        this.initialLeadSeconds = 0.04;
+        const requestedLead = Number(config.initialLeadSeconds);
+        // 150 ms covers typical tunnel/cellular bursts without unbounded latency.
+        this.initialLeadSeconds = Number.isFinite(requestedLead)
+            ? Math.min(Math.max(requestedLead, 0), MAX_INITIAL_LEAD_SECONDS)
+            : DEFAULT_INITIAL_LEAD_SECONDS;
         this.acceptingFrames = false;
         this.closed = false;
     }
