@@ -28,16 +28,86 @@ const sendBtn = document.getElementById("send-btn");
 const debugPanel = document.getElementById("debug-panel");
 const debugToggle = document.getElementById("debug-toggle");
 
-// On-page diagnostic log — enable by adding ?diag to the URL (e.g.
-// nano.chattychapters.com/?diag). Renders a readable, tappable-to-copy log
-// overlay on the device itself, for debugging where a browser console isn't
-// reachable (phones). No-op when the flag is absent, so normal users see
-// nothing.
+// Client diagnostics are opt-in. ?diag renders the on-device overlay and ships
+// its lifecycle lines; ?telemetry ships the same lines without the overlay.
+// Both are no-ops for normal users. Never pass transcript text to pageLog().
 var DIAG_ON = /(^|[?&])diag\b/.test(location.search);
+var CLIENT_TELEMETRY_ON = DIAG_ON || /(^|[?&])telemetry\b/.test(location.search);
+var CLIENT_TELEMETRY_BATCH_SIZE = 10;
+var CLIENT_TELEMETRY_FLUSH_MS = 2000;
 var _diagEl = null;
-function pageLog(msg) {
-    if (!DIAG_ON) return;
+var _clientTelemetryQueue = [];
+var _clientTelemetryTimer = 0;
+var _clientTelemetryConversation = null;
+
+function clientTelemetryTag(message) {
+    if (/^WS\b/.test(message)) return "ws";
+    if (/^getUserMedia\b/.test(message)) return "media";
+    if (/^(hello_ack|mic_audio_)/.test(message)) return "voice";
+    if (/^agent\b/.test(message)) return "audio";
+    return "lifecycle";
+}
+
+function scheduleClientTelemetryFlush() {
+    if (!CLIENT_TELEMETRY_ON || _clientTelemetryTimer) return;
+    _clientTelemetryTimer = window.setTimeout(function () {
+        _clientTelemetryTimer = 0;
+        flushClientTelemetry(false);
+    }, CLIENT_TELEMETRY_FLUSH_MS);
+}
+
+function flushClientTelemetry(keepalive) {
+    if (_clientTelemetryTimer) {
+        window.clearTimeout(_clientTelemetryTimer);
+        _clientTelemetryTimer = 0;
+    }
+    if (!CLIENT_TELEMETRY_ON || !_clientTelemetryQueue.length) return;
+    var events = _clientTelemetryQueue.splice(0, CLIENT_TELEMETRY_BATCH_SIZE);
     try {
+        var request = fetch("/api/client-log", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-NC-Auth": "1",
+            },
+            body: JSON.stringify({
+                events: events,
+                conv: _clientTelemetryConversation,
+                ua: (navigator.userAgent || "").slice(0, 500),
+            }),
+            keepalive: !!keepalive,
+        });
+        if (request && typeof request.catch === "function") {
+            request.catch(function () {});
+        }
+    } catch (_error) {
+        // Client diagnostics must never interfere with the voice console.
+    }
+    if (_clientTelemetryQueue.length) scheduleClientTelemetryFlush();
+}
+
+function queueClientTelemetry(timestamp, message) {
+    if (!CLIENT_TELEMETRY_ON) return;
+    _clientTelemetryQueue.push({
+        t: timestamp,
+        tag: clientTelemetryTag(message),
+        msg: message.slice(0, 500),
+    });
+    if (_clientTelemetryQueue.length >= CLIENT_TELEMETRY_BATCH_SIZE) {
+        flushClientTelemetry(false);
+    } else {
+        scheduleClientTelemetryFlush();
+    }
+}
+
+function pageLog(msg) {
+    if (!DIAG_ON && !CLIENT_TELEMETRY_ON) return;
+    try {
+        var now = new Date();
+        var message = String(msg);
+        queueClientTelemetry(now.toISOString(), message);
+        if (!DIAG_ON) return;
         if (!_diagEl) {
             _diagEl = document.createElement("div");
             _diagEl.id = "diag-log";
@@ -52,11 +122,14 @@ function pageLog(msg) {
             });
             (document.body || document.documentElement).appendChild(_diagEl);
         }
-        var t = new Date().toISOString().slice(11, 23);
-        _diagEl.textContent = t + "  " + msg + "\n" + _diagEl.textContent;
+        var t = now.toISOString().slice(11, 23);
+        _diagEl.textContent = t + "  " + message + "\n" + _diagEl.textContent;
     } catch (_e) {}
 }
-pageLog("diag on · ua=" + navigator.userAgent.slice(0, 40));
+window.addEventListener("pagehide", function () {
+    flushClientTelemetry(true);
+});
+pageLog("client diagnostics on · ua=" + navigator.userAgent.slice(0, 40));
 const debugContent = document.getElementById("debug-content");
 const debugModalOverlay = document.getElementById("debug-modal-overlay");
 const debugModalBody = document.getElementById("debug-modal-body");
@@ -1999,6 +2072,10 @@ sttSelect.addEventListener("change", function () {
 
 function connect() {
     const generation = ++connectionGeneration;
+    if (_clientTelemetryConversation !== null) {
+        flushClientTelemetry(false);
+        _clientTelemetryConversation = null;
+    }
     setTextTransportReady(false);
     pendingTextMessages = [];
     setLinkState("connecting", "Connecting");
@@ -2047,6 +2124,8 @@ function connect() {
         pageLog("WS CLOSE code=" + (event && event.code) +
             " reason=" + ((event && event.reason) || "(none)") +
             " clean=" + (event && event.wasClean));
+        flushClientTelemetry(false);
+        _clientTelemetryConversation = null;
         ws = null;
         connectionGeneration += 1;
         setTextTransportReady(false);
@@ -2080,6 +2159,9 @@ function handleMessage(msg, generation) {
             syncBargeInControls();
             createBargeInController();
             wsAudioEnabled = msg.wsAudio === true;
+            if (typeof msg.conversationId === "string") {
+                _clientTelemetryConversation = msg.conversationId;
+            }
             pageLog("hello_ack wsAudio=" + wsAudioEnabled + " -> " +
                 (wsAudioEnabled ? "WS-audio" : "WebRTC") + " path");
             if (wsAudioEnabled) setTextTransportReady(true);

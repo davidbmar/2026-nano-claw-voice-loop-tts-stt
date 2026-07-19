@@ -43,8 +43,10 @@ from voice.webauth.aiohttp_adapter import (
     SESSION_COOKIE_NAME,
     AiohttpAuthAdapter,
     WebSocketIdentity,
+    _same_origin_request,
     close_auth_adapter,
     request_security_middleware,
+    trusted_client_ip,
 )
 from voice.webauth.sqlite_store import (
     MAX_CONVERSATION_ID_LENGTH,
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     from voice.webrtc import Session
 
 log = logging.getLogger("voice-server")
+client_log = logging.getLogger("client")
 
 
 def _on_agent_task_done(task: asyncio.Task) -> None:
@@ -100,6 +103,99 @@ AUTH_SWEEP_INTERVAL_SECONDS = 60.0
 DEFAULT_CONVERSATION_PAGE_SIZE = 20
 DEFAULT_TURN_PAGE_SIZE = 50
 MAX_CURSOR_LENGTH = 1_024
+CLIENT_LOG_MAX_BODY_BYTES = 16 * 1_024
+CLIENT_LOG_MAX_EVENTS = 50
+CLIENT_LOG_MAX_MESSAGE_LENGTH = 500
+CLIENT_LOG_MAX_TAG_LENGTH = 64
+CLIENT_LOG_MAX_TIMESTAMP_LENGTH = 64
+CLIENT_LOG_MAX_USER_AGENT_LENGTH = 500
+CLIENT_LOG_RATE_CAPACITY = 10.0
+CLIENT_LOG_RATE_REFILL_PER_SECOND = 1.0
+CLIENT_LOG_MAX_RATE_KEYS = 4_096
+
+
+@dataclass(slots=True)
+class _ClientLogBucket:
+    tokens: float
+    updated_at: float
+
+
+class _ClientLogRateLimiter:
+    """Small per-socket/IP token bucket for diagnostic POST batches."""
+
+    def __init__(
+        self,
+        *,
+        capacity: float = CLIENT_LOG_RATE_CAPACITY,
+        refill_per_second: float = CLIENT_LOG_RATE_REFILL_PER_SECOND,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.capacity = capacity
+        self.refill_per_second = refill_per_second
+        self.clock = clock
+        self._buckets: dict[str, _ClientLogBucket] = {}
+
+    def allow(self, key: str) -> bool:
+        now = self.clock()
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            if len(self._buckets) >= CLIENT_LOG_MAX_RATE_KEYS:
+                oldest = min(
+                    self._buckets,
+                    key=lambda candidate: self._buckets[candidate].updated_at,
+                )
+                self._buckets.pop(oldest, None)
+            bucket = _ClientLogBucket(self.capacity, now)
+            self._buckets[key] = bucket
+        else:
+            elapsed = max(0.0, now - bucket.updated_at)
+            bucket.tokens = min(
+                self.capacity,
+                bucket.tokens + elapsed * self.refill_per_second,
+            )
+            bucket.updated_at = now
+        if bucket.tokens < 1.0:
+            return False
+        bucket.tokens -= 1.0
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveClientTelemetrySocket:
+    conversation_id: str
+    client_ip: str | None
+
+
+class _ClientTelemetryRuntime:
+    """Own live socket correlation and endpoint rate-limit state."""
+
+    def __init__(self) -> None:
+        self.active_sockets: dict[str, _ActiveClientTelemetrySocket] = {}
+        self.rate_limiter = _ClientLogRateLimiter()
+
+    def register_socket(self, conversation_id: str, client_ip: str | None) -> None:
+        self.active_sockets[conversation_id] = _ActiveClientTelemetrySocket(
+            conversation_id, client_ip
+        )
+
+    def unregister_socket(self, conversation_id: str) -> None:
+        self.active_sockets.pop(conversation_id, None)
+
+    def resolve_conversation(
+        self, conversation_hint: str | None, client_ip: str | None
+    ) -> str | None:
+        """Resolve only server-owned live ids; the browser value is just a hint."""
+
+        if conversation_hint:
+            candidate = self.active_sockets.get(conversation_hint)
+            if candidate is not None and candidate.client_ip == client_ip:
+                return candidate.conversation_id
+        return None
+
+
+CLIENT_TELEMETRY_RUNTIME_KEY = web.AppKey(
+    "nano_claw_client_telemetry_runtime", _ClientTelemetryRuntime
+)
 
 
 @dataclass(slots=True)
@@ -139,6 +235,137 @@ async def static_handler(request: web.Request) -> web.FileResponse:
     if not path.is_relative_to(STATIC_DIR.resolve()) or not path.is_file():
         raise web.HTTPNotFound()
     return web.FileResponse(path, headers=_NO_CACHE)
+
+
+def _client_log_error(error: str, status: int) -> web.Response:
+    headers = {"Cache-Control": "no-store"}
+    if status == 429:
+        headers["Retry-After"] = "1"
+    return web.json_response({"error": error}, status=status, headers=headers)
+
+
+async def _read_client_log_body(request: web.Request) -> bytes | None:
+    """Read at most the endpoint limit, including for chunked requests."""
+
+    content_length = request.content_length
+    if content_length is not None and content_length > CLIENT_LOG_MAX_BODY_BYTES:
+        return None
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await request.content.readany()
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > CLIENT_LOG_MAX_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _client_log_timestamp(value: object) -> str:
+    if isinstance(value, str):
+        return value[:CLIENT_LOG_MAX_TIMESTAMP_LENGTH]
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
+        return str(value)[:CLIENT_LOG_MAX_TIMESTAMP_LENGTH]
+    raise ValueError("invalid timestamp")
+
+
+def _normalize_client_log_events(events: object) -> list[dict[str, str]]:
+    if not isinstance(events, list):
+        raise ValueError("events must be a list")
+    normalized: list[dict[str, str]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("event must be an object")
+        tag = event.get("tag")
+        message = event.get("msg")
+        if not isinstance(tag, str) or not isinstance(message, str):
+            raise ValueError("event tag and message must be strings")
+        normalized.append({
+            "t": _client_log_timestamp(event.get("t")),
+            "tag": tag[:CLIENT_LOG_MAX_TAG_LENGTH],
+            "msg": message[:CLIENT_LOG_MAX_MESSAGE_LENGTH],
+        })
+    return normalized
+
+
+async def client_log_handler(request: web.Request) -> web.Response:
+    """Accept privacy-scoped, best-effort browser lifecycle diagnostics."""
+
+    if not _same_origin_request(request):
+        return _client_log_error("request_rejected", 403)
+    try:
+        body = await _read_client_log_body(request)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return _client_log_error("bad_request", 400)
+    if body is None:
+        return _client_log_error("body_too_large", 413)
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _client_log_error("bad_json", 400)
+    if not isinstance(payload, dict):
+        return _client_log_error("bad_payload", 400)
+
+    events = payload.get("events")
+    if isinstance(events, list) and len(events) > CLIENT_LOG_MAX_EVENTS:
+        return _client_log_error("too_many_events", 413)
+    conversation_hint = payload.get("conv")
+    user_agent = payload.get("ua", "")
+    if conversation_hint is not None and not isinstance(conversation_hint, str):
+        return _client_log_error("bad_payload", 400)
+    if isinstance(conversation_hint, str) and len(conversation_hint) > 128:
+        return _client_log_error("bad_payload", 400)
+    if not isinstance(user_agent, str):
+        return _client_log_error("bad_payload", 400)
+    try:
+        normalized_events = _normalize_client_log_events(events)
+    except (TypeError, ValueError):
+        return _client_log_error("bad_payload", 400)
+
+    runtime = request.app.get(CLIENT_TELEMETRY_RUNTIME_KEY)
+    if runtime is None:
+        return _client_log_error("telemetry_unavailable", 503)
+    client_ip = trusted_client_ip(request)
+    server_conversation_id = runtime.resolve_conversation(
+        conversation_hint, client_ip
+    )
+    rate_key = (
+        f"socket:{server_conversation_id}"
+        if server_conversation_id is not None
+        else f"ip:{client_ip or 'unknown'}"
+    )
+    if not runtime.rate_limiter.allow(rate_key):
+        return _client_log_error("rate_limited", 429)
+
+    safe_user_agent = user_agent[:CLIENT_LOG_MAX_USER_AGENT_LENGTH]
+    try:
+        for event in normalized_events:
+            client_log.info(
+                "%s",
+                json.dumps(
+                    {
+                        "ip": client_ip,
+                        "conv": server_conversation_id,
+                        "ua": safe_user_agent,
+                        **event,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            )
+    except Exception:
+        # Telemetry is diagnostic-only. A broken logging handler must not turn
+        # this best-effort endpoint into an application failure.
+        pass
+    return web.Response(status=204, headers={"Cache-Control": "no-store"})
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -182,6 +409,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 code=WSCloseCode.POLICY_VIOLATION,
                 message=b"history deletion in progress",
             )
+    try:
+        client_telemetry_runtime = request.app.get(CLIENT_TELEMETRY_RUNTIME_KEY)
+    except AttributeError:
+        client_telemetry_runtime = None
+    if client_telemetry_runtime is not None:
+        client_telemetry_runtime.register_socket(
+            conversation_id, trusted_client_ip(request)
+        )
     log.info("WebSocket connected")
 
     session: Session | None = None
@@ -301,6 +536,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     "type": "hello_ack",
                     "bargeIn": BARGE_IN_ENABLED,
                     "wsAudio": ws_audio_selected,
+                    "conversationId": conversation_id,
                 }
                 if ws_audio_selected:
                     from voice.ws_audio import WsAudioTransport, wire_format
@@ -519,6 +755,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 await _unregister_history_socket(
                     history_runtime, conversation_id, ws
                 )
+            if client_telemetry_runtime is not None:
+                client_telemetry_runtime.unregister_socket(conversation_id)
             if auth_adapter is not None:
                 await auth_adapter.unbind_websocket(ws)
         log.info("WebSocket disconnected")
@@ -1818,6 +2056,7 @@ def create_app(
     adapter = auth_adapter or AiohttpAuthAdapter.from_environment()
     app[AUTH_ADAPTER_KEY] = adapter
     app[HISTORY_RUNTIME_KEY] = _HistoryRuntime()
+    app[CLIENT_TELEMETRY_RUNTIME_KEY] = _ClientTelemetryRuntime()
     app.cleanup_ctx.append(_auth_sweep_context)
     app.on_cleanup.append(close_auth_adapter)
     cost_ledger.ensure_schema(METRICS)
@@ -1833,6 +2072,7 @@ def create_app(
     app.router.add_post("/api/voice/flow", flow_set_handler)
     app.router.add_get("/api/voice/region-model", region_model_get_handler)
     app.router.add_post("/api/voice/region-model", region_model_set_handler)
+    app.router.add_post("/api/client-log", client_log_handler)
     app.router.add_get("/api/conversations", conversations_list_handler)
     app.router.add_delete(
         "/api/conversations", conversations_delete_all_handler
