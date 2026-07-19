@@ -79,6 +79,18 @@ BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false
 METRICS = metrics_db.init_db()
 
 
+def _ws_audio_enabled() -> bool:
+    """Read the browser-audio transport flag once for each new connection."""
+
+    return os.environ.get("NANO_CLAW_WS_AUDIO", "0").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+        "",
+    )
+
+
 # no-cache: browsers must revalidate the UI on every load, otherwise tabs
 # opened before a deploy keep running the old app.js (stale controls that
 # silently do nothing). FileResponse still serves 304s when unchanged.
@@ -130,6 +142,7 @@ async def static_handler(request: web.Request) -> web.FileResponse:
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    ws_audio_selected = _ws_audio_enabled()
     # The browser never supplies this value. A fresh, unguessable id for each
     # socket keeps agent memory and pending tool approvals conversation-local.
     conversation_id = f"voice-{uuid.uuid4().hex}"
@@ -172,12 +185,58 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     log.info("WebSocket connected")
 
     session: Session | None = None
-    # The browser pushes its persisted set_voice/set_model/set_stt right after
-    # `hello`, but the session is only created when `webrtc_offer` arrives
-    # (after mic permission). Buffer early settings and apply them at session
-    # creation so saved choices survive a reconnect instead of being dropped.
+    ws_audio_transport = None
+    # The browser pushes persisted settings immediately after `hello`. Buffer
+    # anything that arrives before the selected transport creates its Session.
     pending_settings: dict = {}
     http_client = httpx.AsyncClient(timeout=120.0)
+
+    def _create_session(audio_transport=None):
+        from voice.webrtc import Session
+
+        new_session = (
+            Session() if audio_transport is None else Session(audio_transport)
+        )
+        new_session._agent_session_id = conversation_id
+        # Identity is fixed at the HTTP upgrade. Browser messages can never
+        # replace these values; login/logout takes effect on a new socket.
+        new_session.user_sub = socket_identity.user_sub
+        new_session.tenant = socket_identity.tenant
+        new_session.conversation_id = conversation_id
+        new_session._user_sub = socket_identity.user_sub
+        new_session._tenant_id = socket_identity.tenant
+        new_session._history_store = (
+            auth_adapter.store
+            if auth_adapter is not None
+            and socket_identity.user_sub is not None
+            and socket_identity.tenant is not None
+            else None
+        )
+        new_session._history_runtime = history_runtime
+        new_session._history_clock = (
+            auth_adapter._now if auth_adapter is not None else None
+        )
+        new_session._history_started = False
+        new_session._history_warning_sent = False
+        new_session._history_agent_active = False
+        new_session._history_agent_parts = []
+        new_session._history_agent_failed = False
+        new_session._backoff = Backoff()
+        new_session._resume_task = None
+        new_session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
+        new_session._scheduler_flow_attempted = False
+        new_session._scheduler_flow = None
+        if "voice" in pending_settings:
+            voice = pending_settings["voice"]
+            new_session.set_voice(voice["voiceId"], voice["speed"])
+        if "model" in pending_settings:
+            new_session.model = pending_settings["model"]
+            log.info("Model set (pending): %s", new_session.model or "(default)")
+        if "stt" in pending_settings:
+            new_session.stt_size = pending_settings["stt"]
+            log.info("STT size set (pending): %s", new_session.stt_size)
+        pending_settings.clear()
+        return new_session
 
     def _spawn_agent(coro, turn_state=None):
         # One active agent reply at a time. If a reply is still in flight,
@@ -197,6 +256,36 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
     try:
         async for raw_msg in ws:
+            if raw_msg.type == web.WSMsgType.BINARY:
+                if not ws_audio_selected:
+                    continue
+                if ws_audio_transport is None:
+                    await ws.send_json({
+                        "type": "mic_audio_error",
+                        "error": "mic_audio_not_ready",
+                    })
+                    await ws.close(
+                        code=WSCloseCode.POLICY_VIOLATION,
+                        message=b"mic audio received before hello",
+                    )
+                    break
+                from voice.ws_audio import WsAudioFormatError
+
+                try:
+                    ws_audio_transport.receive_mic_frame(raw_msg.data)
+                except WsAudioFormatError as exc:
+                    log.warning("Rejected WebSocket mic frame: %s", exc)
+                    await ws.send_json({
+                        "type": "mic_audio_error",
+                        "error": "invalid_frame",
+                    })
+                    await ws.close(
+                        code=WSCloseCode.UNSUPPORTED_DATA,
+                        message=b"invalid mic audio frame",
+                    )
+                    break
+                continue
+
             if raw_msg.type != web.WSMsgType.TEXT:
                 continue
 
@@ -208,56 +297,55 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             msg_type = msg.get("type", "")
 
             if msg_type == "hello":
-                await ws.send_json({"type": "hello_ack", "bargeIn": BARGE_IN_ENABLED})
+                ack = {
+                    "type": "hello_ack",
+                    "bargeIn": BARGE_IN_ENABLED,
+                    "wsAudio": ws_audio_selected,
+                }
+                if ws_audio_selected:
+                    from voice.ws_audio import WsAudioTransport, wire_format
+
+                    if session is None:
+                        ws_audio_transport = WsAudioTransport(ws)
+                        session = _create_session(ws_audio_transport)
+                    ack["wsAudioFormat"] = wire_format()
+                await ws.send_json(ack)
 
             elif msg_type == "webrtc_offer":
+                if ws_audio_selected:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "WebRTC is disabled for this connection",
+                    })
+                    continue
                 # aiortc is only needed once a browser actually starts WebRTC.
-                from voice.webrtc import Session
-
-                session = Session()
-                session._agent_session_id = conversation_id
-                # Identity is fixed at the HTTP upgrade.  Browser messages can
-                # never replace these server-owned values; login/logout applies
-                # when the page reconnects and receives a new socket.
-                session.user_sub = socket_identity.user_sub
-                session.tenant = socket_identity.tenant
-                session.conversation_id = conversation_id
-                session._user_sub = socket_identity.user_sub
-                session._tenant_id = socket_identity.tenant
-                session._history_store = (
-                    auth_adapter.store
-                    if auth_adapter is not None
-                    and socket_identity.user_sub is not None
-                    and socket_identity.tenant is not None
-                    else None
-                )
-                session._history_runtime = history_runtime
-                session._history_clock = (
-                    auth_adapter._now if auth_adapter is not None else None
-                )
-                session._history_started = False
-                session._history_warning_sent = False
-                session._history_agent_active = False
-                session._history_agent_parts = []
-                session._history_agent_failed = False
-                session._backoff = Backoff()          # per-session backoff
-                session._resume_task = None            # pending false-alarm resume timer
-                session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
-                session._scheduler_flow_attempted = False
-                session._scheduler_flow = None
-                # Apply any settings the browser pushed before the session existed.
-                if "voice" in pending_settings:
-                    v = pending_settings["voice"]
-                    session.set_voice(v["voiceId"], v["speed"])
-                if "model" in pending_settings:
-                    session.model = pending_settings["model"]
-                    log.info("Model set (pending): %s", session.model or "(default)")
-                if "stt" in pending_settings:
-                    session.stt_size = pending_settings["stt"]
-                    log.info("STT size set (pending): %s", session.stt_size)
-                pending_settings.clear()
+                session = _create_session()
                 answer_sdp = await session.handle_offer(msg["sdp"])
                 await ws.send_json({"type": "webrtc_answer", "sdp": answer_sdp})
+
+            elif msg_type == "mic_audio_start":
+                if not ws_audio_selected or ws_audio_transport is None:
+                    continue
+                from voice.ws_audio import WsAudioFormatError, wire_format
+
+                try:
+                    ws_audio_transport.start_mic(msg)
+                except WsAudioFormatError as exc:
+                    log.warning("Rejected WebSocket mic format: %s", exc)
+                    await ws.send_json({
+                        "type": "mic_audio_error",
+                        "error": "unsupported_format",
+                        "expected": wire_format()["mic"],
+                    })
+                    await ws.close(
+                        code=WSCloseCode.UNSUPPORTED_DATA,
+                        message=b"unsupported mic audio format",
+                    )
+                    break
+                await ws.send_json({
+                    "type": "mic_audio_ready",
+                    **wire_format()["mic"],
+                })
 
             elif msg_type == "mic_start":
                 if session:
@@ -410,9 +498,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 await session.close()
             except Exception:
-                # Memory deletion is the privacy boundary; a WebRTC teardown
+                # Memory deletion is the privacy boundary; an audio teardown
                 # failure must not prevent it from running.
-                log.exception("WebRTC session close failed")
+                log.exception("Audio session close failed")
         preserve_agent_memory = bool(
             socket_identity.user_sub is not None
             and session is not None

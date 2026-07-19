@@ -11,6 +11,7 @@ import {
     inferEmotion,
 } from "./emotion-layer.js";
 import { createAuthHistoryUI } from "./auth.js";
+import { Pcm16AudioPlayer } from "./ws-audio-player.js";
 
 "use strict";
 
@@ -1024,6 +1025,12 @@ let ws = null;
 let pc = null;
 let audioEl = null;
 let micStream = null;
+let wsAudioEnabled = false;
+let wsMicAudioContext = null;
+let wsMicSource = null;
+let wsMicWorklet = null;
+let wsMicSilence = null;
+let wsAudioPlayer = null;
 let isRecording = false;
 let agentSpeaking = false;
 let phoneModeEnabled = false;
@@ -1910,6 +1917,7 @@ function connect() {
     statusText.textContent = "Connecting...";
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(proto + "//" + location.host + "/ws");
+    socket.binaryType = "arraybuffer";
     ws = socket;
 
     socket.onopen = function () {
@@ -1922,6 +1930,13 @@ function connect() {
 
     socket.onmessage = function (ev) {
         if (socket !== ws || generation !== connectionGeneration) return;
+        if (ev.data instanceof ArrayBuffer) {
+            if (wsAudioEnabled && wsAudioPlayer) {
+                try { wsAudioPlayer.enqueue(ev.data); }
+                catch (error) { console.error("Invalid agent PCM frame", error); }
+            }
+            return;
+        }
         var msg;
         try { msg = JSON.parse(ev.data); } catch (_e) { return; }
         handleMessage(msg, generation);
@@ -1938,7 +1953,7 @@ function connect() {
         connectionGeneration += 1;
         statusText.textContent = "Disconnected";
         talkBtn.disabled = true;
-        cleanupWebRTC();
+        cleanupAudioTransport();
     };
 }
 
@@ -1955,7 +1970,7 @@ function reconnectForIdentityChange() {
             previous.close(1000, "identity changed");
         }
     }
-    cleanupWebRTC();
+    cleanupAudioTransport();
     connect();
 }
 
@@ -1965,15 +1980,37 @@ function handleMessage(msg, generation) {
             bargeInServerAvailable = !!msg.bargeIn;
             syncBargeInControls();
             createBargeInController();
-            startWebRTC(generation).catch(function () {
+            wsAudioEnabled = msg.wsAudio === true;
+            const startAudio = wsAudioEnabled
+                ? startWsAudio(generation, msg.wsAudioFormat)
+                : startWebRTC(generation);
+            startAudio.catch(function () {
                 if (generation === connectionGeneration) {
                     statusText.textContent = "Audio connection failed";
+                    if (wsAudioEnabled) cleanupWsAudio();
                 }
             });
             break;
 
         case "webrtc_answer":
             handleWebRTCAnswer(msg.sdp);
+            break;
+
+        case "mic_audio_ready":
+            if (!wsAudioEnabled) break;
+            audioConnected = true;
+            statusText.textContent = "Connected";
+            talkBtn.disabled = false;
+            textInput.disabled = false;
+            sendBtn.disabled = false;
+            if (wsAudioPlayer) wsAudioPlayer.resume().catch(function () {});
+            break;
+
+        case "mic_audio_error":
+            if (wsAudioEnabled) {
+                statusText.textContent = "Audio format rejected";
+                cleanupWsAudio();
+            }
             break;
 
         case "transcription":
@@ -2016,6 +2053,7 @@ function handleMessage(msg, generation) {
             break;
 
         case "agent_audio_start":
+            if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.begin();
             setAgentSpeaking(true);
             setVisualizationSpeaking(true);
             setPhoneStatus("Speaking to the phone...");
@@ -2065,6 +2103,151 @@ function handleMessage(msg, generation) {
             rearmPhoneMode("Voice error; listening again...");
             break;
     }
+}
+
+// ── WebSocket audio ───────────────────────────────────────────
+async function startWsAudio(generation, announcedFormat) {
+    statusText.textContent = "Requesting mic...";
+    const format = announcedFormat || {};
+    const micFormat = format.mic || {};
+    const agentFormat = format.agent || {};
+    if (micFormat.format !== "pcm_s16le" || micFormat.sampleRate !== 16000
+            || micFormat.channels !== 1 || micFormat.frameSamples !== 320
+            || agentFormat.format !== "pcm_s16le" || agentFormat.sampleRate !== 16000
+            || agentFormat.channels !== 1 || agentFormat.frameSamples !== 320) {
+        throw new Error("Server announced an unsupported WebSocket audio format");
+    }
+
+    let requestedStream;
+    try {
+        requestedStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+        });
+    } catch (_error) {
+        if (generation === connectionGeneration) statusText.textContent = "Mic access denied";
+        return;
+    }
+
+    if (generation !== connectionGeneration || !wsAudioEnabled) {
+        requestedStream.getTracks().forEach(function (track) { track.stop(); });
+        return;
+    }
+    micStream = requestedStream;
+    statusText.textContent = "Connecting audio...";
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass || typeof AudioWorkletNode === "undefined") {
+        throw new Error("AudioWorklet is unavailable");
+    }
+
+    const captureContext = new AudioContextClass({
+        latencyHint: "interactive",
+        sampleRate: micFormat.sampleRate,
+    });
+    wsMicAudioContext = captureContext;
+    await captureContext.audioWorklet.addModule("./mic-worklet.js");
+    if (generation !== connectionGeneration || !wsAudioEnabled) {
+        requestedStream.getTracks().forEach(function (track) { track.stop(); });
+        await captureContext.close();
+        return;
+    }
+
+    const source = captureContext.createMediaStreamSource(requestedStream);
+    const worklet = new AudioWorkletNode(captureContext, "nano-claw-pcm16-mic", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: {
+            targetRate: micFormat.sampleRate,
+            frameSamples: micFormat.frameSamples,
+        },
+    });
+    const silence = captureContext.createGain();
+    silence.gain.value = 0;
+
+    teardownAgentAudioAnalyser();
+    const player = new Pcm16AudioPlayer({
+        AudioContextClass: AudioContextClass,
+        sampleRate: agentFormat.sampleRate,
+    });
+    wsAudioPlayer = player;
+    agentAudioContext = player.context;
+    agentAudioAnalyser = player.analyser;
+    agentAudioSource = null;
+
+    wsMicSource = source;
+    wsMicWorklet = worklet;
+    wsMicSilence = silence;
+    worklet.port.onmessage = function (event) {
+        if (generation !== connectionGeneration || !wsAudioEnabled
+                || !ws || ws.readyState !== WebSocket.OPEN) return;
+        // Live mic audio must not build an unbounded backlog on a slow link.
+        if (ws.bufferedAmount > 262144) return;
+        ws.send(event.data);
+    };
+
+    sendMsg("mic_audio_start", {
+        format: micFormat.format,
+        sampleRate: micFormat.sampleRate,
+        channels: micFormat.channels,
+        frameSamples: micFormat.frameSamples,
+    });
+    source.connect(worklet);
+    worklet.connect(silence);
+    silence.connect(captureContext.destination);
+    await captureContext.resume().catch(function () {});
+    await player.resume().catch(function () {});
+}
+
+function cleanupAudioTransport() {
+    if (wsAudioEnabled) cleanupWsAudio();
+    else cleanupWebRTC();
+}
+
+function cleanupWsAudio() {
+    stopPhoneMode({sendCancel: false, status: false});
+    stopCallerVisualization();
+    setVisualizationSpeaking(false);
+    if (wsAudioPlayer) wsAudioPlayer.stop();
+    teardownAgentAudioAnalyser();
+    wsAudioPlayer = null;
+
+    if (wsMicWorklet) {
+        wsMicWorklet.port.onmessage = null;
+        try { wsMicWorklet.disconnect(); } catch (_error) { /* already disconnected */ }
+    }
+    if (wsMicSource) {
+        try { wsMicSource.disconnect(); } catch (_error) { /* already disconnected */ }
+    }
+    if (wsMicSilence) {
+        try { wsMicSilence.disconnect(); } catch (_error) { /* already disconnected */ }
+    }
+    if (wsMicAudioContext && wsMicAudioContext.state !== "closed") {
+        wsMicAudioContext.close().catch(function () {});
+    }
+    wsMicWorklet = null;
+    wsMicSource = null;
+    wsMicSilence = null;
+    wsMicAudioContext = null;
+    if (micStream) {
+        micStream.getTracks().forEach(function (track) { track.stop(); });
+        micStream = null;
+    }
+
+    audioConnected = false;
+    isRecording = false;
+    setTalkButtonLabel("Start mic");
+    talkBtn.classList.remove("recording", "phone-active");
+    talkBtn.setAttribute("aria-pressed", "false");
+    talkBtn.disabled = true;
+    textInput.disabled = true;
+    sendBtn.disabled = true;
+    setAgentSpeaking(false);
+    wsAudioEnabled = false;
 }
 
 // ── WebRTC ───────────────────────────────────────────────────
@@ -2237,13 +2420,16 @@ function monitorPhoneAudio(timestamp) {
             const observation = sampleBargeIn(rms, timestamp);
             const evt = observation.event;
             if (evt && evt.type === "barge_in") {
+                if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.pause();
                 sendMsg("barge_in");
                 setPhoneStatus("Heard you — pausing...");
             } else if (evt && evt.type === "barge_in_commit") {
+                if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.pause();
                 sendMsg("barge_in_commit");
                 // The server re-arms the mic (agent_audio_end); the user's
                 // speech is captured by the normal VAD turn on the next frames.
             } else if (evt && evt.type === "barge_in_false") {
+                if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.unpause();
                 sendMsg("barge_in_false");
                 setPhoneStatus("False alarm — resuming...");
             }
@@ -2274,6 +2460,16 @@ function rearmPhoneMode(message) {
 
 async function startPhoneMode() {
     if (!audioConnected || !micStream || phoneModeEnabled) return;
+    if (wsAudioEnabled) {
+        const resumeTasks = [];
+        if (wsMicAudioContext && wsMicAudioContext.state === "suspended") {
+            resumeTasks.push(wsMicAudioContext.resume().catch(function () {}));
+        }
+        if (wsAudioPlayer) {
+            resumeTasks.push(wsAudioPlayer.resume().catch(function () {}));
+        }
+        await Promise.all(resumeTasks);
+    }
     if (!await ensureVadAnalyser()) {
         statusText.textContent = "Automatic voice detection is unavailable";
         return;
@@ -2321,6 +2517,9 @@ talkBtn.addEventListener("click", function () {
 function sendTextMessage() {
     var text = textInput.value.trim();
     if (!text) return;
+    if (wsAudioEnabled && wsAudioPlayer) {
+        wsAudioPlayer.resume().catch(function () {});
+    }
     textInput.value = "";
     beginTurnLatency(false);
     if (phoneModeEnabled) {
@@ -2340,6 +2539,7 @@ textInput.addEventListener("keydown", function (e) {
 
 // Stop agent audio
 stopBtn.addEventListener("click", function () {
+    if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.pause();
     sendMsg("stop_speaking");
     setVisualizationSpeaking(false);
     setPhoneStatus("Stopping Claude audio...");
