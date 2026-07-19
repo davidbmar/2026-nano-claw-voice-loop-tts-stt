@@ -542,7 +542,7 @@ test("the browser allowlist contains only declared GIS origins and no remote ava
     assert.match(serverSource, /script-src 'self' https:\/\/accounts\.google\.com\/gsi\/client/);
     assert.match(serverSource, /frame-src https:\/\/accounts\.google\.com\/gsi\//);
     assert.match(serverSource, /connect-src 'self' ws:\/\/localhost:9090[\s\S]*https:\/\/accounts\.google\.com\/gsi\//);
-    assert.match(serverSource, /style-src 'self' https:\/\/accounts\.google\.com\/gsi\/style/);
+    assert.match(serverSource, /style-src 'self' 'unsafe-inline' https:\/\/accounts\.google\.com\/gsi\/style/);
     assert.match(serverSource, /img-src 'self' data:/);
     assert.match(serverSource, /"Referrer-Policy": "strict-origin-when-cross-origin"/);
     assert.match(serverSource, /"X-Content-Type-Options": "nosniff"/);

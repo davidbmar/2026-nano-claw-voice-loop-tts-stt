@@ -1064,6 +1064,7 @@ let wsMicSource = null;
 let wsMicWorklet = null;
 let wsMicSilence = null;
 let wsAudioPlayer = null;
+let wsAudioFirstFrameLogged = false;
 let isRecording = false;
 let agentSpeaking = false;
 let phoneModeEnabled = false;
@@ -2021,10 +2022,7 @@ function connect() {
     socket.onmessage = function (ev) {
         if (socket !== ws || generation !== connectionGeneration) return;
         if (ev.data instanceof ArrayBuffer) {
-            if (wsAudioEnabled && wsAudioPlayer) {
-                try { wsAudioPlayer.enqueue(ev.data); }
-                catch (error) { console.error("Invalid agent PCM frame", error); }
-            }
+            enqueueWsAudioFrame(ev.data);
             return;
         }
         var msg;
@@ -2216,6 +2214,36 @@ function handleMessage(msg, generation) {
 }
 
 // ── WebSocket audio ───────────────────────────────────────────
+function enqueueWsAudioFrame(frame) {
+    if (!wsAudioEnabled || !wsAudioPlayer) return;
+    if (!wsAudioFirstFrameLogged) {
+        wsAudioFirstFrameLogged = true;
+        pageLog("agent frame, ctx=" + wsAudioPlayer.context.state);
+    }
+    try { wsAudioPlayer.enqueue(frame); }
+    catch (error) { console.error("Invalid agent PCM frame", error); }
+}
+
+function resumeWsAudioFromGesture() {
+    if (!wsAudioEnabled) return;
+
+    // Keep these resume() calls synchronous with the pointer/click callback.
+    // A suspended context is intentionally retried on every later gesture.
+    const player = wsAudioPlayer;
+    if (player && !player.closed && player.context.state === "suspended") {
+        const reportPlaybackState = function () {
+            pageLog("agent playback gesture resume, ctx=" + player.context.state);
+        };
+        player.resume().then(reportPlaybackState, reportPlaybackState);
+    }
+
+    const captureContext = wsMicAudioContext;
+    if (captureContext && captureContext.state === "suspended") {
+        try { captureContext.resume().catch(function () {}); }
+        catch (_error) { /* retry on the next gesture */ }
+    }
+}
+
 async function startWsAudio(generation, announcedFormat) {
     setAudioState("connecting", "Requesting mic");
     const format = announcedFormat || {};
@@ -2287,6 +2315,7 @@ async function startWsAudio(generation, announcedFormat) {
         sampleRate: agentFormat.sampleRate,
     });
     wsAudioPlayer = player;
+    wsAudioFirstFrameLogged = false;
     agentAudioContext = player.context;
     agentAudioAnalyser = player.analyser;
     agentAudioSource = null;
@@ -2327,6 +2356,7 @@ function cleanupWsAudio() {
     if (wsAudioPlayer) wsAudioPlayer.stop();
     teardownAgentAudioAnalyser();
     wsAudioPlayer = null;
+    wsAudioFirstFrameLogged = false;
 
     if (wsMicWorklet) {
         wsMicWorklet.port.onmessage = null;
@@ -2601,16 +2631,6 @@ function rearmPhoneMode(message) {
 
 async function startPhoneMode() {
     if (!audioConnected || !micStream || phoneModeEnabled) return;
-    if (wsAudioEnabled) {
-        const resumeTasks = [];
-        if (wsMicAudioContext && wsMicAudioContext.state === "suspended") {
-            resumeTasks.push(wsMicAudioContext.resume().catch(function () {}));
-        }
-        if (wsAudioPlayer) {
-            resumeTasks.push(wsAudioPlayer.resume().catch(function () {}));
-        }
-        await Promise.all(resumeTasks);
-    }
     if (!await ensureVadAnalyser()) {
         statusText.textContent = "Automatic voice detection is unavailable";
         return;
@@ -2649,10 +2669,16 @@ function stopPhoneMode(options) {
     if (config.status !== false && audioConnected) statusText.textContent = "Phone mode stopped";
 }
 
-talkBtn.addEventListener("click", function () {
+function handleTalkButtonClick() {
+    resumeWsAudioFromGesture();
     if (phoneModeEnabled) stopPhoneMode();
     else startPhoneMode();
-});
+}
+
+// pointerdown catches the earliest usable activation; the mic click is an
+// explicit fallback and makes the critical Start mic gesture self-contained.
+document.addEventListener("pointerdown", resumeWsAudioFromGesture, { passive: true });
+talkBtn.addEventListener("click", handleTalkButtonClick);
 
 // ── Text input ───────────────────────────────────────────────
 function sendTextMessage() {
