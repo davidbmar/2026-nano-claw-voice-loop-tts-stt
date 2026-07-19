@@ -36,6 +36,15 @@ export const AgentDefaultsSchema = z.object({
   maxTokens: z.number().positive().optional().default(4096),
   systemPrompt: z.string().optional(),
   knowledgeFiles: z.array(z.string()).optional(),
+  /** Ordered fallback models tried when the primary model errors or is too slow
+   * to produce a first token. Fallbacks whose provider has no key are skipped.
+   * Empty (default) = no fallback, i.e. unchanged single-model behavior. */
+  fallbackModels: z.array(z.string()).optional().default([]),
+  /** Time-to-first-token budget in ms. If the current model emits no first
+   * token within this window, abort and try the next fallback (also the
+   * per-attempt timeout for the non-streaming path). The last model in the
+   * chain gets no deadline — a slow answer beats none. */
+  fallbackTimeoutMs: z.number().positive().optional().default(4000),
 });
 
 /**
