@@ -1980,16 +1980,21 @@ function pushVoice() {
     sendMsg("set_voice", { voiceId: currentVoiceId, speed: currentSpeed });
 }
 
+var voicesLoaded = false, voicesLoading = false;
 function loadVoices() {
+    if (voicesLoading) return;
+    voicesLoading = true;
     fetch("/api/voices")
         .then(function (r) { return r.json(); })
         .then(function (uiCatalog) {
             renderVoiceOptions(uiCatalog);
             speedSlider.value = String(currentSpeed);
             speedValue.textContent = currentSpeed.toFixed(1) + "×";
+            voicesLoaded = true;
             pushVoice();
         })
-        .catch(function () { statusText.textContent = "Could not load voices"; });
+        .catch(function () { statusText.textContent = "Could not load voices"; })
+        .finally(function () { voicesLoading = false; });
 }
 
 voiceSelect.addEventListener("change", function () {
@@ -2032,14 +2037,25 @@ var phonePollTimer = setInterval(function () {
     if (!document.hidden && !phoneVoiceSelect.disabled) loadPhoneConfig();
 }, 5000);
 
+var modelsLoaded = false, modelsLoading = false, modelsRetryTimer = null;
+
+// Re-assert the current pipeline selections to the server. No-ops when the
+// socket isn't open (sendMsg returns false), so it is safe to call before the
+// WebSocket connects and again on every (re)connect.
+function syncModelToServer() {
+    sendMsg("set_model", { modelId: currentModel });
+    sendMsg("set_stt", { size: currentStt });
+}
+
 function loadModels() {
+    if (modelsLoading) return;
+    modelsLoading = true;
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
-        modelSelect.innerHTML = "";
-        Pipeline.buildModelOptions(data.models).forEach(function (o) {
-            var el = document.createElement("option");
-            el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
-            modelSelect.appendChild(el);
-        });
+        // Main LLM selector: populate and land on a guaranteed non-blank,
+        // preferably-enabled selection. No WebSocket dependency — this runs on
+        // page load so the control is never blank while the socket connects.
+        currentModel = Pipeline.applyModelOptions(modelSelect, data.models, currentModel, data.default);
+        localStorage.setItem(LS_MODEL, currentModel);
         // Phone LLM mirror: "(server default)" + every available model.
         phoneModelSelect.innerHTML = "";
         var def = document.createElement("option");
@@ -2051,14 +2067,17 @@ function loadModels() {
             phoneModelSelect.appendChild(el);
         });
         if (phonePendingModel !== null) { phoneModelSelect.value = phonePendingModel; phonePendingModel = null; }
-        // keep stored model if still available, else fall back to default
-        var chosen = data.models.find(function (m) { return m.id === currentModel && m.available; });
-        currentModel = chosen ? currentModel : data.default;
-        modelSelect.value = currentModel;
         sttSelect.value = currentStt;
-        sendMsg("set_model", { modelId: currentModel });
-        sendMsg("set_stt", { size: currentStt });
-    }).catch(function () {});
+        modelsLoaded = true;
+        pageLog("models loaded n=" + (data.models ? data.models.length : 0) + " sel=" + currentModel);
+        syncModelToServer();
+    }).catch(function (err) {
+        // Never leave the selector blank on a transient failure: retry once.
+        pageLog("models load FAILED: " + (err && err.message ? err.message : err));
+        if (!modelsLoaded && !modelsRetryTimer) {
+            modelsRetryTimer = setTimeout(function () { modelsRetryTimer = null; loadModels(); }, 1500);
+        }
+    }).finally(function () { modelsLoading = false; });
 }
 
 modelSelect.addEventListener("change", function () {
@@ -2092,8 +2111,12 @@ function connect() {
         setLinkState("ready", "Text ready");
         setAudioState("connecting", "Starting voice");
         sendMsg("hello");
-        loadVoices();
-        loadModels();
+        // Dropdowns are populated on page load (see init below), independent of
+        // the socket. On (re)connect only re-assert the current selections to
+        // the server; if a prior page-load fetch failed and left a control
+        // empty, load it now. This avoids re-clearing (blanking) on reconnect.
+        if (modelsLoaded) syncModelToServer(); else loadModels();
+        if (voicesLoaded) pushVoice(); else loadVoices();
     };
 
     socket.onmessage = function (ev) {
@@ -2396,6 +2419,18 @@ async function startWsAudio(generation, announcedFormat) {
         AudioContextClass: AudioContextClass,
         sampleRate: agentFormat.sampleRate,
     });
+    try {
+        await player.ready;
+    } catch (error) {
+        await player.close().catch(function () {});
+        throw error;
+    }
+    if (generation !== connectionGeneration || !wsAudioEnabled) {
+        requestedStream.getTracks().forEach(function (track) { track.stop(); });
+        await player.close();
+        await captureContext.close();
+        return;
+    }
     wsAudioPlayer = player;
     wsAudioFirstFrameLogged = false;
     agentAudioContext = player.context;
@@ -2821,4 +2856,9 @@ try {
 } catch (_error) {
     // Optional auth must never prevent the voice console from starting.
 }
+// Populate the pipeline dropdowns on page load, independent of the WebSocket,
+// so the LLM and voice selectors always show a valid selection immediately and
+// never blank while the socket is still connecting (or reconnecting).
+loadModels();
+loadVoices();
 connect();
