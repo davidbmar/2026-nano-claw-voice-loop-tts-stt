@@ -60,3 +60,4 @@ data/
 lux-service/.venv/
 lux-service/LuxTTS/
 lux-service/.verified
+logs/
