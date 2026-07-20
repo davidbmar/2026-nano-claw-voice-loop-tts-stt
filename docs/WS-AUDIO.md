@@ -63,15 +63,29 @@ announcement, odd-length PCM16, empty frames, and incorrectly sized frames are
 also rejected. Each binary mic frame must match the announced 320-sample size.
 
 The existing `agent_audio_start` and `agent_audio_end` JSON messages bracket
-agent playback. TTS is synthesized at 48 kHz and sent unchanged, preserving
-the full band and avoiding per-frame resampling on the common 48 kHz Web Audio
-context. The browser reads this rate from `wsAudioFormat.agent` and queues the
-frames on a contiguous Web Audio timeline with a bounded 150 ms initial lead
-to absorb tunnel and cellular jitter. A device whose native AudioContext rate
-is not 48 kHz still requires browser resampling, so it remains a residual
-device-specific quality case. Existing
+agent playback. Existing
 `barge_in`, `barge_in_commit`, `barge_in_false`, and `stop_speaking` messages
 remain the playback-control protocol.
+
+## Playback
+
+TTS is synthesized at 48 kHz and sent unchanged. The browser reads that rate
+from `wsAudioFormat.agent` and requests a dedicated interactive `AudioContext`
+at the same rate. It loads `pcm-player-worklet.js` once and sends converted
+Float32 samples to one `AudioWorkletNode`; the processor drains a continuous
+ring buffer through the existing visualization analyser. A 150 ms source-rate
+fill threshold absorbs initial tunnel and cellular jitter. The 20 ms network
+frames never become separately scheduled Web Audio nodes, so neither floating
+timeline drift nor per-frame resampling can create playback seams.
+
+If a browser rejects the requested agent rate, the player retries with the
+browser's default-rate interactive context. The worklet then performs linear
+resampling with one phase carried across the whole ring, including frame
+boundaries, rather than restarting a resampler for every frame. Once playback
+has started, an underrun writes zeros for every unavailable output sample and
+resumes from newly arrived samples without replaying stale data. `pause()`,
+`stop()`, and barge-in send a flush message that clears the ring immediately,
+resets the resampling phase, and re-arms the initial fill threshold.
 
 ## Pipeline and identity
 
