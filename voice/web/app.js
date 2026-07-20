@@ -1018,6 +1018,63 @@ phoneSpeedSlider.addEventListener("change", function () {
     pushPhoneConfig({ speed: parseFloat(phoneSpeedSlider.value) });
 });
 
+// A populated selector is only usable when its selectedIndex points at an
+// enabled option whose value exactly matches the control's value. Assigning a
+// stale or disabled value can otherwise leave a browser <select> rendering an
+// empty box even though its option list is present.
+function findEnabledSelectOption(selectEl, value) {
+    if (typeof value !== "string") return null;
+    return Array.from(selectEl.options || []).find(function (option) {
+        return option.value === value && !option.disabled;
+    }) || null;
+}
+
+function currentEnabledSelectOption(selectEl) {
+    if (selectEl.selectedIndex == null || selectEl.selectedIndex < 0) return null;
+    var option = selectEl.options[selectEl.selectedIndex];
+    if (!option || option.disabled || option.value !== selectEl.value) return null;
+    return option;
+}
+
+function explicitlySelectOption(selectEl, option) {
+    var index = Array.from(selectEl.options || []).indexOf(option);
+    if (index < 0 || option.disabled) return null;
+    selectEl.selectedIndex = index;
+    option.selected = true;
+    return currentEnabledSelectOption(selectEl);
+}
+
+function resolveEnabledSelectSelection(selectEl, preferredValue, defaultValue) {
+    var requested = typeof preferredValue === "string" ? preferredValue : "";
+    selectEl.value = requested;
+    var selected = currentEnabledSelectOption(selectEl);
+    var fallback = !selected;
+    var source = "stored";
+
+    // Match the enabled default option element itself. Setting .value alone is
+    // not sufficient when the value is missing, duplicated, or disabled.
+    if (!selected) {
+        selected = findEnabledSelectOption(selectEl, defaultValue);
+        source = "default";
+        if (!selected) {
+            selected = Array.from(selectEl.options || []).find(function (option) {
+                return !option.disabled;
+            }) || null;
+            source = "first-enabled";
+        }
+        selected = selected && explicitlySelectOption(selectEl, selected);
+    }
+    if (!selected) throw new Error("selector has no enabled option");
+    return { value: selected.value, source: source, fallback: fallback };
+}
+
+// Build and validate options in a detached <select>, then replace the live
+// children in one operation. A failed fetch/build therefore cannot clear a
+// control that already has a visible selection.
+function replaceSelectOptions(selectEl, stagedSelect) {
+    selectEl.replaceChildren.apply(selectEl, Array.from(stagedSelect.children));
+}
+
 const DEFAULT_FLOW_OPTIONS = Object.freeze([
     { id: "none", label: "None" },
     { id: "spacechannel", label: "Space Channel" },
@@ -1086,40 +1143,65 @@ var activeRegionModel = "";
 function renderRegionModelConfig(config) {
     var options = Array.isArray(config.options) ? config.options : [];
     var active = typeof config.active === "string" ? config.active : "";
-    regionModelSelect.innerHTML = "";
+    var stagedSelect = document.createElement("select");
     options.forEach(function (option) {
-        if (!option || typeof option.value !== "string") return;
+        if (!option || typeof option.value !== "string" || !option.value) return;
         var o = document.createElement("option");
         o.value = option.value;
         o.textContent = typeof option.label === "string" ? option.label : option.value;
-        regionModelSelect.appendChild(o);
+        o.disabled = option.disabled === true;
+        stagedSelect.appendChild(o);
     });
-    if (active && !Array.from(regionModelSelect.options).some(function (o) { return o.value === active; })) {
+    if (active && !findEnabledSelectOption(stagedSelect, active)) {
         var current = document.createElement("option");
         current.value = active;
         current.textContent = active + " — environment default";
-        regionModelSelect.insertBefore(current, regionModelSelect.firstChild);
+        stagedSelect.insertBefore(current, stagedSelect.firstChild);
     }
-    regionModelSelect.value = active;
-    activeRegionModel = active;
-    flowModel.textContent = active ? "model " + active : "model —";
+    var preferred = active || activeRegionModel;
+    var defaultValue = active || (stagedSelect.options[0] && stagedSelect.options[0].value) || "";
+    var stagedResolution = resolveEnabledSelectSelection(stagedSelect, preferred, defaultValue);
+    replaceSelectOptions(regionModelSelect, stagedSelect);
+    var appliedResolution = resolveEnabledSelectSelection(
+        regionModelSelect,
+        stagedResolution.value,
+        defaultValue
+    );
+    activeRegionModel = appliedResolution.value;
+    flowModel.textContent = "model " + activeRegionModel;
+    pageLog(
+        "region model selection active=" + (active || "(none)") +
+        " default=" + (defaultValue || "(none)") +
+        " resolved=" + activeRegionModel +
+        " source=" + (appliedResolution.fallback ? appliedResolution.source : stagedResolution.source) +
+        " fallback=" + (stagedResolution.fallback || appliedResolution.fallback)
+    );
 }
 
 function loadRegionModelConfig() {
+    if (!currentEnabledSelectOption(regionModelSelect)) regionModelSelect.disabled = true;
     return fetch("/api/voice/region-model").then(function (r) {
         if (!r.ok) throw new Error("scheduler model unavailable");
         return r.json();
     }).then(function (config) {
         renderRegionModelConfig(config || {});
         regionModelSelect.disabled = false;
-    }).catch(function () {
-        regionModelSelect.innerHTML = "";
-        var o = document.createElement("option");
-        o.textContent = "n/a";
-        regionModelSelect.appendChild(o);
+    }).catch(function (error) {
+        pageLog("region model load FAILED: " + (error && error.message ? error.message : error));
+        // Preserve an already-populated control on refresh failure. On the
+        // initial empty load, show a disabled placeholder instead of enabling
+        // a selector with no valid selection.
+        if (!currentEnabledSelectOption(regionModelSelect)) {
+            var stagedSelect = document.createElement("select");
+            var o = document.createElement("option");
+            o.textContent = "n/a";
+            stagedSelect.appendChild(o);
+            replaceSelectOptions(regionModelSelect, stagedSelect);
+            regionModelSelect.selectedIndex = 0;
+            activeRegionModel = "";
+            flowModel.textContent = "model —";
+        }
         regionModelSelect.disabled = true;
-        activeRegionModel = "";
-        flowModel.textContent = "model —";
     });
 }
 
@@ -1134,10 +1216,9 @@ regionModelSelect.addEventListener("change", function () {
         return r.json();
     }).then(function (config) {
         renderRegionModelConfig(config || {});
-        statusText.textContent = "Scheduler model updated — new turns use it immediately";
-    }).catch(loadRegionModelConfig).finally(function () {
         regionModelSelect.disabled = false;
-    });
+        statusText.textContent = "Scheduler model updated — new turns use it immediately";
+    }).catch(loadRegionModelConfig);
 });
 
 loadRegionModelConfig();
@@ -1965,8 +2046,8 @@ var currentSpeed = parseFloat(localStorage.getItem(LS_SPEED) || "1") || 1;
 var previewAudio = new Audio();
 
 function renderVoiceOptions(uiCatalog) {
-    voiceSelect.innerHTML = "";
-    phoneVoiceSelect.innerHTML = "";
+    var stagedVoiceSelect = document.createElement("select");
+    var stagedPhoneVoiceSelect = document.createElement("select");
     VoiceUI.groupVoices(uiCatalog).forEach(function (group) {
         var og = document.createElement("optgroup");
         og.label = group.label;
@@ -1979,17 +2060,46 @@ function renderVoiceOptions(uiCatalog) {
             og.appendChild(o);
             ogPhone.appendChild(o.cloneNode(true));
         });
-        voiceSelect.appendChild(og);
-        phoneVoiceSelect.appendChild(ogPhone);
+        stagedVoiceSelect.appendChild(og);
+        stagedPhoneVoiceSelect.appendChild(ogPhone);
     });
+    var requestedVoiceId = currentVoiceId;
+    var phoneVoiceId = phoneVoiceSelect.value;
+    var defaultVoiceId = typeof uiCatalog.default === "string" ? uiCatalog.default : "";
+    var stagedResolution = resolveEnabledSelectSelection(
+        stagedVoiceSelect,
+        requestedVoiceId,
+        defaultVoiceId
+    );
+    var stagedPhoneResolution = resolveEnabledSelectSelection(
+        stagedPhoneVoiceSelect,
+        phoneVoiceId,
+        defaultVoiceId
+    );
+    replaceSelectOptions(voiceSelect, stagedVoiceSelect);
+    replaceSelectOptions(phoneVoiceSelect, stagedPhoneVoiceSelect);
+    var appliedResolution = resolveEnabledSelectSelection(
+        voiceSelect,
+        stagedResolution.value,
+        defaultVoiceId
+    );
+    resolveEnabledSelectSelection(
+        phoneVoiceSelect,
+        stagedPhoneResolution.value,
+        defaultVoiceId
+    );
+    currentVoiceId = appliedResolution.value;
+    localStorage.setItem(LS_VOICE, currentVoiceId);
     loadPhoneConfig();
-    voiceSelect.value = currentVoiceId;
-    if (!voiceSelect.value) {
-        currentVoiceId = uiCatalog.default;
-        voiceSelect.value = currentVoiceId;
-    }
     voiceSelect.disabled = false;
     voicePreviewBtn.disabled = false;
+    pageLog(
+        "voice selection stored=" + (requestedVoiceId || "(none)") +
+        " default=" + (defaultVoiceId || "(none)") +
+        " resolved=" + currentVoiceId +
+        " source=" + (appliedResolution.fallback ? appliedResolution.source : stagedResolution.source) +
+        " fallback=" + (stagedResolution.fallback || appliedResolution.fallback)
+    );
 }
 
 function pushVoice() {
@@ -1998,18 +2108,26 @@ function pushVoice() {
 
 var voicesLoaded = false, voicesLoading = false;
 function loadVoices() {
-    if (voicesLoading) return;
+    if (voicesLoading) return Promise.resolve(false);
     voicesLoading = true;
-    fetch("/api/voices")
-        .then(function (r) { return r.json(); })
+    return fetch("/api/voices")
+        .then(function (r) {
+            if (!r.ok) throw new Error("voice catalog unavailable");
+            return r.json();
+        })
         .then(function (uiCatalog) {
             renderVoiceOptions(uiCatalog);
             speedSlider.value = String(currentSpeed);
             speedValue.textContent = currentSpeed.toFixed(1) + "×";
             voicesLoaded = true;
             pushVoice();
+            return true;
         })
-        .catch(function () { statusText.textContent = "Could not load voices"; })
+        .catch(function (error) {
+            pageLog("voices load FAILED: " + (error && error.message ? error.message : error));
+            statusText.textContent = "Could not load voices";
+            return false;
+        })
         .finally(function () { voicesLoading = false; });
 }
 
@@ -2064,35 +2182,89 @@ function syncModelToServer() {
 }
 
 function loadModels() {
-    if (modelsLoading) return;
+    if (modelsLoading) return Promise.resolve(false);
+    if (!currentEnabledSelectOption(modelSelect)) modelSelect.disabled = true;
     modelsLoading = true;
-    fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
-        // Main LLM selector: populate and land on a guaranteed non-blank,
-        // preferably-enabled selection. No WebSocket dependency — this runs on
-        // page load so the control is never blank while the socket connects.
-        currentModel = Pipeline.applyModelOptions(modelSelect, data.models, currentModel, data.default);
-        localStorage.setItem(LS_MODEL, currentModel);
-        // Phone LLM mirror: "(server default)" + every available model.
-        phoneModelSelect.innerHTML = "";
-        var def = document.createElement("option");
-        def.value = ""; def.textContent = "server default (" + data.default + ")";
-        phoneModelSelect.appendChild(def);
-        Pipeline.buildModelOptions(data.models).forEach(function (o) {
+    var requestedModel = currentModel;
+    return fetch("/api/models").then(function (r) {
+        if (!r.ok) throw new Error("model catalog unavailable");
+        return r.json();
+    }).then(function (data) {
+        var models = Array.isArray(data.models) ? data.models : [];
+        var serverDefault = typeof data.default === "string" ? data.default : "";
+        var builtOptions = Pipeline.buildModelOptions(models);
+        var stagedModelSelect = document.createElement("select");
+        var stagedPhoneModelSelect = document.createElement("select");
+        builtOptions.forEach(function (o) {
+            if (!o || typeof o.id !== "string" || !o.id) return;
             var el = document.createElement("option");
             el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
-            phoneModelSelect.appendChild(el);
+            stagedModelSelect.appendChild(el);
         });
-        if (phonePendingModel !== null) { phoneModelSelect.value = phonePendingModel; phonePendingModel = null; }
+
+        // Phone LLM mirror: "(server default)" + every available model. It is
+        // staged alongside the main selector so a bad payload changes neither.
+        var def = document.createElement("option");
+        def.value = ""; def.textContent = "server default (" + serverDefault + ")";
+        stagedPhoneModelSelect.appendChild(def);
+        builtOptions.forEach(function (o) {
+            if (!o || typeof o.id !== "string" || !o.id) return;
+            var el = document.createElement("option");
+            el.value = o.id; el.textContent = o.label; el.disabled = o.disabled;
+            stagedPhoneModelSelect.appendChild(el);
+        });
+
+        var stagedResolution = resolveEnabledSelectSelection(
+            stagedModelSelect,
+            requestedModel,
+            serverDefault
+        );
+        var requestedPhoneModel = phonePendingModel !== null
+            ? phonePendingModel
+            : phoneModelSelect.value;
+        var stagedPhoneResolution = resolveEnabledSelectSelection(
+            stagedPhoneModelSelect,
+            requestedPhoneModel,
+            ""
+        );
+
+        replaceSelectOptions(modelSelect, stagedModelSelect);
+        replaceSelectOptions(phoneModelSelect, stagedPhoneModelSelect);
+        var appliedResolution = resolveEnabledSelectSelection(
+            modelSelect,
+            stagedResolution.value,
+            serverDefault
+        );
+        resolveEnabledSelectSelection(
+            phoneModelSelect,
+            stagedPhoneResolution.value,
+            ""
+        );
+        phonePendingModel = null;
+        currentModel = appliedResolution.value;
+        localStorage.setItem(LS_MODEL, currentModel);
+        modelSelect.disabled = false;
         sttSelect.value = currentStt;
         modelsLoaded = true;
-        pageLog("models loaded n=" + (data.models ? data.models.length : 0) + " sel=" + currentModel);
+        pageLog(
+            "models loaded n=" + models.length +
+            " stored=" + (requestedModel || "(none)") +
+            " default=" + (serverDefault || "(none)") +
+            " resolved=" + currentModel +
+            " source=" + (appliedResolution.fallback ? appliedResolution.source : stagedResolution.source) +
+            " fallback=" + (stagedResolution.fallback || appliedResolution.fallback)
+        );
         syncModelToServer();
+        return true;
     }).catch(function (err) {
-        // Never leave the selector blank on a transient failure: retry once.
+        // Keep a previously populated selector intact on a transient failure.
+        // An initially empty control stays disabled until a valid catalog wins.
         pageLog("models load FAILED: " + (err && err.message ? err.message : err));
+        if (!currentEnabledSelectOption(modelSelect)) modelSelect.disabled = true;
         if (!modelsLoaded && !modelsRetryTimer) {
             modelsRetryTimer = setTimeout(function () { modelsRetryTimer = null; loadModels(); }, 1500);
         }
+        return false;
     }).finally(function () { modelsLoading = false; });
 }
 
