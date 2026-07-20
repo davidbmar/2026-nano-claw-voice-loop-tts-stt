@@ -1018,32 +1018,45 @@ phoneSpeedSlider.addEventListener("change", function () {
     pushPhoneConfig({ speed: parseFloat(phoneSpeedSlider.value) });
 });
 
+const DEFAULT_FLOW_OPTIONS = Object.freeze([
+    { id: "none", label: "None" },
+    { id: "spacechannel", label: "Space Channel" },
+    { id: "replicantpm", label: "Replicant PM" },
+    { id: "scheduler", label: "Plumber Scheduler" },
+]);
+
 function renderFlowConfig(config) {
-    var options = Array.isArray(config.options) ? config.options : ["off", "scheduler"];
-    flowSelect.innerHTML = "";
-    options.forEach(function (mode) {
-        var o = document.createElement("option");
-        o.value = mode;
-        o.textContent = mode === "scheduler" ? "Plumber scheduler" : "Off";
-        flowSelect.appendChild(o);
-    });
-    flowSelect.value = options.indexOf(config.active) >= 0 ? config.active : "off";
+    var options = Array.isArray(config.options) ? config.options.filter(function (option) {
+        return option && typeof option.id === "string" && option.id && typeof option.label === "string";
+    }) : [];
+    if (!options.length) options = DEFAULT_FLOW_OPTIONS.slice();
+    var active = typeof config.active === "string" ? config.active : "";
+    var selected = Pipeline.applyModelOptions(
+        flowSelect,
+        options.map(function (option) {
+            return { id: option.id, label: option.label, available: true };
+        }),
+        active,
+        "spacechannel"
+    );
     flowWarning.textContent = "Scheduler availability is unavailable";
-    flowWarning.classList.toggle("hidden", config.availability_ok === true);
+    flowWarning.classList.toggle(
+        "hidden",
+        selected !== "scheduler" || config.availability_ok === true
+    );
 }
 
 function loadFlowConfig() {
-    return fetch("/api/voice/flow").then(function (r) { return r.json(); }).then(function (config) {
+    return fetch("/api/voice/flow").then(function (r) {
+        if (!r.ok) throw new Error("assistant mode load failed");
+        return r.json();
+    }).then(function (config) {
         renderFlowConfig(config || {});
         flowSelect.disabled = false;
     }).catch(function () {
-        flowSelect.innerHTML = "";
-        var o = document.createElement("option");
-        o.textContent = "n/a";
-        flowSelect.appendChild(o);
         flowSelect.disabled = true;
         flowWarning.classList.remove("hidden");
-        flowWarning.textContent = "Could not load flow settings";
+        flowWarning.textContent = "Could not load assistant modes";
     });
 }
 
@@ -1058,12 +1071,15 @@ flowSelect.addEventListener("change", function () {
         return r.json();
     }).then(function (config) {
         renderFlowConfig(config || {});
-        statusText.textContent = "Flow updated — phone applies it on the caller's next utterance";
-    }).catch(loadFlowConfig).finally(function () {
         flowSelect.disabled = false;
+        statusText.textContent = "Assistant mode updated";
+    }).catch(function () {
+        return loadFlowConfig();
     });
 });
 
+// Populate independently on page load; the assistant mode control never waits
+// for the voice WebSocket to open.
 loadFlowConfig();
 var activeRegionModel = "";
 

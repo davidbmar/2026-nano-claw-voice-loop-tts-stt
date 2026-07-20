@@ -139,9 +139,14 @@
 
           <div class="config-stage config-stage-single">
             <div class="pipe-row">
-              <label for="flow-select" title="Goal flow shared by the phone line and browser sessions">FLOW</label>
+              <label for="flow-select" title="Assistant mode shared by the phone line and browser sessions">MODE</label>
               <span class="pipe-control-stack">
-                <select id="flow-select"></select>
+                <select id="flow-select" aria-label="Assistant mode" disabled>
+                  <option value="none">None</option>
+                  <option value="spacechannel" selected>Space Channel</option>
+                  <option value="replicantpm">Replicant PM</option>
+                  <option value="scheduler">Plumber Scheduler</option>
+                </select>
                 <span id="flow-warning" class="pipe-warning hidden">Scheduler availability is unavailable</span>
               </span>
             </div>

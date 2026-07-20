@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from voice.goal_region import (
     BUSINESS_TIMEZONE,
@@ -27,7 +27,37 @@ SCHEDULER_GREETING = (
 )
 
 FlowOutcome = Literal["booked", "escape", "budget"]
-FLOW_MODES = ("off", "scheduler")
+
+
+class FlowModeConfig(TypedDict):
+    """One labeled assistant mode exposed by the voice configuration API."""
+
+    label: str
+    profile: str
+    scheduler: bool
+
+
+FLOW_MODES: dict[str, FlowModeConfig] = {
+    "none": {"label": "None", "profile": "none", "scheduler": False},
+    "spacechannel": {
+        "label": "Space Channel",
+        "profile": "spacechannel",
+        "scheduler": False,
+    },
+    "replicantpm": {
+        "label": "Replicant PM",
+        "profile": "replicantpm",
+        "scheduler": False,
+    },
+    "scheduler": {
+        "label": "Plumber Scheduler",
+        # If the scheduler is unavailable or ends, retain today's Space Channel
+        # fallback behavior for subsequent normal agent turns.
+        "profile": "spacechannel",
+        "scheduler": True,
+    },
+}
+DEFAULT_FLOW_MODE = "spacechannel"
 _flow_mode: str | None = None
 # Keep the provider-verified dropdown registry centralized here. These exact
 # IDs were checked against the live provider /v1/models endpoints on 2026-07-17.
@@ -69,13 +99,21 @@ class FlowReply:
     supervisor_ms: float | None = None
 
 
+def _normalize_flow_mode(mode: str) -> str | None:
+    """Return a registered mode, including the legacy ``off`` alias."""
+
+    if mode == "off":
+        return DEFAULT_FLOW_MODE
+    return mode if mode in FLOW_MODES else None
+
+
 def get_flow_mode() -> str:
     """Return the runtime flow selection, initialized from the environment."""
 
     global _flow_mode
     if _flow_mode is None:
         configured = os.environ.get("NANO_CLAW_VOICE_FLOW", "").strip()
-        _flow_mode = configured if configured in FLOW_MODES else "off"
+        _flow_mode = _normalize_flow_mode(configured) or DEFAULT_FLOW_MODE
     return _flow_mode
 
 
@@ -83,11 +121,21 @@ def set_flow_mode(mode: str) -> bool:
     """Select a flow for new calls and browser sessions."""
 
     global _flow_mode
-    if mode not in FLOW_MODES:
+    normalized = _normalize_flow_mode(mode) if isinstance(mode, str) else None
+    if normalized is None:
         return False
-    _flow_mode = mode
-    log.info("Voice flow switched to %s (applies to new sessions/calls)", mode)
+    _flow_mode = normalized
+    log.info("Voice flow switched to %s (applies to new sessions/calls)", normalized)
     return True
+
+
+def get_flow_profile(mode: str | None = None) -> str:
+    """Return the agent profile paired with a runtime assistant mode."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        active = DEFAULT_FLOW_MODE
+    return FLOW_MODES[active]["profile"]
 
 
 def get_region_model() -> str:
@@ -113,7 +161,7 @@ def set_region_model(name: str) -> bool:
 def scheduler_flow_enabled() -> bool:
     """Compatibility helper for callers that only need a boolean check."""
 
-    return get_flow_mode() == "scheduler"
+    return FLOW_MODES[get_flow_mode()]["scheduler"]
 
 
 def scheduler_region_config(digest: str) -> RegionConfig:

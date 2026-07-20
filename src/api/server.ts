@@ -150,18 +150,52 @@ function createToolRegistry(): ToolRegistry {
 }
 
 /**
- * Build the agent config for a turn. If `modelOverride` names a model in the
- * catalog, it wins; otherwise falls back to the configured default.
+ * Resolve the prompt and knowledge for one optional assistant profile.
+ *
+ * Known profiles are deliberately isolated from the global knowledge glob.
+ * `none` keeps the configured fallback prompt but has no site knowledge. An
+ * absent or unknown profile preserves the pre-profile behavior, including
+ * environment/config knowledge, for backward compatibility.
  */
-export function getAgentConfig(modelOverride?: string): AgentConfig {
+export function resolveAgentProfile(
+  agentConfig: Config,
+  profileId?: string
+): Pick<AgentConfig, 'systemPrompt' | 'knowledgeFiles'> {
+  const profiles = agentConfig.agents?.profiles;
+  const knownProfile =
+    profileId !== undefined &&
+    profileId !== 'none' &&
+    profiles !== undefined &&
+    Object.prototype.hasOwnProperty.call(profiles, profileId)
+      ? profiles[profileId]
+      : undefined;
+
+  if (knownProfile) {
+    return {
+      systemPrompt: knownProfile.systemPrompt,
+      knowledgeFiles: [...knownProfile.knowledgeFiles],
+    };
+  }
+
+  return {
+    systemPrompt: agentConfig.agents?.defaults?.systemPrompt,
+    knowledgeFiles: profileId === 'none' ? [] : resolveKnowledgeFiles(agentConfig),
+  };
+}
+
+/**
+ * Build the agent config for a turn. If `modelOverride` names a model in the
+ * catalog, it wins; otherwise falls back to the configured default. A known
+ * `profileId` selects that profile's prompt and isolated knowledge files.
+ */
+export function getAgentConfig(modelOverride?: string, profileId?: string): AgentConfig {
   initShared();
   const valid = !!modelOverride && modelsWithAvailability(config).some((m) => m.id === modelOverride && m.available);
   return {
     model: valid ? (modelOverride as string) : (config.agents?.defaults?.model || DEFAULT_MODEL),
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
-    systemPrompt: config.agents?.defaults?.systemPrompt,
-    knowledgeFiles: resolveKnowledgeFiles(config),
+    ...resolveAgentProfile(config, profileId),
   };
 }
 
@@ -486,7 +520,12 @@ function handleModels(res: http.ServerResponse): void {
 }
 
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const body = parseJsonBody(await readBody(req)) as { message?: string; sessionId?: string; model?: string } | null;
+  const body = parseJsonBody(await readBody(req)) as {
+    message?: string;
+    sessionId?: string;
+    model?: string;
+    profile?: unknown;
+  } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
     return;
@@ -500,7 +539,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
   memory.addMessage({ role: 'user', content: body.message });
 
-  const agentConfig = getAgentConfig(body.model);
+  const profile = typeof body.profile === 'string' ? body.profile : undefined;
+  const agentConfig = getAgentConfig(body.model, profile);
   if (wantsStream(req)) {
     await streamLoopToSSE(res, stepLoopStream(memory, agentConfig, 0));
     return;

@@ -28,11 +28,36 @@ assert.equal(VoiceUI.sampleTextForLang("e").startsWith("Hola"), true);
 assert.equal(VoiceUI.sampleTextForLang("a").length > 0, true);
 
 const voiceHtml = await readFile(new URL("../voice/web/index.html", import.meta.url), "utf8");
+const appSource = await readFile(new URL("../voice/web/app.js", import.meta.url), "utf8");
 assert.match(voiceHtml, /talking-cube\.js/, "voice UI must reference the Talking Cube module");
 assert.match(voiceHtml, /id="configuration-sidebar"/, "configuration must live in the left rail");
 assert.match(voiceHtml, /id="transcription-panel"/, "transcription must live in the right rail");
 assert.match(voiceHtml, /id="benchmark-p50"/, "sidebar must expose scheduler benchmarks");
 assert.match(voiceHtml, /id="latency-overall"/, "sidebar must expose pipeline latency");
 assert.doesNotMatch(voiceHtml, /id="settings-btn"/, "the settings popover trigger must be removed");
+
+const flowSelect = voiceHtml.match(/<select id="flow-select"[\s\S]*?<\/select>/)?.[0] || "";
+const flowOptions = [...flowSelect.matchAll(/<option value="([^"]+)"(?: selected)?>([^<]+)<\/option>/g)]
+    .map((match) => [match[1], match[2]]);
+assert.deepEqual(flowOptions, [
+    ["none", "None"],
+    ["spacechannel", "Space Channel"],
+    ["replicantpm", "Replicant PM"],
+    ["scheduler", "Plumber Scheduler"],
+]);
+assert.match(
+    flowSelect,
+    /<option value="spacechannel" selected>Space Channel<\/option>/,
+    "assistant mode must render Space Channel instead of a blank value before fetch resolves",
+);
+assert.match(
+    appSource,
+    /Pipeline\.applyModelOptions\(\s*flowSelect,/,
+    "assistant mode must reuse the non-blank resilient dropdown helper",
+);
+assert.ok(
+    appSource.indexOf("// Populate independently on page load") < appSource.indexOf("function connect()"),
+    "assistant modes must load on page load, independently of socket open",
+);
 
 console.log("voice-ui tests passed");

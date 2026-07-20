@@ -48,10 +48,20 @@ export const AgentDefaultsSchema = z.object({
 });
 
 /**
+ * Named assistant profile configuration schema
+ */
+export const AgentProfileSchema = z.object({
+  label: z.string(),
+  systemPrompt: z.string(),
+  knowledgeFiles: z.array(z.string()),
+});
+
+/**
  * Agents configuration schema
  */
 export const AgentsConfigSchema = z.object({
   defaults: AgentDefaultsSchema.optional(),
+  profiles: z.record(AgentProfileSchema).optional(),
 });
 
 /**
@@ -198,6 +208,7 @@ export const ConfigSchema = z.object({
  */
 export type Config = z.infer<typeof ConfigSchema>;
 export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
+export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
 export type ChannelsConfig = z.infer<typeof ChannelsConfigSchema>;

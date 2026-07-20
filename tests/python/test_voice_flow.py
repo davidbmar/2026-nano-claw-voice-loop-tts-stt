@@ -10,13 +10,18 @@ from aiohttp.test_utils import TestClient, TestServer
 from scripts.scheduling_eval import run_eval
 from voice import flow_session, phone, server
 from voice.flow_session import (
+    DEFAULT_FLOW_MODE,
     DEFAULT_REGION_MODEL,
+    FLOW_MODES,
     REGION_MODELS,
     FlowReply,
     FlowSession,
     SCHEDULER_GREETING,
+    get_flow_mode,
+    get_flow_profile,
     get_region_model,
     scheduler_region_config,
+    set_flow_mode,
     set_region_model,
 )
 from voice.goal_region import RegionTurn
@@ -400,8 +405,24 @@ def test_browser_flag_off_routes_to_normal_api(monkeypatch):
     run(server._handle_agent_request(ws, session, client, "hello"))
 
     assert len(client.calls) == 1
+    assert client.calls[0][2]["json"]["profile"] == "spacechannel"
     assert session.spoken == ["normal API reply"]
     assert {"type": "agent_reply", "text": "normal API reply"} in ws.messages
+
+
+def test_browser_passes_current_mode_profile_on_every_agent_request(monkeypatch):
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    client = FakeHttpClient()
+
+    assert set_flow_mode("replicantpm") is True
+    run(server._handle_agent_request(ws, session, client, "tell me about rentals"))
+    assert client.calls[-1][2]["json"]["profile"] == "replicantpm"
+
+    assert set_flow_mode("none") is True
+    run(server._handle_agent_request(ws, session, client, "hello again"))
+    assert client.calls[-1][2]["json"]["profile"] == "none"
 
 
 def test_browser_missing_availability_falls_back_and_logs(
@@ -589,6 +610,30 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
     run(exercise())
 
 
+def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_VOICE_FLOW", raising=False)
+
+    assert list(FLOW_MODES) == [
+        "none",
+        "spacechannel",
+        "replicantpm",
+        "scheduler",
+    ]
+    assert DEFAULT_FLOW_MODE == "spacechannel"
+    assert get_flow_mode() == "spacechannel"
+    assert get_flow_profile() == "spacechannel"
+    assert get_flow_profile("scheduler") == "spacechannel"
+
+    assert set_flow_mode("off") is True
+    assert get_flow_mode() == "spacechannel"
+    assert set_flow_mode("not-a-flow") is False
+    assert get_flow_mode() == "spacechannel"
+
+    monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "off")
+    monkeypatch.setattr(flow_session, "_flow_mode", None)
+    assert get_flow_mode() == "spacechannel"
+
+
 def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_path):
     availability = tmp_path / "availability.json"
     availability.write_text(json.dumps({
@@ -608,7 +653,12 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             assert response.status == 200
             assert await response.json() == {
                 "active": "scheduler",
-                "options": ["off", "scheduler"],
+                "options": [
+                    {"id": "none", "label": "None"},
+                    {"id": "spacechannel", "label": "Space Channel"},
+                    {"id": "replicantpm", "label": "Replicant PM"},
+                    {"id": "scheduler", "label": "Plumber Scheduler"},
+                ],
                 "availability_ok": True,
             }
 
@@ -616,7 +666,13 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 "/api/voice/flow", json={"mode": "off"}
             )
             assert response.status == 200
-            assert (await response.json())["active"] == "off"
+            assert (await response.json())["active"] == "spacechannel"
+
+            response = await client.post(
+                "/api/voice/flow", json={"mode": "replicantpm"}
+            )
+            assert response.status == 200
+            assert (await response.json())["active"] == "replicantpm"
 
             response = await client.post(
                 "/api/voice/flow", json={"mode": "not-a-flow"}

@@ -27,6 +27,7 @@ from voice.flow_session import (
     REGION_MODELS,
     FlowSession,
     get_flow_mode,
+    get_flow_profile,
     get_region_model,
     set_flow_mode,
     set_region_model,
@@ -1087,7 +1088,12 @@ async def _handle_agent_request(
         async with client.stream(
             "POST",
             f"{NANO_CLAW_URL}/api/chat",
-            json={"message": text, "sessionId": _agent_session_id(session), **({"model": session.model} if session.model else {})},
+            json={
+                "message": text,
+                "sessionId": _agent_session_id(session),
+                "profile": get_flow_profile(),
+                **({"model": session.model} if session.model else {}),
+            },
             headers={"Accept": "text/event-stream"},
         ) as resp:
             ctype = resp.headers.get("content-type", "")
@@ -1977,19 +1983,22 @@ async def costs_handler(request: web.Request) -> web.Response:
 def _flow_api_payload() -> dict:
     return {
         "active": get_flow_mode(),
-        "options": list(FLOW_MODES),
+        "options": [
+            {"id": mode_id, "label": mode["label"]}
+            for mode_id, mode in FLOW_MODES.items()
+        ],
         "availability_ok": FlowSession.availability_ok(),
     }
 
 
 async def flow_get_handler(request: web.Request) -> web.Response:
-    """Report the flow used for new browser sessions and phone calls."""
+    """Report the assistant mode used for browser sessions and phone calls."""
 
     return web.json_response(_flow_api_payload())
 
 
 async def flow_set_handler(request: web.Request) -> web.Response:
-    """Set the flow used for new browser sessions and phone calls."""
+    """Set the assistant mode used for browser sessions and phone calls."""
 
     try:
         body = await request.json()
@@ -1997,7 +2006,10 @@ async def flow_set_handler(request: web.Request) -> web.Response:
         return web.Response(status=400, text="bad json")
     if not isinstance(body, dict):
         return web.Response(status=400, text="bad json")
-    mode = str(body.get("mode", "")).lower()
+    raw_mode = body.get("mode")
+    if not isinstance(raw_mode, str):
+        return web.Response(status=400, text="bad mode")
+    mode = raw_mode.strip().lower()
     if not set_flow_mode(mode):
         return web.Response(status=400, text=f"unknown mode: {mode}")
     return web.json_response(_flow_api_payload())
