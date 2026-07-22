@@ -1,9 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextBuilder } from '../src/agent/context';
 import {
+  classifyAffirmationReply,
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
+  hydrateDeepGoal,
   isRegistryAnalysisQuestion,
+  resolveDeepGate,
   resolveExistingAnalysisTurn,
   resolveRegistryAnalysisTurn,
   runDeepReasoning,
@@ -889,5 +892,181 @@ describe('registry artifact routing', () => {
     const decision = resolveAnalysisFollowUp('what is missing from this analysis?', state);
     expect(decision?.action).toBe('show_gaps');
     expect(decision?.selectedTopicIds).toContain('topic_acquisition');
+  });
+});
+
+describe('reflect-hydrate-affirm gate', () => {
+  const deepRoute = {
+    deep: true,
+    score: 4,
+    reasons: ['strategy_review'],
+    workflow: 'strategy_review' as const,
+  };
+
+  function fakeStore(initial?: import('../src/agent/deep-reasoning').PendingDeepRequest) {
+    let pending = initial;
+    return {
+      getPendingDeepRequest: () => pending,
+      setPendingDeepRequest: (request: typeof initial) => {
+        pending = request;
+      },
+      clearPendingDeepRequest: () => {
+        pending = undefined;
+      },
+      peek: () => pending,
+    };
+  }
+
+  const goodHydration = JSON.stringify({
+    goal: 'Critique the strategy of the Owning the Demand business plan.',
+    reflection: 'You want a deep critique of the business plan strategy.',
+    ambiguities: [],
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('classifies affirmation replies', () => {
+    expect(classifyAffirmationReply('Yes, go ahead.')).toBe('yes');
+    expect(classifyAffirmationReply('sure')).toBe('yes');
+    expect(classifyAffirmationReply('No, never mind.')).toBe('no');
+    expect(classifyAffirmationReply("Actually, focus on pricing instead")).toBe('no');
+    expect(classifyAffirmationReply('What about the risks chapter?')).toBe('other');
+  });
+
+  it('parses hydration JSON and survives failures', async () => {
+    const parsed = await hydrateDeepGoal(user('umm think deeply about, uh, the plan'), async () =>
+      '```json\n' + goodHydration + '\n```'
+    );
+    expect(parsed?.goal).toContain('Owning the Demand');
+    expect(parsed?.reflection).toMatch(/deep critique/);
+    expect(await hydrateDeepGoal(user('question'), async () => 'not json at all')).toBeUndefined();
+    expect(
+      await hydrateDeepGoal(user('question'), async () => {
+        throw new Error('provider down');
+      })
+    ).toBeUndefined();
+  });
+
+  it('requests affirmation and stores the pending hydrated goal', async () => {
+    const store = fakeStore();
+    const gate = await resolveDeepGate(
+      store,
+      user('Okay so what I want you to do is think deeply about the business plan'),
+      deepRoute,
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('affirm');
+    if (gate.kind === 'affirm') {
+      expect(gate.utterance).toContain('deep critique of the business plan strategy');
+      expect(gate.utterance).toMatch(/go ahead\?/i);
+    }
+    expect(store.peek()?.goal).toContain('Owning the Demand');
+  });
+
+  it('runs with the hydrated goal after an affirmative reply', async () => {
+    const store = fakeStore({
+      goal: 'Hydrated goal.',
+      reflection: 'r',
+      workflow: 'strategy_review',
+      score: 4,
+      reasons: ['strategy_review'],
+    });
+    const gate = await resolveDeepGate(
+      store,
+      user('Yes, go ahead.'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toBe('Hydrated goal.');
+      expect(gate.route.reasons).toContain('affirmed_deep_request');
+    }
+    expect(store.peek()).toBeUndefined();
+  });
+
+  it('drops the pending request on decline or unrelated replies', async () => {
+    const pending = {
+      goal: 'g',
+      reflection: 'r',
+      workflow: 'strategy_review' as const,
+      score: 4,
+      reasons: [],
+    };
+    const declined = await resolveDeepGate(
+      fakeStore(pending),
+      user('No, never mind.'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(declined.kind).toBe('pass');
+    const unrelated = await resolveDeepGate(
+      fakeStore(pending),
+      user('How many phases are in the plan?'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(unrelated.kind).toBe('pass');
+  });
+
+  it('hydrates silently under the never policy', async () => {
+    vi.stubEnv('NANO_CLAW_DEEP_CONFIRM', 'never');
+    const store = fakeStore();
+    const gate = await resolveDeepGate(
+      store,
+      user('think deeply about the business plan strategy'),
+      deepRoute,
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toContain('Owning the Demand');
+      expect(gate.gateDebug?.action).toBe('hydrated_silent');
+    }
+    expect(store.peek()).toBeUndefined();
+  });
+
+  it('falls back to the verbatim goal when hydration fails', async () => {
+    const gate = await resolveDeepGate(
+      fakeStore(),
+      user('think deeply about the business plan strategy'),
+      deepRoute,
+      intelligence,
+      async () => {
+        throw new Error('provider down');
+      }
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toBeUndefined();
+      expect(gate.gateDebug?.action).toBe('verbatim_fallback');
+    }
+  });
+
+  it('submits the goal override on the wire', async () => {
+    const post = vi.fn().mockResolvedValue({
+      data: { task_id: 'task_9', status: 'failed' },
+    });
+    const events = [];
+    for await (const event of streamDeepReasoning(
+      user('verbatim rambling transcript text'),
+      intelligence,
+      undefined,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { post, get: vi.fn() } as any,
+      deepRoute,
+      'Hydrated goal.'
+    )) {
+      events.push(event);
+    }
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1].goal).toBe('Hydrated goal.');
   });
 });

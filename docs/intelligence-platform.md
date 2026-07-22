@@ -108,6 +108,26 @@ export NANO_CLAW_ARTIFACT_ROUTING=1      # 0 disables registry adoption
 export NANO_CLAW_ARTIFACT_ROUTE_MIN=0.35 # normalized-score floor for adoption
 ```
 
+## Reflect–hydrate–affirm deep goals (task 063)
+
+Deep requests no longer submit the caller's verbatim transcript as the analytical
+goal. When the deep router fires, one cheap fast-model call rewrites the utterance
+into a precise goal (filler stripped, pronouns resolved, document named — never
+added scope), reflects the understood ask back with at most one clarifying
+question, and waits for a spoken go-ahead before spending the pass. Affirm with
+"yes / go ahead"; decline or an unrelated reply drops the pending request. Any
+hydration failure falls back to the verbatim goal immediately — hydration never
+blocks a deep request. Normalized goals also converge, which lets the platform's
+`goal_digest`-keyed artifact reuse fire.
+
+```bash
+export NANO_CLAW_DEEP_CONFIRM=always     # always | low_confidence | never
+```
+
+`low_confidence` confirms only single-signal routes (mid-sentence trigger
+phrases); `never` skips the spoken confirmation but still submits the silently
+hydrated goal.
+
 Verify the provider and indexed document directly before enabling voice:
 
 ```bash

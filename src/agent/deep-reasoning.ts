@@ -460,6 +460,205 @@ export async function resolveRegistryAnalysisTurn(
   }
 }
 
+// ── Reflect–hydrate–affirm pipeline (task 063) ──────────────────────────────
+
+export interface PendingDeepRequest {
+  goal: string;
+  reflection: string;
+  workflow: DeepReasoningWorkflow;
+  score: number;
+  reasons: string[];
+}
+
+export interface PendingDeepRequestStore {
+  getPendingDeepRequest(): PendingDeepRequest | undefined;
+  setPendingDeepRequest(request: PendingDeepRequest): void;
+  clearPendingDeepRequest(): void;
+}
+
+export interface DeepGoalHydration {
+  goal: string;
+  reflection: string;
+  ambiguities: string[];
+}
+
+export type HydrationComplete = (systemPrompt: string, userPrompt: string) => Promise<string>;
+
+export type DeepConfirmPolicy = 'always' | 'low_confidence' | 'never';
+
+export function deepConfirmPolicy(): DeepConfirmPolicy {
+  const raw = (process.env.NANO_CLAW_DEEP_CONFIRM || 'always').toLowerCase();
+  return raw === 'never' || raw === 'low_confidence' ? raw : 'always';
+}
+
+/** Exported so the 060 routing evaluation can score the hydration prompt. */
+export const DEEP_GOAL_HYDRATION_PROMPT =
+  'You prepare one spoken analytical request for a document-analysis engine. ' +
+  'Given the conversation and the latest caller utterance, return STRICT JSON only: ' +
+  '{"goal": string, "reflection": string, "ambiguities": string[]}. ' +
+  '"goal" is the caller\'s question made precise: strip transcription filler and false ' +
+  'starts, resolve pronouns, and name the document under discussion. Never add scope, ' +
+  'lenses, or questions the caller did not ask. ' +
+  '"reflection" is one short spoken sentence stating what you understood the caller to ' +
+  'want; when something material is unclear, append at most one clarifying question. ' +
+  '"ambiguities" lists zero to two short phrases naming what was unclear; empty when clear.';
+
+/**
+ * Rewrite the verbatim utterance into a precise analytical goal using the fast
+ * conversational model. Returns undefined on any failure so callers fall back to
+ * the verbatim goal — hydration must never block a deep request.
+ */
+export async function hydrateDeepGoal(
+  messages: Message[],
+  complete: HydrationComplete
+): Promise<DeepGoalHydration | undefined> {
+  const userText = latestUserText(messages);
+  if (!userText) return undefined;
+  try {
+    const raw = await complete(
+      DEEP_GOAL_HYDRATION_PROMPT,
+      JSON.stringify({
+        conversation: conversationContext(messages).slice(-6),
+        latest_utterance: userText,
+      })
+    );
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return undefined;
+    const parsed: unknown = JSON.parse(match[0]);
+    if (!isRecord(parsed)) return undefined;
+    const goal = nonempty(parsed.goal);
+    const reflection = nonempty(parsed.reflection);
+    if (!goal || !reflection) return undefined;
+    const ambiguities = Array.isArray(parsed.ambiguities)
+      ? parsed.ambiguities.filter((value): value is string => typeof value === 'string').slice(0, 2)
+      : [];
+    return { goal, reflection, ambiguities };
+  } catch (error) {
+    logger.warn(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Deep goal hydration unavailable'
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Whether this deep route needs a spoken go-ahead before spending the pass.
+ * `low_confidence` confirms only single-signal routes (score below twice the
+ * threshold): stacked signals mean the caller unambiguously asked for depth.
+ */
+export function shouldAffirmDeepRequest(
+  route: DeepRouteDecision,
+  intelligence: IntelligenceConfig
+): boolean {
+  const policy = deepConfirmPolicy();
+  if (policy === 'never') return false;
+  if (policy === 'always') return true;
+  return route.score < settings(intelligence).threshold * 2;
+}
+
+export function affirmationUtterance(hydration: DeepGoalHydration): string {
+  const reflection = hydration.reflection.trim();
+  const tail = /\?\s*$/.test(reflection)
+    ? 'Once you confirm, the deeper look takes a couple of minutes.'
+    : 'The deeper look takes a couple of minutes — should I go ahead?';
+  return `${reflection} ${tail}`;
+}
+
+const AFFIRM_RE =
+  /^\s*(yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|do it|please(?: do)?|sounds good|correct|right|exactly|that'?s right|go for it|proceed|absolutely)\b/i;
+const DENY_RE =
+  /^\s*(no|nope|nah|don'?t|stop|cancel|never mind|not (?:now|that|quite|exactly)|hold on|wait|actually)\b/i;
+
+export function classifyAffirmationReply(text: string): 'yes' | 'no' | 'other' {
+  if (AFFIRM_RE.test(text)) return 'yes';
+  if (DENY_RE.test(text)) return 'no';
+  return 'other';
+}
+
+export interface DeepGateDebug {
+  policy: DeepConfirmPolicy;
+  action: 'affirm_requested' | 'affirmed' | 'declined' | 'hydrated_silent' | 'verbatim_fallback';
+  hydratedGoal?: string;
+}
+
+export type DeepGateDecision =
+  | { kind: 'run'; route: DeepRouteDecision; goalOverride?: string; gateDebug?: DeepGateDebug }
+  | { kind: 'affirm'; utterance: string; gateDebug: DeepGateDebug }
+  | { kind: 'pass'; gateDebug?: DeepGateDebug };
+
+/**
+ * One gate in front of every deep submission: settle a pending affirmation from
+ * the previous turn, then reflect–hydrate–affirm a fresh deep route according to
+ * NANO_CLAW_DEEP_CONFIRM. Pure of transport concerns — callers supply the store
+ * and the fast-model completion.
+ */
+export async function resolveDeepGate(
+  store: PendingDeepRequestStore,
+  messages: Message[],
+  deepRoute: DeepRouteDecision,
+  intelligence: IntelligenceConfig,
+  complete: HydrationComplete
+): Promise<DeepGateDecision> {
+  const policy = deepConfirmPolicy();
+  const pending = store.getPendingDeepRequest();
+  if (pending) {
+    store.clearPendingDeepRequest();
+    const reply = classifyAffirmationReply(latestUserText(messages) || '');
+    if (reply === 'yes') {
+      return {
+        kind: 'run',
+        route: {
+          deep: true,
+          score: pending.score,
+          reasons: [...pending.reasons, 'affirmed_deep_request'],
+          workflow: pending.workflow,
+        },
+        goalOverride: pending.goal,
+        gateDebug: { policy, action: 'affirmed', hydratedGoal: pending.goal },
+      };
+    }
+    if (reply === 'no') {
+      return { kind: 'pass', gateDebug: { policy, action: 'declined' } };
+    }
+    // Unrelated reply or a correction: the pending request expires and the turn
+    // proceeds normally — if it still reads as deep, hydration runs again below
+    // with the correction in context.
+  }
+  if (!deepRoute.deep) return { kind: 'pass' };
+  if (shouldAffirmDeepRequest(deepRoute, intelligence)) {
+    const hydration = await hydrateDeepGoal(messages, complete);
+    if (hydration) {
+      store.setPendingDeepRequest({
+        goal: hydration.goal,
+        reflection: hydration.reflection,
+        workflow: deepRoute.workflow,
+        score: deepRoute.score,
+        reasons: deepRoute.reasons,
+      });
+      return {
+        kind: 'affirm',
+        utterance: affirmationUtterance(hydration),
+        gateDebug: { policy, action: 'affirm_requested', hydratedGoal: hydration.goal },
+      };
+    }
+    return {
+      kind: 'run',
+      route: deepRoute,
+      gateDebug: { policy, action: 'verbatim_fallback' },
+    };
+  }
+  const hydration = await hydrateDeepGoal(messages, complete);
+  return {
+    kind: 'run',
+    route: deepRoute,
+    goalOverride: hydration?.goal,
+    gateDebug: hydration
+      ? { policy, action: 'hydrated_silent', hydratedGoal: hydration.goal }
+      : { policy, action: 'verbatim_fallback' },
+  };
+}
+
 function strategyWorkflow(messages: Message[]): DeepReasoningWorkflow {
   const recentMessages = messages
     .filter(
@@ -876,13 +1075,14 @@ export async function* streamDeepReasoning(
   intelligence: IntelligenceConfig,
   signal?: AbortSignal,
   http: DeepHttpClient = axios,
-  routeOverride?: DeepRouteDecision
+  routeOverride?: DeepRouteDecision,
+  goalOverride?: string
 ): AsyncGenerator<DeepReasoningEvent> {
   const config = settings(intelligence);
   const started = Date.now();
   const route = routeOverride || detectDeepQuestion(messages, intelligence);
   const workflow = route.workflow;
-  const goal = reasoningGoal(messages);
+  const goal = goalOverride?.trim() || reasoningGoal(messages);
   if (!goal) {
     yield {
       type: 'result',
@@ -1005,7 +1205,8 @@ export async function runDeepReasoning(
   intelligence: IntelligenceConfig,
   signal?: AbortSignal,
   http: DeepHttpClient = axios,
-  routeOverride?: DeepRouteDecision
+  routeOverride?: DeepRouteDecision,
+  goalOverride?: string
 ): Promise<DeepReasoningResult> {
   let result: DeepReasoningResult | undefined;
   for await (const event of streamDeepReasoning(
@@ -1013,7 +1214,8 @@ export async function runDeepReasoning(
     intelligence,
     signal,
     http,
-    routeOverride
+    routeOverride,
+    goalOverride
   )) {
     if (event.type === 'result') result = event.result;
   }

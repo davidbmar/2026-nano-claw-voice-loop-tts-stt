@@ -39,10 +39,13 @@ import {
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
   analysisVoiceWordLimit,
+  resolveDeepGate,
   resolveExistingAnalysisTurn,
   resolveRegistryAnalysisTurn,
   runDeepReasoning,
   streamDeepReasoning,
+  type DeepGateDebug,
+  type HydrationComplete,
 } from '../agent/deep-reasoning';
 import type { AnalysisNavigationDecision } from '../agent/analysis-navigation';
 
@@ -92,6 +95,7 @@ interface DebugInfo {
     limit: number;
     replaced: boolean;
   };
+  deepGoalGate?: DeepGateDebug;
 }
 
 interface PendingToolState {
@@ -179,6 +183,23 @@ function initShared(): void {
 /** Test-only: inject a stub provider manager. */
 export function __setProviderManagerForTest(pm: unknown): void {
   providerManager = pm as ProviderManager;
+}
+
+/** Fast-model completion used by the reflect-hydrate-affirm gate (task 063). */
+function hydrationCompleter(agentConfig: AgentConfig): HydrationComplete {
+  return async (systemPrompt, userPrompt) => {
+    const response = await providerManager.complete(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      agentConfig.model,
+      0,
+      400,
+      []
+    );
+    return response.content;
+  };
 }
 
 function createToolRegistry(): ToolRegistry {
@@ -332,12 +353,40 @@ async function stepLoop(
           ? await resolveRegistryAnalysisTurn(messages, agentConfig.intelligence)
           : undefined;
     if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
-    const deepRoute =
+    const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
         ? detectDeepQuestion(messages, agentConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
-    const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
+    const gate =
+      iteration === 1 && agentConfig.intelligence && !analysisTurn?.result
+        ? await resolveDeepGate(
+            memory,
+            messages,
+            routed,
+            agentConfig.intelligence,
+            hydrationCompleter(agentConfig)
+          )
+        : routed.deep && !analysisTurn?.result
+          ? { kind: 'run' as const, route: routed }
+          : { kind: 'pass' as const };
+    if (gate.kind === 'affirm') {
+      memory.addMessage({ role: 'assistant', content: gate.utterance });
+      return {
+        type: 'final',
+        response: gate.utterance,
+        debug: {
+          iteration,
+          messageCount,
+          model: agentConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: 'deep_affirmation_requested',
+          deepGoalGate: gate.gateDebug,
+        },
+      };
+    }
+    const deepRoute = gate.kind === 'run' ? gate.route : routed;
+    const ranDeepTask = gate.kind === 'run';
     const deepResult =
       analysisTurn?.result ||
       (ranDeepTask && agentConfig.intelligence
@@ -346,7 +395,8 @@ async function stepLoop(
             agentConfig.intelligence,
             undefined,
             undefined,
-            deepRoute
+            deepRoute,
+            gate.kind === 'run' ? gate.goalOverride : undefined
           )
         : undefined);
     if (deepResult && deepResult.status !== 'succeeded') {
@@ -538,14 +588,46 @@ export async function* stepLoopStream(
             agentConfig.intelligence,
             signal
           )
-        : undefined;
+        : iteration === 1 && agentConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, agentConfig.intelligence, signal)
+          : undefined;
     if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
-    const deepRoute =
+    const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
         ? detectDeepQuestion(messages, agentConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
-    const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
+    const gate =
+      iteration === 1 && agentConfig.intelligence && !analysisTurn?.result
+        ? await resolveDeepGate(
+            memory,
+            messages,
+            routed,
+            agentConfig.intelligence,
+            hydrationCompleter(agentConfig)
+          )
+        : routed.deep && !analysisTurn?.result
+          ? { kind: 'run' as const, route: routed }
+          : { kind: 'pass' as const };
+    if (gate.kind === 'affirm') {
+      memory.addMessage({ role: 'assistant', content: gate.utterance });
+      yield { type: 'text', delta: gate.utterance };
+      yield {
+        type: 'final',
+        response: gate.utterance,
+        debug: {
+          iteration,
+          messageCount,
+          model: agentConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: 'deep_affirmation_requested',
+          deepGoalGate: gate.gateDebug,
+        },
+      };
+      return;
+    }
+    const deepRoute = gate.kind === 'run' ? gate.route : routed;
+    const ranDeepTask = gate.kind === 'run';
     let deepResult: DeepReasoningResult | undefined = analysisTurn?.result;
     if (ranDeepTask && agentConfig.intelligence) {
       yield {
@@ -559,7 +641,8 @@ export async function* stepLoopStream(
         agentConfig.intelligence,
         signal,
         undefined,
-        deepRoute
+        deepRoute,
+        gate.kind === 'run' ? gate.goalOverride : undefined
       )) {
         if (event.type === 'progress') {
           yield {

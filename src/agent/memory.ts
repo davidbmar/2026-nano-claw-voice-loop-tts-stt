@@ -11,6 +11,7 @@ import { join } from 'path';
 import { Message } from '../types';
 import { getMemoryDir } from '../utils/helpers';
 import { logger } from '../utils/logger';
+import type { PendingDeepRequest } from './deep-reasoning';
 import {
   AnalysisConversationState,
   analysisConversationStateForStorage,
@@ -110,6 +111,7 @@ export class Memory {
   private analysisPath: string;
   private messages: Message[] = [];
   private analysisState?: AnalysisConversationState;
+  private pendingDeepRequest?: PendingDeepRequest;
   private maxMessages: number;
   private deleted = false;
 
@@ -235,6 +237,7 @@ export class Memory {
   clear(): void {
     this.messages = [];
     this.analysisState = undefined;
+    this.pendingDeepRequest = undefined;
     this.save();
     this.saveAnalysisState();
   }
@@ -247,6 +250,7 @@ export class Memory {
   delete(): void {
     this.messages = [];
     this.analysisState = undefined;
+    this.pendingDeepRequest = undefined;
     this.deleted = true;
     deleteMemoryFile(this.sessionId);
   }
@@ -254,6 +258,23 @@ export class Memory {
   /** Get the owning session id for approval binding and lifecycle cleanup. */
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /**
+   * One-turn reflect-hydrate-affirm state (task 063). Deliberately in-memory
+   * only: it must not survive a server restart the way analysis state does.
+   */
+  getPendingDeepRequest(): PendingDeepRequest | undefined {
+    return this.pendingDeepRequest;
+  }
+
+  setPendingDeepRequest(request: PendingDeepRequest): void {
+    if (this.deleted) return;
+    this.pendingDeepRequest = request;
+  }
+
+  clearPendingDeepRequest(): void {
+    this.pendingDeepRequest = undefined;
   }
 
   /** Persist one structured analysis map independently from the transcript. */
