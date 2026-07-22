@@ -234,6 +234,14 @@ assert.equal(node.messages.length, messagesAtPause, "paused playback drops in-fl
 player.unpause();
 player.enqueue(frame);
 assert.equal(node.messages.at(-1).type, "samples");
+const messagesBeforeEnd = node.messages.length;
+player.end();
+player.enqueue(frame);
+assert.equal(
+    node.messages.length,
+    messagesBeforeEnd,
+    "normal completion rejects late network frames without flushing buffered audio",
+);
 
 const boundedLeadPlayer = new Pcm16AudioPlayer({
     AudioContextClass: FakeAudioContext,

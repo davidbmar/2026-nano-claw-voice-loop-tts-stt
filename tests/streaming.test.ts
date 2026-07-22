@@ -223,6 +223,9 @@ describe('stepLoopStream', () => {
           completed_steps: 2,
           max_steps: 4,
           retrieval_queries: 2,
+          reasoning: { current: 2, completed: 2, maximum: 4 },
+          retrieval: { planned: 2, completed: 2, evidence_items: 1 },
+          artifact: { status: 'indexed', artifact_id: 'analysis_task_stream' },
         },
         result: {
           answer:
@@ -303,6 +306,17 @@ describe('stepLoopStream', () => {
         acknowledgement: 'Let me think deeply about this.',
       });
       expect(events.filter((event) => event.type === 'deep_progress')).toHaveLength(2);
+      expect(
+        events.find(
+          (event) => event.type === 'deep_progress' && event.phase === 'completed'
+        )
+      ).toMatchObject({
+        artifactStatus: 'indexed',
+        artifactId: 'analysis_task_stream',
+        completedPasses: 2,
+        retrievalCompleted: 2,
+        evidenceItems: 1,
+      });
       const spoken = events
         .filter((event) => event.type === 'text')
         .map((event) => event.delta)

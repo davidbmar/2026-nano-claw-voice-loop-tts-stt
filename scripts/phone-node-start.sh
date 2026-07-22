@@ -109,8 +109,22 @@ ensure() {
     return 0
   fi
   if ! docker_up; then
-    log "docker daemon not available — will retry next cycle"
-    return 0
+    # Docker Desktop does not start at login, so after a reboot the whole
+    # node stays down until a human launches it (real outage: 75 min on
+    # 2026-07-22). DRAINED already expresses "off on purpose", so it is
+    # safe for the watchdog to own this dependency too. -g keeps the app
+    # from stealing foreground focus.
+    log "docker daemon not available — launching Docker Desktop"
+    open -ga Docker
+    for _ in $(seq 1 20); do
+      sleep 3
+      docker_up && break
+    done
+    if ! docker_up; then
+      log "docker daemon still not up after 60s — will retry next cycle"
+      return 0
+    fi
+    log "docker daemon up"
   fi
   if ! tunnel_up; then
     start_tunnel

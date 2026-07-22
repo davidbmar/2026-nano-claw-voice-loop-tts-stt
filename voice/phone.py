@@ -67,6 +67,11 @@ from voice.phone_audio import (
 from voice.phone_tap import CallTap
 from voice.processing_audio import processing_chime
 from voice.sentence_pipeline import SentencePipeline
+from voice.speech_preparer import (
+    SPEECH_COMPILER_VERSION,
+    SpeechChunk,
+    compile_speech,
+)
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
 
@@ -222,6 +227,16 @@ def barge_in_enabled() -> bool:
     """Caller can interrupt the agent mid-speech (NANO_CLAW_PHONE_BARGE_IN=1).
     Off by default: the phone leg is half-duplex unless opted in."""
     return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
+
+
+def phone_speech_mode() -> str:
+    """Prepared speech is the default; raw remains an instant rollback."""
+
+    value = _cfg(
+        "NANO_CLAW_PHONE_SPEECH_PREPARATION",
+        _cfg("NANO_CLAW_SPEECH_PREPARATION", "1"),
+    ).lower()
+    return "raw" if value in ("0", "false", "off", "no", "raw") else "prepared"
 
 
 def _phone_gain_normalizer() -> SentencePeakNormalizer:
@@ -674,7 +689,11 @@ class PhoneCall:
         first_spoken_at: float | None = None
         reply_complete = False
         try:
-            payload: dict = {"message": text, "sessionId": self.session_id}
+            payload: dict = {
+                "message": text,
+                "sessionId": self.session_id,
+                "responseMode": "voice",
+            }
             model = _cfg("NANO_CLAW_PHONE_MODEL")
             if model:
                 payload["model"] = model  # else: server's configured default
@@ -689,7 +708,7 @@ class PhoneCall:
                     reply = body.get("response", "") or "I didn't catch that — could you say it again?"
                     record_agent_done()
                     log.info("[phone %s] agent non-stream (%.1fs)", self.call_id[:8], time.monotonic() - t0)
-                    await self._speak_sentences(self._sentences(reply))
+                    await self._speak_sentences(self._speech_units(reply))
                     return
 
                 async def stream_sentences():
@@ -697,6 +716,8 @@ class PhoneCall:
                     event = ""
                     data_lines: list[str] = []
                     last_processing_cue = 0.0
+                    prepared = phone_speech_mode() == "prepared"
+                    prepared_parts: list[str] = []
                     async for raw in resp.aiter_lines():
                         if self.closed or not self.speaking:
                             return  # hangup or barge-in: stop consuming the stream
@@ -708,7 +729,12 @@ class PhoneCall:
                                 continue
                             obj = json.loads(event_payload)
                             if ev == "delta":
-                                for chunk in chunker.push(obj.get("text", "")):
+                                delta = obj.get("text", "")
+                                if prepared:
+                                    if isinstance(delta, str):
+                                        prepared_parts.append(delta)
+                                    continue
+                                for chunk in chunker.push(delta):
                                     if first_spoken_at is None:
                                         first_spoken_at = time.monotonic()
                                         log.info(
@@ -741,9 +767,20 @@ class PhoneCall:
                             elif ev == "final":
                                 record_agent_done()
                                 reply_complete = True
-                                tail = chunker.flush()
-                                if tail:
-                                    yield tail
+                                if prepared:
+                                    response_text = obj.get("response", "")
+                                    source_text = (
+                                        response_text.strip()
+                                        if isinstance(response_text, str)
+                                        and response_text.strip()
+                                        else "".join(prepared_parts).strip()
+                                    )
+                                    for unit in self._speech_units(source_text):
+                                        yield unit
+                                else:
+                                    tail = chunker.flush()
+                                    if tail:
+                                        yield tail
                             elif ev == "tool_pending":
                                 yield (
                                     "I can't take actions over the phone, but I'm happy "
@@ -781,6 +818,38 @@ class PhoneCall:
             out.append(tail)
         return out
 
+    @staticmethod
+    def _speech_units(text: str) -> list[str | SpeechChunk]:
+        """Compile one complete phone response, retaining the raw rollback."""
+
+        if phone_speech_mode() != "prepared":
+            return PhoneCall._sentences(text)
+        try:
+            max_words = int(_cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
+        except ValueError:
+            max_words = 18
+        try:
+            max_duration = int(_cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
+        except ValueError:
+            max_duration = 2500
+        try:
+            plan = compile_speech(
+                text,
+                max_words_per_chunk=max_words,
+                max_chunk_duration_ms=max_duration,
+            )
+        except Exception:
+            log.exception("[phone] speech preparation failed; using raw text")
+            return PhoneCall._sentences(text)
+        metadata = plan.public_metadata()
+        log.info(
+            "[phone] speech plan compiled: version=%s chunks=%d normalizations=%d",
+            metadata["compilerVersion"],
+            metadata["chunkCount"],
+            metadata["normalizationCount"],
+        )
+        return list(plan.chunks)
+
     async def _transcribe(self, pcm: bytes) -> str:
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
         started = time.monotonic() if self.tap else None
@@ -805,10 +874,16 @@ class PhoneCall:
 
     # ── Outbound audio ───────────────────────────────────────────
 
-    async def _synthesize_sentence(self, sentence: str) -> _SynthesizedSpeech:
+    async def _synthesize_sentence(
+        self, sentence: str | SpeechChunk
+    ) -> _SynthesizedSpeech:
         """Synthesize one sentence and retain its tap correlation fields."""
         if sentence == PROCESSING_CUE_SENTINEL:
             return _SynthesizedSpeech(processing_chime(), self.tap, None)
+        spoken_text = sentence.text if isinstance(sentence, SpeechChunk) else sentence
+        pause_after_ms = (
+            sentence.pause_after_ms if isinstance(sentence, SpeechChunk) else None
+        )
         tap = self.tap
         sentence_index: int | None = None
         if tap:
@@ -822,7 +897,10 @@ class PhoneCall:
         except ValueError:
             speed = 1.0
         loop = asyncio.get_running_loop()
-        pcm48k = await loop.run_in_executor(None, tts_synthesize, sentence, voice, speed)
+        synth_args = (spoken_text, voice, speed)
+        if pause_after_ms is not None:
+            synth_args = (*synth_args, pause_after_ms)
+        pcm48k = await loop.run_in_executor(None, tts_synthesize, *synth_args)
         if tap and synth_started is not None:
             tap.tts_pcm48k(pcm48k)
             tap.event(
@@ -833,7 +911,9 @@ class PhoneCall:
             )
         return _SynthesizedSpeech(pcm48k, tap, sentence_index)
 
-    def _synthesis_failed(self, sentence: str, error: Exception) -> None:
+    def _synthesis_failed(
+        self, sentence: str | SpeechChunk, error: Exception
+    ) -> None:
         log.error(
             "[phone %s] sentence synthesis failed",
             self.call_id[:8],
@@ -979,7 +1059,7 @@ class PhoneCall:
         self.speaking = True
         self.barge.reset()
         try:
-            await self._speak_sentences(self._sentences(text))
+            await self._speak_sentences(self._speech_units(text))
         finally:
             self.speaking = False
             if not self.interrupted:
@@ -1142,6 +1222,8 @@ async def config_get_handler(request: web.Request) -> web.Response:
         "speed": speed,
         "stt_size": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
         "active_calls": len(_active_calls),
+        "speech_mode": phone_speech_mode(),
+        "speech_version": SPEECH_COMPILER_VERSION,
     })
 
 

@@ -218,6 +218,13 @@ summary:focus-visible {
   gap: 3px;
 }
 
+.brand-name-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
 .brand-copy strong {
   font-size: 12px;
   font-weight: 650;
@@ -230,6 +237,14 @@ summary:focus-visible {
   color: var(--faint);
   font-size: 8px;
   letter-spacing: 0.2em;
+}
+
+.brand-copy .brand-version {
+  color: rgba(var(--accent-rgb), 0.72);
+  font-size: 7px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  line-height: 1;
 }
 
 .top-status {
@@ -2262,7 +2277,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 @media (max-width: 500px) {
-  .brand-copy small {
+  .brand-copy .brand-subtitle {
     display: none;
   }
 

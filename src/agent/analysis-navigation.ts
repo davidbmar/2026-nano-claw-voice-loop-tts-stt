@@ -567,6 +567,8 @@ const EVIDENCE_RE =
 const REPORT_RE = /\b(full|complete|written) (?:analysis|report|review)|\bexport (?:the )?report\b/;
 const MENU_RE =
   /\b(what else|more (?:options|topics)|other (?:options|topics)|list (?:the )?topics)\b/;
+const ANALYSIS_OVERVIEW_RE =
+  /\b(?:biggest|main|top|key|major) (?:weaknesses|weak points|risks|problems|issues)\b/;
 const EXPAND_RE =
   /\b(tell me|explain|expand|go deeper|more about|what about|discuss|open|walk me through)\b/;
 
@@ -602,19 +604,24 @@ export function resolveAnalysisFollowUp(
       reason: 'changed_analytical_question',
     };
   }
-  if (MENU_RE.test(text)) {
+  if (MENU_RE.test(text) || ANALYSIS_OVERVIEW_RE.test(text)) {
     const unoffered = state.artifact.topics
       .filter((item) => !state.offeredTopicIds.includes(item.topicId))
       .slice(0, 3)
       .map((item) => item.topicId);
+    const repeatOverview = ANALYSIS_OVERVIEW_RE.test(text);
     return {
       action: 'list_topics',
       selectedTopicIds:
-        unoffered.length > 0
+        !repeatOverview && unoffered.length > 0
           ? unoffered
           : state.artifact.topics.slice(0, 3).map((item) => item.topicId),
       confidence: 1,
-      reason: unoffered.length > 0 ? 'menu_overflow' : 'menu_repeat',
+      reason: repeatOverview
+        ? 'analysis_overview'
+        : unoffered.length > 0
+          ? 'menu_overflow'
+          : 'menu_repeat',
     };
   }
 

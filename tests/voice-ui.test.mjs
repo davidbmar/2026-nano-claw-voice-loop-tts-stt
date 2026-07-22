@@ -37,6 +37,32 @@ assert.match(voiceHtml, /id="transcription-panel"/, 'transcription must live in 
 assert.match(voiceHtml, /id="benchmark-p50"/, 'sidebar must expose scheduler benchmarks');
 assert.match(voiceHtml, /id="latency-overall"/, 'sidebar must expose pipeline latency');
 assert.doesNotMatch(voiceHtml, /id="settings-btn"/, 'the settings popover trigger must be removed');
+assert.match(voiceHtml, /<strong>HYPERRIFF<\/strong>/, 'the masthead must use HYPERRIFF');
+assert.match(
+  voiceHtml,
+  /id="app-version"[^>]*>v0\.2\.1<\/small>/,
+  'the current release must remain visibly versioned in the masthead'
+);
+assert.match(
+  appSource,
+  /appVersionBadge\.textContent = 'v' \+ appVersion/,
+  'the visible release must reconcile with the running server version'
+);
+assert.doesNotMatch(
+  appSource,
+  /-pass ceiling/,
+  'the deep UI must not present a conditional pass budget as scheduled work'
+);
+assert.match(
+  appSource,
+  /waiting for model response · up to [\s\S]*passes if needed/,
+  'a long reasoning call must explain why its pass counter has not advanced'
+);
+assert.match(
+  appSource,
+  /backend heartbeat current/,
+  'heartbeats must be labeled as connectivity rather than reasoning progress'
+);
 
 const flowSelect = voiceHtml.match(/<select id="flow-select"[\s\S]*?<\/select>/)?.[0] || '';
 const flowOptions = [
@@ -44,15 +70,15 @@ const flowOptions = [
 ].map((match) => [match[1], match[2]]);
 assert.deepEqual(flowOptions, [
   ['none', 'None'],
-  ['spacechannel', 'Space Channel'],
+  ['spacechannel', 'HYPERRIFF'],
   ['intelligence', 'Document Intelligence'],
   ['replicantpm', 'Replicant PM'],
   ['scheduler', 'Plumber Scheduler'],
 ]);
 assert.match(
   flowSelect,
-  /<option value="spacechannel" selected>Space Channel<\/option>/,
-  'assistant mode must render Space Channel instead of a blank value before fetch resolves'
+  /<option value="spacechannel" selected>HYPERRIFF<\/option>/,
+  'assistant mode must render HYPERRIFF instead of a blank value before fetch resolves'
 );
 assert.match(
   appSource,
@@ -66,8 +92,8 @@ assert.match(
 );
 assert.match(
   appSource,
-  /nanoclaw\.bargeIn\.v2\.enabled/,
-  'old inherited barge-in preferences must be reset to the safe v2 default'
+  /nanoclaw\.bargeIn\.v3\.enabled/,
+  'old inherited barge-in preferences must be reset to the safe v3 default'
 );
 assert.match(
   voiceHtml,
@@ -83,6 +109,26 @@ assert.match(
   voiceHtml,
   /id="analysis-style-toggle"[\s\S]*?experimental principle-graph analysis/i,
   'the configuration rail must expose the principle-graph experiment'
+);
+assert.match(
+  voiceHtml,
+  /id="speech-preparation-toggle"[\s\S]*?checked/,
+  'prepared natural delivery must be visible and enabled by default'
+);
+assert.match(
+  appSource,
+  /nanoclaw\.speechPreparation\.v1\.enabled/,
+  'the prepared/raw comparison must persist independently of the voice model'
+);
+assert.match(
+  appSource,
+  /set_speech_mode[\s\S]*?prepared[\s\S]*?raw/,
+  'the browser must send its prepared/raw selection to the voice session'
+);
+assert.match(
+  appSource,
+  /case 'speech_plan':[\s\S]*?compilerVersion/,
+  'the browser must display the compiler version confirmed by each speech plan'
 );
 assert.match(
   appSource,

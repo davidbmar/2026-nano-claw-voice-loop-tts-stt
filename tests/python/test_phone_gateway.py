@@ -455,6 +455,8 @@ def test_phone_config_get_reflects_env(monkeypatch):
     assert body["model"] == ""  # server default
     assert body["speed"] == 1.0
     assert body["active_calls"] == 0
+    assert body["speech_mode"] == "prepared"
+    assert body["speech_version"] == "nanoclaw-speech-v1"
 
 
 def test_phone_config_set_overrides_env_live(monkeypatch):

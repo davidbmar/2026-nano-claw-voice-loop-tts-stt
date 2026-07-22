@@ -669,7 +669,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 "active": "scheduler",
                 "options": [
                     {"id": "none", "label": "None"},
-                    {"id": "spacechannel", "label": "Space Channel"},
+                    {"id": "spacechannel", "label": "HYPERRIFF"},
                     {"id": "intelligence", "label": "Document Intelligence"},
                     {"id": "replicantpm", "label": "Replicant PM"},
                     {"id": "scheduler", "label": "Plumber Scheduler"},

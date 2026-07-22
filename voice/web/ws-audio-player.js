@@ -198,6 +198,13 @@ export class Pcm16AudioPlayer {
         this.stop();
     }
 
+    end() {
+        // Stop accepting network frames without flushing audio that is
+        // already scheduled. Cancellation uses pause(); normal completion
+        // uses end() so the final buffered phonemes can finish naturally.
+        this.acceptingFrames = false;
+    }
+
     unpause() {
         if (this.closed) return;
         this.acceptingFrames = true;

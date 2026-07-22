@@ -1,8 +1,10 @@
 import asyncio
 import time
 
+from voice import phone
 from voice.phone import PhoneCall
 from voice.sentence_pipeline import SentencePipeline
+from voice.speech_preparer import FINAL_TAIL_PAD_MS, SpeechChunk
 
 
 def run(coro):
@@ -180,7 +182,8 @@ def test_phone_tap_records_synthesis_ahead_hit_and_miss():
     assert tap.events[1][1] == {"sentence_index": 7, "wait_ms": 25.0}
 
 
-def test_complete_and_streaming_phone_paths_share_the_sentence_pipeline():
+def test_complete_and_streaming_phone_paths_share_the_sentence_pipeline(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "raw")
     class FakeResponse:
         headers = {"content-type": "text/event-stream"}
 
@@ -247,6 +250,35 @@ def test_complete_and_streaming_phone_paths_share_the_sentence_pipeline():
         ["Three.", "Four."],
         ["audio:Three.", "audio:Four."],
     )
+
+
+def test_prepared_phone_units_carry_normalized_text_and_declared_pauses(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    units = PhoneCall._speech_units(
+        "## Next steps\n1. Call (512) 555-0184.\n2. Meet at 3:30 PM."
+    )
+
+    assert units
+    assert all(isinstance(unit, SpeechChunk) for unit in units)
+    assert "#" not in " ".join(unit.text for unit in units)
+    assert "five one two" in " ".join(unit.text for unit in units)
+    assert units[-1].pause_after_ms == FINAL_TAIL_PAD_MS
+
+    captured = []
+
+    def fake_synthesize(text, voice, speed, pause_after_ms):
+        captured.append((text, voice, speed, pause_after_ms))
+        return b"\x01\x02"
+
+    monkeypatch.setattr(phone, "tts_synthesize", fake_synthesize)
+    call = PhoneCall.__new__(PhoneCall)
+    call.tap = None
+    speech = run(call._synthesize_sentence(units[0]))
+
+    assert speech.pcm48k == b"\x01\x02"
+    assert captured == [
+        (units[0].text, "af_heart", 1.0, units[0].pause_after_ms)
+    ]
 
 
 def test_phone_hangup_cancels_active_pipeline_synthesis():

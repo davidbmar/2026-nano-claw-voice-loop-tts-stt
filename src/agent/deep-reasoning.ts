@@ -40,6 +40,22 @@ export interface DeepProgress {
   completedSteps: number;
   maxSteps: number;
   retrievalQueries: number;
+  currentPass: number;
+  completedPasses: number;
+  maxPasses: number;
+  retrievalPlanned: number;
+  retrievalCompleted: number;
+  evidenceItems: number;
+  model?: {
+    provider: string;
+    name: string;
+    thinking: string;
+    effort: string;
+  };
+  artifactStatus: string;
+  artifactId?: string;
+  phaseStartedAt?: string;
+  heartbeatAt?: string;
 }
 
 export interface DeepClaim {
@@ -188,11 +204,10 @@ function deterministicAnalysisSpeech(result: DeepReasoningResult): string {
     labels.length ? labels : artifact.topics.slice(0, 3).map((item) => item.label)
   );
   if (result.presentation?.mode === 'menu') {
-    return `We can explore ${menu}. Which would you like?`;
+    return `Which should we explore: ${menu}?`;
   }
-  if (result.answer && spokenWordCount(result.answer) <= 65) return result.answer.trim();
   const bottomLine = artifact.bottomLine.replace(/[.!?]+$/, '');
-  return `${bottomLine}. We can explore ${menu}.`;
+  return `${bottomLine}. Which should we explore first: ${menu}?`;
 }
 
 /** Prevent an overlong fast-model brief from reaching streaming/TTS output. */
@@ -202,7 +217,15 @@ export function guardAnalysisVoiceResponse(
 ): AnalysisVoiceGuard {
   const limit = analysisVoiceWordLimit(result);
   const normalized = text.trim();
-  if (limit === undefined || (normalized && spokenWordCount(normalized) <= limit)) {
+  const mode = result?.presentation?.mode || (result?.artifact ? 'brief' : undefined);
+  const needsNavigationQuestion = mode === 'brief' || mode === 'menu';
+  const hasNavigationQuestion = /\?\s*$/.test(normalized);
+  if (
+    limit === undefined ||
+    (normalized &&
+      spokenWordCount(normalized) <= limit &&
+      (!needsNavigationQuestion || hasNavigationQuestion))
+  ) {
     return { text, limit, replaced: false };
   }
   return {
@@ -229,9 +252,8 @@ function shouldSearchActiveAnalysis(userText: string): boolean {
     return false;
   }
   if (
-    /\b(document|paper|chapter|section|quote|citation|source passage|where in|what does it say|how many)\b/.test(
-      text
-    )
+    /\b(quote|citation|source passage|where in|how many)\b/.test(text) ||
+    /\bwhat does (?:it|the (?:document|doc|paper|chapter|section)) say\b/.test(text)
   ) {
     return false;
   }
@@ -321,12 +343,15 @@ async function searchActiveAnalysis(
 }
 
 function strategyWorkflow(messages: Message[]): DeepReasoningWorkflow {
-  const userMessages = messages
-    .filter((message) => message.role === 'user' && message.content.trim())
-    .slice(-3)
+  const recentMessages = messages
+    .filter(
+      (message) =>
+        (message.role === 'user' || message.role === 'assistant') && message.content.trim()
+    )
+    .slice(-6)
     .map((message) => message.content.toLowerCase());
-  const latest = userMessages.at(-1) || '';
-  const recent = userMessages.join(' ');
+  const latest = latestUserText(messages)?.toLowerCase() || '';
+  const recent = recentMessages.join(' ');
   const hasStrategySubject =
     /\b(business plan|business model|strateg(?:y|ic)|go-to-market|gtm|unit economics|pricing model|market entry|growth plan|operating plan|competitive advantage)\b/.test(
       recent
@@ -362,10 +387,19 @@ export function detectDeepQuestion(
   const words = lowered.match(/[a-z0-9'-]+/g) || [];
   const reasons: string[] = [];
   let score = 0;
+  const requestsCriticalAnalysis =
+    /\b(critique|weakness(?:es)?|weak points?|blind spots?|stress[- ]test|failure modes?|challenge (?:the )?(?:assumptions?|strategy|plan))\b/.test(
+      lowered
+    );
 
   if (workflow === 'strategy_review') {
     score += config.threshold;
     reasons.push('strategy_review');
+  }
+
+  if (workflow !== 'strategy_review' && requestsCriticalAnalysis) {
+    score += config.threshold;
+    reasons.push('critical_analysis');
   }
 
   if (
@@ -409,6 +443,7 @@ export function detectDeepQuestion(
   }
   if (
     workflow !== 'strategy_review' &&
+    !requestsCriticalAnalysis &&
     words.length <= 12 &&
     /^(what is|what are|who |when |where |define |how many |does |is |are )/.test(lowered)
   ) {
@@ -449,13 +484,52 @@ function conversationContext(messages: Message[]): { role: string; content: stri
 function parseProgress(view: TaskView): DeepProgress | undefined {
   const taskId = nonempty(view.task_id);
   if (!taskId || !isRecord(view.progress)) return undefined;
+  const phase = nonempty(view.progress.phase) || 'running';
+  const completedSteps = finiteNumber(view.progress.completed_steps);
+  const maxSteps = finiteNumber(view.progress.max_steps, 1);
+  const retrievalQueries = finiteNumber(view.progress.retrieval_queries);
+  const reasoning = isRecord(view.progress.reasoning) ? view.progress.reasoning : undefined;
+  const retrieval = isRecord(view.progress.retrieval) ? view.progress.retrieval : undefined;
+  const rawModel = isRecord(view.progress.model) ? view.progress.model : undefined;
+  const rawArtifact = isRecord(view.progress.artifact) ? view.progress.artifact : undefined;
+  const modelName = rawModel ? nonempty(rawModel.model) : undefined;
+  const modelProvider = rawModel ? nonempty(rawModel.provider) : undefined;
   return {
     taskId,
-    phase: nonempty(view.progress.phase) || 'running',
+    phase,
     message: nonempty(view.progress.message) || 'Deep analysis is running.',
-    completedSteps: finiteNumber(view.progress.completed_steps),
-    maxSteps: finiteNumber(view.progress.max_steps, 1),
-    retrievalQueries: finiteNumber(view.progress.retrieval_queries),
+    completedSteps,
+    maxSteps,
+    retrievalQueries,
+    currentPass: reasoning
+      ? finiteNumber(reasoning.current)
+      : phase === 'reasoning'
+        ? Math.min(completedSteps + 1, Math.max(maxSteps, 1))
+        : completedSteps,
+    completedPasses: reasoning ? finiteNumber(reasoning.completed) : completedSteps,
+    maxPasses: reasoning ? finiteNumber(reasoning.maximum, maxSteps) : maxSteps,
+    retrievalPlanned: retrieval
+      ? finiteNumber(retrieval.planned, retrievalQueries)
+      : retrievalQueries,
+    retrievalCompleted: retrieval
+      ? finiteNumber(retrieval.completed, retrievalQueries)
+      : retrievalQueries,
+    evidenceItems: retrieval ? finiteNumber(retrieval.evidence_items) : 0,
+    model:
+      modelName && modelProvider
+        ? {
+            provider: modelProvider,
+            name: modelName,
+            thinking: nonempty(rawModel?.thinking) || 'unknown',
+            effort: nonempty(rawModel?.effort) || 'unknown',
+          }
+        : undefined,
+    artifactStatus: rawArtifact
+      ? nonempty(rawArtifact.status) || 'not_applicable'
+      : 'not_applicable',
+    artifactId: rawArtifact ? nonempty(rawArtifact.artifact_id) : undefined,
+    phaseStartedAt: nonempty(view.progress.phase_started_at),
+    heartbeatAt: nonempty(view.progress.heartbeat_at),
   };
 }
 

@@ -27,6 +27,7 @@ const textInput = document.getElementById('text-input');
 const sendBtn = document.getElementById('send-btn');
 const debugPanel = document.getElementById('debug-panel');
 const debugToggle = document.getElementById('debug-toggle');
+const appVersionBadge = document.getElementById('app-version');
 
 // Client diagnostics are opt-in. ?diag renders the on-device overlay and ships
 // its lifecycle lines; ?telemetry ships the same lines without the overlay.
@@ -144,6 +145,8 @@ const voiceSelect = document.getElementById('voice-select');
 const voicePreviewBtn = document.getElementById('voice-preview-btn');
 const speedSlider = document.getElementById('speed-slider');
 const speedValue = document.getElementById('speed-value');
+const speechPreparationToggle = document.getElementById('speech-preparation-toggle');
+const speechPreparationHint = document.getElementById('speech-preparation-hint');
 const modelSelect = document.getElementById('model-select');
 const analysisStyleToggle = document.getElementById('analysis-style-toggle');
 const sttSelect = document.getElementById('stt-select');
@@ -1135,7 +1138,7 @@ function replaceSelectOptions(selectEl, stagedSelect) {
 
 const DEFAULT_FLOW_OPTIONS = Object.freeze([
   { id: 'none', label: 'None' },
-  { id: 'spacechannel', label: 'Space Channel' },
+  { id: 'spacechannel', label: 'HYPERRIFF' },
   { id: 'intelligence', label: 'Document Intelligence' },
   { id: 'replicantpm', label: 'Replicant PM' },
   { id: 'scheduler', label: 'Plumber Scheduler' },
@@ -1315,8 +1318,11 @@ let wsMicWorklet = null;
 let wsMicSilence = null;
 let wsAudioPlayer = null;
 let wsAudioFirstFrameLogged = false;
+let activePlaybackGeneration = null;
+let activePlaybackUtteranceId = null;
 let isRecording = false;
 let agentSpeaking = false;
+let deepProjectionPending = false;
 let phoneModeEnabled = false;
 let autoTurnPending = false;
 let linkReady = false;
@@ -1386,7 +1392,7 @@ const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
 // Version the preference so clients that inherited the old unsafe default are
 // reset to off once. Later visits preserve the listener's explicit choice.
-const LS_BARGE_IN_ENABLED = 'nanoclaw.bargeIn.v2.enabled';
+const LS_BARGE_IN_ENABLED = 'nanoclaw.bargeIn.v3.enabled';
 const LS_BARGE_IN_SENSITIVITY = 'nanoclaw.bargeIn.sensitivity';
 const LS_BARGE_IN_ADAPTIVE = 'nanoclaw.bargeIn.adaptive';
 const BARGE_IN_LEVELS = window.BargeInSensitivityLevels || {
@@ -1714,6 +1720,133 @@ function updateDeepStatus(message) {
     deepStatusLine.textContent = message;
     chatLog.scrollTop = chatLog.scrollHeight;
   }
+}
+
+function deepModelLabel(model) {
+  if (!model || typeof model.name !== 'string' || !model.name) return 'Deep model';
+  if (model.name === 'deepseek-v4-pro') return 'DeepSeek V4 Pro';
+  return model.name;
+}
+
+function deepPhaseElapsed(value) {
+  if (typeof value !== 'string' || !value) return '';
+  var started = Date.parse(value);
+  if (!Number.isFinite(started)) return '';
+  var seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  return ' · ' + seconds + 's elapsed';
+}
+
+function deepWorkerHeartbeat(value) {
+  if (typeof value !== 'string' || !value) return '';
+  var heartbeat = Date.parse(value);
+  if (!Number.isFinite(heartbeat)) return '';
+  return Date.now() - heartbeat <= 15000
+    ? ' · backend heartbeat current'
+    : ' · backend heartbeat delayed';
+}
+
+function formatDeepProgress(msg) {
+  var phase = String(msg.phase || 'running');
+  var completedPasses = Number.isInteger(msg.completedPasses)
+    ? msg.completedPasses
+    : Number.isInteger(msg.completedSteps)
+      ? msg.completedSteps
+      : 0;
+  var currentPass = Number.isInteger(msg.currentPass)
+    ? msg.currentPass
+    : phase === 'reasoning'
+      ? completedPasses + 1
+      : completedPasses;
+  var maxPasses = Number.isInteger(msg.maxPasses)
+    ? msg.maxPasses
+    : Number.isInteger(msg.maxSteps)
+      ? msg.maxSteps
+      : 1;
+  var retrievalCompleted = Number.isInteger(msg.retrievalCompleted)
+    ? msg.retrievalCompleted
+    : Number.isInteger(msg.retrievalQueries)
+      ? msg.retrievalQueries
+      : 0;
+  var retrievalPlanned = Number.isInteger(msg.retrievalPlanned)
+    ? msg.retrievalPlanned
+    : retrievalCompleted;
+  var evidenceItems = Number.isInteger(msg.evidenceItems) ? msg.evidenceItems : 0;
+  var heartbeat = deepWorkerHeartbeat(msg.heartbeatAt);
+
+  if (phase === 'retrieving') {
+    return (
+      'Deep analysis · Gathering evidence · ' +
+      retrievalCompleted +
+      ' of ' +
+      retrievalPlanned +
+      ' queries' +
+      heartbeat
+    );
+  }
+  if (phase === 'retrieving_followup') {
+    return (
+      'Deep analysis · Gathering follow-up evidence · ' +
+      retrievalCompleted +
+      ' of ' +
+      retrievalPlanned +
+      ' queries · pass ' +
+      completedPasses +
+      ' complete' +
+      heartbeat
+    );
+  }
+  if (phase === 'reasoning') {
+    var evidenceLabel = evidenceItems
+      ? evidenceItems + ' evidence ' + (evidenceItems === 1 ? 'passage' : 'passages')
+      : 'retrieved evidence';
+    var retrievalLabel = retrievalPlanned
+      ? ' · ' + retrievalCompleted + '/' + retrievalPlanned + ' retrievals complete'
+      : '';
+    return (
+      'Deep analysis · ' +
+      deepModelLabel(msg.model) +
+      ' · pass ' +
+      Math.max(currentPass, 1) +
+      ' in progress · ' +
+      evidenceLabel +
+      retrievalLabel +
+      ' · waiting for model response · up to ' +
+      Math.max(maxPasses, 1) +
+      ' passes if needed' +
+      deepPhaseElapsed(msg.phaseStartedAt) +
+      heartbeat
+    );
+  }
+  if (phase === 'structuring') {
+    return 'Deep analysis · Structuring navigable topics · pass ' + completedPasses + ' complete';
+  }
+  if (phase === 'validating') {
+    return 'Deep analysis · Validating claims, topics, and evidence references';
+  }
+  if (phase === 'finalizing') {
+    return 'Deep analysis · Preparing the supported answer';
+  }
+  if (phase === 'indexing') {
+    return 'Deep analysis · Indexing the artifact for follow-up questions' + heartbeat;
+  }
+  if (phase === 'completed') {
+    var passCount = Math.max(completedPasses, 1);
+    var completedDetails = [
+      deepModelLabel(msg.model),
+      passCount + ' reasoning ' + (passCount === 1 ? 'pass' : 'passes'),
+    ];
+    if (evidenceItems) {
+      completedDetails.push(
+        evidenceItems + ' evidence ' + (evidenceItems === 1 ? 'passage' : 'passages')
+      );
+    }
+    if (msg.artifactStatus === 'indexed') completedDetails.push('artifact indexed');
+    if (msg.artifactStatus === 'failed') completedDetails.push('artifact indexing failed');
+    return 'Deep analysis complete · ' + completedDetails.join(' · ');
+  }
+  if (phase === 'failed') return 'Deep analysis failed';
+  if (phase === 'cancelled') return 'Deep analysis cancelled';
+  return 'Deep analysis · ' + String(msg.message || 'Starting').replace(/[.!?]+$/, '');
 }
 
 function formatLatency(value) {
@@ -2136,6 +2269,7 @@ debugModalOverlay.addEventListener('click', function (e) {
 // ── Agent speaking state ─────────────────────────────────────
 function setAgentSpeaking(speaking) {
   agentSpeaking = speaking;
+  if (!speaking) deepProjectionPending = false;
   stopBtn.classList.toggle('hidden', !speaking);
 }
 
@@ -2289,14 +2423,36 @@ voicePreviewBtn.addEventListener('click', function () {
 // ── Pipeline settings (STT / LLM / TTS) ─────────────────────
 var LS_MODEL = 'nanoclaw.model',
   LS_STT = 'nanoclaw.stt',
-  LS_ANALYSIS_STYLE = 'nanoclaw.analysisStyle';
+  LS_ANALYSIS_STYLE = 'nanoclaw.analysisStyle',
+  LS_SPEECH_PREPARATION = 'nanoclaw.speechPreparation.v1.enabled';
 var currentModel = localStorage.getItem(LS_MODEL) || 'anthropic/claude-haiku-4-5';
 var currentStt = localStorage.getItem(LS_STT) || 'base';
+var speechPreparationEnabled = localStorage.getItem(LS_SPEECH_PREPARATION) !== 'false';
+var speechPreparationAvailable = true;
+var speechPreparationVersion = 'unknown';
 var currentAnalysisStyle =
   localStorage.getItem(LS_ANALYSIS_STYLE) === 'principle_graph' ? 'principle_graph' : 'topic_map';
 if (analysisStyleToggle) {
   analysisStyleToggle.checked = currentAnalysisStyle === 'principle_graph';
 }
+if (speechPreparationToggle) speechPreparationToggle.checked = speechPreparationEnabled;
+
+function renderSpeechPreparationHint(details) {
+  if (!speechPreparationHint) return;
+  var mode = speechPreparationEnabled && speechPreparationAvailable ? 'Prepared' : 'Raw';
+  var suffix = speechPreparationVersion !== 'unknown' ? speechPreparationVersion : 'version pending';
+  if (details && Number.isInteger(details.chunkCount)) {
+    suffix +=
+      ' · ' +
+      details.chunkCount +
+      (details.chunkCount === 1 ? ' chunk' : ' chunks') +
+      ' · ' +
+      (details.normalizationCount || 0) +
+      ' normalized';
+  }
+  speechPreparationHint.textContent = mode + ' speech · ' + suffix;
+}
+renderSpeechPreparationHint();
 
 // The configuration rail is always present, so keep its phone-line lamp and
 // values fresh whenever this tab is visible.
@@ -2317,6 +2473,9 @@ function syncModelToServer() {
   if (typeof currentAnalysisStyle === 'string') {
     sendMsg('set_analysis_style', { analysisStyle: currentAnalysisStyle });
   }
+  sendMsg('set_speech_mode', {
+    mode: speechPreparationEnabled && speechPreparationAvailable ? 'prepared' : 'raw',
+  });
 }
 
 function loadModels() {
@@ -2441,6 +2600,17 @@ if (analysisStyleToggle) {
       : 'Topic map enabled for the next deep analysis';
   });
 }
+if (speechPreparationToggle) {
+  speechPreparationToggle.addEventListener('change', function () {
+    speechPreparationEnabled = speechPreparationToggle.checked;
+    localStorage.setItem(LS_SPEECH_PREPARATION, String(speechPreparationEnabled));
+    sendMsg('set_speech_mode', { mode: speechPreparationEnabled ? 'prepared' : 'raw' });
+    renderSpeechPreparationHint();
+    statusText.textContent = speechPreparationEnabled
+      ? 'Prepared natural delivery enabled'
+      : 'Raw speech enabled for comparison';
+  });
+}
 
 function connect() {
   const generation = ++connectionGeneration;
@@ -2542,10 +2712,28 @@ function reconnectForIdentityChange() {
 function handleMessage(msg, generation) {
   switch (msg.type) {
     case 'hello_ack':
+      if (appVersionBadge && typeof msg.appVersion === 'string' && msg.appVersion.trim()) {
+        var appVersion = msg.appVersion.trim();
+        appVersionBadge.textContent = 'v' + appVersion;
+        appVersionBadge.setAttribute('aria-label', 'Version ' + appVersion);
+      }
       bargeInServerAvailable = !!msg.bargeIn;
       syncBargeInControls();
       createBargeInController();
       wsAudioEnabled = msg.wsAudio === true;
+      if (msg.speechPreparation) {
+        speechPreparationAvailable = msg.speechPreparation.available === true;
+        if (typeof msg.speechPreparation.version === 'string') {
+          speechPreparationVersion = msg.speechPreparation.version;
+        }
+        if (speechPreparationToggle) {
+          speechPreparationToggle.disabled = !speechPreparationAvailable;
+        }
+        renderSpeechPreparationHint();
+        sendMsg('set_speech_mode', {
+          mode: speechPreparationEnabled && speechPreparationAvailable ? 'prepared' : 'raw',
+        });
+      }
       if (typeof msg.conversationId === 'string') {
         _clientTelemetryConversation = msg.conversationId;
       }
@@ -2567,6 +2755,21 @@ function handleMessage(msg, generation) {
           setAudioUnavailable('Connection failed');
         }
       });
+      break;
+
+    case 'speech_plan':
+      if (typeof msg.compilerVersion === 'string') {
+        speechPreparationVersion = msg.compilerVersion;
+      }
+      renderSpeechPreparationHint(msg);
+      pageLog(
+        'speech_plan version=' +
+          speechPreparationVersion +
+          ' mode=' +
+          (msg.mode || '?') +
+          ' chunks=' +
+          (msg.chunkCount || 0)
+      );
       break;
 
     case 'webrtc_answer':
@@ -2598,6 +2801,7 @@ function handleMessage(msg, generation) {
     case 'transcription':
       markTranscriptionLatency();
       deepStatusLine = null;
+      deepProjectionPending = false;
       if (msg.text) {
         addBubble(msg.text, 'user');
         showThinking();
@@ -2636,32 +2840,42 @@ function handleMessage(msg, generation) {
       break;
 
     case 'deep_thinking':
+      deepProjectionPending = true;
+      resetBargeInDetector();
       updateDeepStatus('Deep analysis started');
       setVisualPresence('thinking');
       setPhoneStatus('Thinking deeply...');
       break;
 
     case 'deep_progress':
-      var deepStep = Number.isInteger(msg.completedSteps) ? msg.completedSteps : 0;
-      var deepMax = Number.isInteger(msg.maxSteps) ? msg.maxSteps : 0;
-      var deepQueries = Number.isInteger(msg.retrievalQueries) ? msg.retrievalQueries : 0;
-      var deepLabel =
-        msg.phase === 'completed'
-          ? 'Deep analysis complete'
-          : 'Deep analysis · ' +
-            (msg.message || 'Working...') +
-            ' · step ' +
-            deepStep +
-            ' / ' +
-            deepMax +
-            ' · ' +
-            deepQueries +
-            ' queries';
-      updateDeepStatus(deepLabel);
+      updateDeepStatus(formatDeepProgress(msg));
       setPhoneStatus(msg.phase === 'completed' ? 'Preparing the answer...' : 'Thinking deeply...');
       break;
 
+    case 'deep_projection_ready':
+      deepProjectionPending = false;
+      resetBargeInDetector();
+      if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.unpause();
+      setPhoneStatus('Speaking to the phone...');
+      break;
+
+    case 'barge_in_suppressed':
+      resetBargeInDetector();
+      if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.unpause();
+      setPhoneStatus('Preparing the deep-analysis answer...');
+      break;
+
     case 'agent_audio_start':
+      if (
+        Number.isInteger(msg.generation) &&
+        Number.isInteger(activePlaybackGeneration) &&
+        msg.generation < activePlaybackGeneration
+      ) {
+        break;
+      }
+      activePlaybackGeneration = Number.isInteger(msg.generation) ? msg.generation : 0;
+      activePlaybackUtteranceId =
+        typeof msg.utteranceId === 'string' ? msg.utteranceId : null;
       if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.begin();
       setAgentSpeaking(true);
       setVisualizationSpeaking(true);
@@ -2669,6 +2883,22 @@ function handleMessage(msg, generation) {
       break;
 
     case 'agent_audio_end':
+      if (
+        (Number.isInteger(msg.generation) &&
+          Number.isInteger(activePlaybackGeneration) &&
+          msg.generation !== activePlaybackGeneration) ||
+        (typeof msg.utteranceId === 'string' &&
+          typeof activePlaybackUtteranceId === 'string' &&
+          msg.utteranceId !== activePlaybackUtteranceId)
+      ) {
+        break;
+      }
+      if (wsAudioEnabled && wsAudioPlayer) {
+        if (msg.status && msg.status !== 'completed') wsAudioPlayer.pause();
+        else wsAudioPlayer.end();
+      }
+      activePlaybackGeneration = null;
+      activePlaybackUtteranceId = null;
       finalizeAgentBubble();
       setAgentSpeaking(false);
       setVisualizationSpeaking(false);
@@ -2716,7 +2946,7 @@ function handleMessage(msg, generation) {
 
 // ── WebSocket audio ───────────────────────────────────────────
 function enqueueWsAudioFrame(frame) {
-  if (!wsAudioEnabled || !wsAudioPlayer) return;
+  if (!wsAudioEnabled || !wsAudioPlayer || activePlaybackGeneration === null) return;
   if (!wsAudioFirstFrameLogged) {
     wsAudioFirstFrameLogged = true;
     pageLog('agent frame, ctx=' + wsAudioPlayer.context.state);
@@ -2895,6 +3125,8 @@ function cleanupWsAudio() {
   teardownAgentAudioAnalyser();
   wsAudioPlayer = null;
   wsAudioFirstFrameLogged = false;
+  activePlaybackGeneration = null;
+  activePlaybackUtteranceId = null;
 
   if (wsMicWorklet) {
     wsMicWorklet.port.onmessage = null;
@@ -3163,7 +3395,11 @@ function monitorPhoneAudio(timestamp) {
     console.info('Phone VAD calibrated', thresholds);
     setPhoneStatus('Waiting for the phone side...');
   } else if (agentSpeaking) {
-    if (bargeInEnabled && bargeInController) {
+    if (deepProjectionPending) {
+      // Processing sounds and room echo are not a valid interruption. Keep
+      // the completed deep result alive until its first answer audio is queued.
+      resetBargeInDetector();
+    } else if (bargeInEnabled && bargeInController) {
       const observation = sampleBargeIn(rms, timestamp);
       const evt = observation.event;
       if (evt && evt.type === 'barge_in') {

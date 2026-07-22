@@ -64,6 +64,9 @@ class FakeSession:
         self._history_agent_parts = []
         self._turn = {}
         self._backoff = SimpleNamespace(reset=lambda: None)
+        self._deep_projection_pending = False
+        self._paused = False
+        self.resumed = 0
 
     def set_stream_task(self, _task):
         return None
@@ -84,6 +87,13 @@ class FakeSession:
 
     def stop_speaking(self):
         return None
+
+    def is_paused(self):
+        return self._paused
+
+    def resume_speaking(self):
+        self._paused = False
+        self.resumed += 1
 
 
 def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch):
@@ -106,6 +116,21 @@ def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch
                     "completedSteps": 0,
                     "maxSteps": 6,
                     "retrievalQueries": 1,
+                    "currentPass": 1,
+                    "completedPasses": 0,
+                    "maxPasses": 6,
+                    "retrievalPlanned": 5,
+                    "retrievalCompleted": 5,
+                    "evidenceItems": 19,
+                    "model": {
+                        "provider": "deepseek",
+                        "name": "deepseek-v4-pro",
+                        "thinking": "enabled",
+                        "effort": "high",
+                    },
+                    "artifactStatus": "not_applicable",
+                    "phaseStartedAt": "2026-07-22T01:00:54Z",
+                    "heartbeatAt": "2026-07-22T01:01:34Z",
                 },
             ),
             ("delta", {"text": "The two phases form a sequence."}),
@@ -127,4 +152,42 @@ def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch
     assert session.pcm == [processing_chime()]
     assert session.total_bytes == 200 + len(processing_chime())
     assert any(message["type"] == "deep_thinking" for message in websocket.messages)
-    assert any(message["type"] == "deep_progress" for message in websocket.messages)
+    progress = next(
+        message for message in websocket.messages if message["type"] == "deep_progress"
+    )
+    assert progress["currentPass"] == 1
+    assert progress["retrievalCompleted"] == 5
+    assert progress["evidenceItems"] == 19
+    assert progress["model"]["name"] == "deepseek-v4-pro"
+    assert progress["heartbeatAt"] == "2026-07-22T01:01:34Z"
+    assert any(
+        message["type"] == "deep_projection_ready"
+        for message in websocket.messages
+    )
+    assert session._deep_projection_pending is False
+
+
+def test_deep_projection_barge_in_is_suppressed_until_answer_audio():
+    websocket = FakeWebSocket()
+    session = FakeSession()
+    session._deep_projection_pending = True
+    session._paused = True
+
+    suppressed = run(
+        server._suppress_deep_projection_barge_in(websocket, session)
+    )
+
+    assert suppressed is True
+    assert session.resumed == 1
+    assert websocket.messages == [
+        {
+            "type": "barge_in_suppressed",
+            "reason": "deep_projection_pending",
+        }
+    ]
+
+    session._deep_projection_pending = False
+    assert (
+        run(server._suppress_deep_projection_barge_in(websocket, session))
+        is False
+    )

@@ -15,16 +15,16 @@
       const cfg = options || {};
       this.startThreshold = cfg.startThreshold || 0.05;
       this.sustainThreshold = cfg.sustainThreshold || 0.03;
-      this.confirmMs = cfg.confirmMs || 400;
+      this.confirmMs = cfg.confirmMs || 650;
       // Ignore the first acoustic tail after local playback is flushed,
       // then require enough voiced time to distinguish a listener from
       // the agent's own speaker echo. Accumulating evidence also avoids
       // treating a natural between-syllable gap at exactly confirmMs as
       // a false alarm.
-      this.echoGuardMs = Number.isFinite(cfg.echoGuardMs) ? Math.max(0, cfg.echoGuardMs) : 80;
+      this.echoGuardMs = Number.isFinite(cfg.echoGuardMs) ? Math.max(0, cfg.echoGuardMs) : 150;
       this.requiredSpeechMs = Number.isFinite(cfg.requiredSpeechMs)
         ? Math.max(0, cfg.requiredSpeechMs)
-        : 60;
+        : 180;
       this.reset();
     }
 

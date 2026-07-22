@@ -65,6 +65,8 @@ export interface AgentConfig {
   systemPrompt?: string;
   knowledgeFiles?: string[];
   intelligence?: IntelligenceConfig;
+  /** Render the answer for a screen or for immediate spoken delivery. */
+  responseMode?: 'text' | 'voice';
 }
 
 /** Local evidence retrieval performed before the conversational model call. */
@@ -199,6 +201,22 @@ export type StreamEvent =
       completedSteps: number;
       maxSteps: number;
       retrievalQueries: number;
+      currentPass: number;
+      completedPasses: number;
+      maxPasses: number;
+      retrievalPlanned: number;
+      retrievalCompleted: number;
+      evidenceItems: number;
+      model?: {
+        provider: string;
+        name: string;
+        thinking: string;
+        effort: string;
+      };
+      artifactStatus: string;
+      artifactId?: string;
+      phaseStartedAt?: string;
+      heartbeatAt?: string;
     }
   | { type: 'tool_calls'; toolCalls: ToolCall[] }
   | {

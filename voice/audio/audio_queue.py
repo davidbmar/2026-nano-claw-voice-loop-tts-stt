@@ -45,6 +45,16 @@ class AudioQueue:
 
         Returns silence (zeros) for any bytes beyond what's available.
         """
+        data, _ = self.read_with_count(n)
+        return data
+
+    def read_with_count(self, n: int) -> tuple[bytes, int]:
+        """Read exactly ``n`` bytes and report non-padding bytes consumed.
+
+        Playback delivery accounting must distinguish queued PCM from the
+        zero padding returned while the source is idle. The legacy ``read``
+        API remains unchanged for callers that only need the frame bytes.
+        """
         with self._lock:
             result = bytearray(n)
             written = 0
@@ -62,7 +72,7 @@ class AudioQueue:
                 self._offset += to_copy
                 written += to_copy
 
-            return bytes(result)
+            return bytes(result), written
 
     def clear(self):
         """Discard all queued audio."""

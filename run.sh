@@ -222,6 +222,7 @@ fi
 # default. Set NANO_CLAW_WS_AUDIO=0 (or false/off/no) to retain WebRTC for a
 # same-LAN, lower-latency deployment.
 NANO_CLAW_WS_AUDIO="${NANO_CLAW_WS_AUDIO:-1}"
+NANO_CLAW_MEMORY_DIR="${NANO_CLAW_MEMORY_DIR:-/app/data/memory}"
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
@@ -243,6 +244,11 @@ docker run $TTY_FLAGS --rm \
   -e OPENAI_API_KEY \
   -e OPENROUTER_API_KEY \
   -e NANO_CLAW_BARGE_IN \
+  -e NANO_CLAW_MEMORY_DIR="$NANO_CLAW_MEMORY_DIR" \
+  -e NANO_CLAW_SENTENCE_GAP_MS \
+  -e NANO_CLAW_SPEECH_PREPARATION \
+  -e NANO_CLAW_SPEECH_MAX_WORDS \
+  -e NANO_CLAW_SPEECH_MAX_CHUNK_MS \
   -e NANO_CLAW_STREAM \
   -e NANO_CLAW_WS_AUDIO="$NANO_CLAW_WS_AUDIO" \
   -e NANO_CLAW_KNOWLEDGE \
@@ -267,6 +273,7 @@ docker run $TTY_FLAGS --rm \
   -e NANO_CLAW_PHONE_STT_SIZE \
   -e NANO_CLAW_PHONE_CODEC \
   -e NANO_CLAW_PHONE_BARGE_IN \
+  -e NANO_CLAW_PHONE_SPEECH_PREPARATION \
   -e NANO_CLAW_PHONE_DYNAMIC_ENDPOINT \
   -e NANO_CLAW_PHONE_VAD \
   -e NANO_CLAW_PHONE_TAP \

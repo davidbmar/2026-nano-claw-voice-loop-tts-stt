@@ -126,7 +126,7 @@ def test_kokoro_receives_normalized_scheduler_text(monkeypatch):
     )
 
 
-def test_sentence_final_chunk_has_160ms_silence_gap(monkeypatch):
+def test_sentence_final_chunk_has_configured_silence_gap(monkeypatch):
     speech = np.ones(4800, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
@@ -142,3 +142,19 @@ def test_unpunctuated_final_fragment_has_no_extra_gap(monkeypatch):
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
     assert tts.synthesize("final fragment", "en_US-lessac-medium", 1.0) == speech
+
+
+def test_compiler_pause_overrides_legacy_sentence_gap(monkeypatch):
+    speech = np.ones(4800, dtype=np.int16).tobytes()
+    monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
+
+    assert tts.synthesize(
+        "A final question?", "en_US-lessac-medium", 1.0, pause_after_ms=0
+    ) == speech
+
+    out = tts.synthesize(
+        "A continuing phrase", "en_US-lessac-medium", 1.0, pause_after_ms=120
+    )
+    gap_bytes = tts.TARGET_RATE * 120 // 1000 * 2
+    assert out[:-gap_bytes] == speech
+    assert out[-gap_bytes:] == bytes(gap_bytes)

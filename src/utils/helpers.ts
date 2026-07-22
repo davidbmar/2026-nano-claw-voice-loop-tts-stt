@@ -27,7 +27,8 @@ export function getConfigPath(): string {
  * Get the memory directory path
  */
 export function getMemoryDir(): string {
-  return join(getHomeDir(), 'memory');
+  const configured = process.env.NANO_CLAW_MEMORY_DIR?.trim();
+  return configured || join(getHomeDir(), 'memory');
 }
 
 /**

@@ -244,7 +244,8 @@ export function resolveAgentProfile(
 export function getAgentConfig(
   modelOverride?: string,
   profileId?: string,
-  analysisStyleOverride?: AnalysisStyle
+  analysisStyleOverride?: AnalysisStyle,
+  responseMode?: 'text' | 'voice'
 ): AgentConfig {
   initShared();
   const valid =
@@ -267,6 +268,7 @@ export function getAgentConfig(
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     ...profile,
     ...(intelligence && { intelligence }),
+    ...(responseMode && { responseMode }),
   };
 }
 
@@ -562,6 +564,17 @@ export async function* stepLoopStream(
             completedSteps: event.progress.completedSteps,
             maxSteps: event.progress.maxSteps,
             retrievalQueries: event.progress.retrievalQueries,
+            currentPass: event.progress.currentPass,
+            completedPasses: event.progress.completedPasses,
+            maxPasses: event.progress.maxPasses,
+            retrievalPlanned: event.progress.retrievalPlanned,
+            retrievalCompleted: event.progress.retrievalCompleted,
+            evidenceItems: event.progress.evidenceItems,
+            model: event.progress.model,
+            artifactStatus: event.progress.artifactStatus,
+            artifactId: event.progress.artifactId,
+            phaseStartedAt: event.progress.phaseStartedAt,
+            heartbeatAt: event.progress.heartbeatAt,
           };
         } else {
           deepResult = event.result;
@@ -871,6 +884,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     model?: string;
     profile?: unknown;
     analysisStyle?: unknown;
+    responseMode?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -888,6 +902,14 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sendJson(res, 400, { error: 'Invalid "analysisStyle" field' });
     return;
   }
+  if (
+    body.responseMode !== undefined &&
+    body.responseMode !== 'text' &&
+    body.responseMode !== 'voice'
+  ) {
+    sendJson(res, 400, { error: 'Invalid "responseMode" field' });
+    return;
+  }
   const sessionId = body.sessionId ?? 'default';
   const memory = getMemory(sessionId);
 
@@ -897,7 +919,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
   const agentConfig = getAgentConfig(
     body.model,
     profile,
-    body.analysisStyle as AnalysisStyle | undefined
+    body.analysisStyle as AnalysisStyle | undefined,
+    body.responseMode as 'text' | 'voice' | undefined
   );
   if (wantsStream(req)) {
     const controller = new AbortController();

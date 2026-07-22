@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import urllib.request
 from pathlib import Path
 
@@ -14,7 +15,13 @@ from voice.text_chunker import normalize_for_speech
 log = logging.getLogger("tts")
 
 TARGET_RATE = 48000  # WebRTC Opus expects 48kHz
-SENTENCE_GAP_MS = 160
+# Lux and Kokoro already shape sentence-final prosody, but streamed sentences
+# otherwise meet with almost no breathing room. A quarter-second boundary is
+# long enough to sound deliberate without making a voice turn feel sluggish.
+try:
+    SENTENCE_GAP_MS = max(0, min(1000, int(os.environ.get("NANO_CLAW_SENTENCE_GAP_MS", "240"))))
+except ValueError:
+    SENTENCE_GAP_MS = 240
 _SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
@@ -140,14 +147,37 @@ def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
-def _with_sentence_gap(text: str, pcm: bytes) -> bytes:
-    """Pad sentence-final PCM so separately queued chunks do not run together."""
-    if pcm and text.rstrip().endswith((".", "!", "?")):
+def _with_sentence_gap(
+    text: str, pcm: bytes, pause_after_ms: int | None = None
+) -> bytes:
+    """Apply either a plan-owned gap or the legacy sentence default.
+
+    ``pause_after_ms`` is the complete compiler target for this chunk.  When it
+    is absent, retain the original raw-path behavior for backwards-compatible
+    A/B testing.  Lux currently returns no measurable trailing silence, so the
+    Phase 2 implementation can represent the target as explicit PCM padding;
+    adapter-level silence calibration remains a later concern.
+    """
+    if not pcm:
+        return pcm
+    if pause_after_ms is not None:
+        try:
+            bounded_ms = max(0, min(1000, int(pause_after_ms)))
+        except (TypeError, ValueError):
+            bounded_ms = 0
+        gap = bytes(TARGET_RATE * bounded_ms // 1000 * 2)
+        return pcm + gap
+    if text.rstrip().endswith((".", "!", "?")):
         return pcm + _SENTENCE_GAP
     return pcm
 
 
-def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
+def synthesize(
+    text: str,
+    voice_id: str = "",
+    speed: float = 1.0,
+    pause_after_ms: int | None = None,
+) -> bytes:
     """Route to the right engine and return 48kHz mono int16 PCM.
 
     - Kokoro voices → native TTS service (uses `speed`).
@@ -166,4 +196,4 @@ def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
     else:
         piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
         pcm = _synthesize_piper(text, piper_id)
-    return _with_sentence_gap(text, pcm)
+    return _with_sentence_gap(text, pcm, pause_after_ms)

@@ -40,7 +40,7 @@ class FlowModeConfig(TypedDict):
 FLOW_MODES: dict[str, FlowModeConfig] = {
     "none": {"label": "None", "profile": "none", "scheduler": False},
     "spacechannel": {
-        "label": "Space Channel",
+        "label": "HYPERRIFF",
         "profile": "spacechannel",
         "scheduler": False,
     },
