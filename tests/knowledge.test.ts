@@ -38,12 +38,23 @@ describe('assistant profile selection', () => {
     );
     const seeded = ConfigSchema.parse(raw);
 
-    expect(Object.keys(seeded.agents.profiles || {})).toEqual(['spacechannel', 'replicantpm']);
+    expect(Object.keys(seeded.agents.profiles || {})).toEqual([
+      'spacechannel',
+      'intelligence',
+      'replicantpm',
+    ]);
     expect(seeded.agents.profiles?.spacechannel.knowledgeFiles).toEqual([
       '/app/sites/spacechannel/knowledge.md',
     ]);
     expect(seeded.agents.profiles?.spacechannel.systemPrompt).toBe(
       seeded.agents.defaults?.systemPrompt
+    );
+    expect(seeded.agents.profiles?.intelligence).toMatchObject({
+      label: 'Document Intelligence',
+      knowledgeFiles: [],
+    });
+    expect(seeded.agents.profiles?.intelligence.systemPrompt).toContain(
+      'document intelligence voice assistant'
     );
     expect(seeded.agents.profiles?.replicantpm).toMatchObject({
       label: 'Replicant PM',

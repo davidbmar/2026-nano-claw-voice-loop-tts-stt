@@ -763,6 +763,16 @@ summary:focus-visible {
   opacity: 0.38;
 }
 
+.barge-in-hint {
+  margin: 7px 0 0 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 7px;
+  line-height: 1.45;
+}
+
 .pipe-row select option,
 .pipe-row select optgroup {
   color: var(--text);
@@ -1835,6 +1845,15 @@ input[type="range"]::-moz-range-thumb {
   font-size: 7px;
   font-style: normal;
   letter-spacing: 0.07em;
+}
+
+.transcript-system-deep {
+  border-left-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--accent-2);
+}
+
+.transcript-system-deep::before {
+  content: "DEEP";
 }
 
 .transcript-system-booked {

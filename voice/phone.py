@@ -65,6 +65,7 @@ from voice.phone_audio import (
     ulaw_decode,
 )
 from voice.phone_tap import CallTap
+from voice.processing_audio import processing_chime
 from voice.sentence_pipeline import SentencePipeline
 from voice.text_chunker import TextChunker
 from voice.tts import synthesize as tts_synthesize
@@ -84,6 +85,7 @@ MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
 FRAME_S = FRAME_MS / 1000.0
 DEFAULT_PHONE_PREBUFFER_MS = 200.0
 DEFAULT_PHONE_PACE_FACTOR = 1.0
+PROCESSING_CUE_SENTINEL = "\0nano-claw-processing-cue\0"
 
 
 class FramePacer:
@@ -694,6 +696,7 @@ class PhoneCall:
                     nonlocal first_spoken_at, reply_complete
                     event = ""
                     data_lines: list[str] = []
+                    last_processing_cue = 0.0
                     async for raw in resp.aiter_lines():
                         if self.closed or not self.speaking:
                             return  # hangup or barge-in: stop consuming the stream
@@ -713,6 +716,28 @@ class PhoneCall:
                                             self.call_id[:8], first_spoken_at - t0,
                                         )
                                     yield chunk
+                            elif ev == "deep_started":
+                                acknowledgement = obj.get(
+                                    "acknowledgement",
+                                    "Let me think deeply about this.",
+                                )
+                                if (
+                                    isinstance(acknowledgement, str)
+                                    and acknowledgement.strip()
+                                ):
+                                    if first_spoken_at is None:
+                                        first_spoken_at = time.monotonic()
+                                    yield acknowledgement.strip()
+                                last_processing_cue = time.monotonic()
+                            elif ev == "deep_progress":
+                                now = time.monotonic()
+                                if (
+                                    obj.get("phase")
+                                    not in {"completed", "failed", "cancelled"}
+                                    and now - last_processing_cue >= 2.6
+                                ):
+                                    last_processing_cue = now
+                                    yield PROCESSING_CUE_SENTINEL
                             elif ev == "final":
                                 record_agent_done()
                                 reply_complete = True
@@ -782,6 +807,8 @@ class PhoneCall:
 
     async def _synthesize_sentence(self, sentence: str) -> _SynthesizedSpeech:
         """Synthesize one sentence and retain its tap correlation fields."""
+        if sentence == PROCESSING_CUE_SENTINEL:
+            return _SynthesizedSpeech(processing_chime(), self.tap, None)
         tap = self.tap
         sentence_index: int | None = None
         if tap:

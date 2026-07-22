@@ -185,6 +185,44 @@ def test_handler_binds_binary_audio_to_its_server_owned_session(monkeypatch):
     assert session.user_sub is None
 
 
+def test_manual_stop_hard_cancels_reply_and_rearms_browser(monkeypatch):
+    base_session = webrtc.Session
+
+    class CaptureSession(base_session):
+        last = None
+
+        def __init__(self, audio_transport=None):
+            super().__init__(audio_transport)
+            self.cancel_calls = 0
+            self._audio_queue.enqueue(b"\x01\x02" * 100)
+            type(self).last = self
+
+        def cancel_stream(self):
+            self.cancel_calls += 1
+            super().cancel_stream()
+
+    HandlerWebSocket.incoming = [
+        SimpleNamespace(type=web.WSMsgType.TEXT, data=json.dumps({"type": "hello"})),
+        SimpleNamespace(
+            type=web.WSMsgType.TEXT,
+            data=json.dumps({"type": "stop_speaking"}),
+        ),
+    ]
+    monkeypatch.setenv("NANO_CLAW_WS_AUDIO", "1")
+    monkeypatch.setattr(webrtc, "Session", CaptureSession)
+    monkeypatch.setattr(server.web, "WebSocketResponse", HandlerWebSocket)
+    monkeypatch.setattr(server.httpx, "AsyncClient", FakeHandlerHttpClient)
+
+    run(server.websocket_handler(object()))
+
+    socket = HandlerWebSocket.last
+    session = CaptureSession.last
+    assert socket is not None and session is not None
+    assert session.cancel_calls == 1
+    assert session._audio_queue.available == 0
+    assert any(message["type"] == "agent_audio_end" for message in socket.messages)
+
+
 def test_ws_mic_stt_uses_the_announced_native_rate(monkeypatch):
     captured = {}
 

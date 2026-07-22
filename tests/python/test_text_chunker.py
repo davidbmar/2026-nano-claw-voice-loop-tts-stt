@@ -1,4 +1,4 @@
-from voice.text_chunker import TextChunker, normalize_for_speech
+from voice.text_chunker import TextChunker, clean_for_speech, normalize_for_speech
 
 
 def test_first_chunk_waits_for_sentence_boundary():
@@ -48,6 +48,19 @@ def test_markdown_is_stripped():
     assert "*" not in joined
     assert "`" not in joined
     assert "http" not in joined
+
+
+def test_hash_markers_never_reach_tts():
+    spoken = clean_for_speech(
+        "  ###Compact heading\n# Normal heading\nUse option #2 [#17]. Discuss #strategy."
+    )
+
+    assert "#" not in spoken
+    assert "Compact heading" in spoken
+    assert "Normal heading" in spoken
+    assert "number 2" in spoken
+    assert "17" not in spoken
+    assert "strategy" in spoken
 
 
 def test_flush_returns_remainder():

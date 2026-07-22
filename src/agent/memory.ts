@@ -11,9 +11,15 @@ import { join } from 'path';
 import { Message } from '../types';
 import { getMemoryDir } from '../utils/helpers';
 import { logger } from '../utils/logger';
+import {
+  AnalysisConversationState,
+  analysisConversationStateForStorage,
+  parseAnalysisConversationState,
+} from './analysis-navigation';
 
 const EPHEMERAL_SESSION_RE = /^voice-[0-9a-f]{32}$/;
 const SAFE_SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ANALYSIS_SUFFIX = '.analysis.json';
 
 /** Whether a session id is safe to use as a memory filename. */
 export function isValidSessionId(sessionId: unknown): sessionId is string {
@@ -35,18 +41,27 @@ function memoryPathFor(sessionId: string): string {
   return join(getMemoryDir(), `${sessionId}.json`);
 }
 
+function analysisPathFor(sessionId: string): string {
+  assertValidSessionId(sessionId);
+  return join(getMemoryDir(), `${sessionId}${ANALYSIS_SUFFIX}`);
+}
+
 /** Delete one persisted memory file without constructing/loading the memory. */
 export function deleteMemoryFile(sessionId: string): boolean {
   const memoryPath = memoryPathFor(sessionId);
-  if (!existsSync(memoryPath)) return false;
-  try {
-    unlinkSync(memoryPath);
-    logger.debug({ sessionId }, 'Memory deleted');
-    return true;
-  } catch (error) {
-    logger.error({ error, sessionId }, 'Failed to delete memory');
-    return false;
+  const analysisPath = analysisPathFor(sessionId);
+  let deleted = false;
+  for (const path of [memoryPath, analysisPath]) {
+    if (!existsSync(path)) continue;
+    try {
+      unlinkSync(path);
+      deleted = true;
+    } catch (error) {
+      logger.error({ error, sessionId }, 'Failed to delete memory');
+    }
   }
+  if (deleted) logger.debug({ sessionId }, 'Memory deleted');
+  return deleted;
 }
 
 /**
@@ -67,7 +82,9 @@ export function sweepEphemeralMemory(
   let deleted = 0;
   for (const filename of readdirSync(memoryDir)) {
     if (!filename.endsWith('.json')) continue;
-    const sessionId = filename.slice(0, -'.json'.length);
+    const sessionId = filename.endsWith(ANALYSIS_SUFFIX)
+      ? filename.slice(0, -ANALYSIS_SUFFIX.length)
+      : filename.slice(0, -'.json'.length);
     if (!isEphemeralSessionId(sessionId) || activeSessionIds.has(sessionId)) continue;
 
     const memoryPath = join(memoryDir, filename);
@@ -90,7 +107,9 @@ export function sweepEphemeralMemory(
 export class Memory {
   private sessionId: string;
   private memoryPath: string;
+  private analysisPath: string;
   private messages: Message[] = [];
+  private analysisState?: AnalysisConversationState;
   private maxMessages: number;
   private deleted = false;
 
@@ -98,6 +117,7 @@ export class Memory {
     this.sessionId = sessionId;
     this.maxMessages = maxMessages;
     this.memoryPath = memoryPathFor(sessionId);
+    this.analysisPath = analysisPathFor(sessionId);
 
     const memoryDir = getMemoryDir();
     if (!existsSync(memoryDir)) {
@@ -105,6 +125,7 @@ export class Memory {
     }
 
     this.load();
+    this.loadAnalysisState();
   }
 
   /**
@@ -135,6 +156,42 @@ export class Memory {
       logger.debug({ sessionId: this.sessionId, count: this.messages.length }, 'Memory saved');
     } catch (error) {
       logger.error({ error, sessionId: this.sessionId }, 'Failed to save memory');
+    }
+  }
+
+  /** Load the generated-analysis sidecar without mixing it into the LLM transcript. */
+  private loadAnalysisState(): void {
+    if (!existsSync(this.analysisPath)) return;
+    try {
+      const parsed = parseAnalysisConversationState(
+        JSON.parse(readFileSync(this.analysisPath, 'utf-8'))
+      );
+      if (!parsed) throw new Error('invalid analysis state');
+      this.analysisState = parsed;
+    } catch (error) {
+      logger.warn({ error, sessionId: this.sessionId }, 'Failed to load analysis state');
+      this.analysisState = undefined;
+    }
+  }
+
+  private saveAnalysisState(): void {
+    if (this.deleted) return;
+    if (!this.analysisState) {
+      try {
+        if (existsSync(this.analysisPath)) unlinkSync(this.analysisPath);
+      } catch (error) {
+        logger.error({ error, sessionId: this.sessionId }, 'Failed to clear analysis state');
+      }
+      return;
+    }
+    try {
+      writeFileSync(
+        this.analysisPath,
+        JSON.stringify(analysisConversationStateForStorage(this.analysisState), null, 2),
+        'utf-8'
+      );
+    } catch (error) {
+      logger.error({ error, sessionId: this.sessionId }, 'Failed to save analysis state');
     }
   }
 
@@ -177,7 +234,9 @@ export class Memory {
    */
   clear(): void {
     this.messages = [];
+    this.analysisState = undefined;
     this.save();
+    this.saveAnalysisState();
   }
 
   /**
@@ -187,6 +246,7 @@ export class Memory {
    */
   delete(): void {
     this.messages = [];
+    this.analysisState = undefined;
     this.deleted = true;
     deleteMemoryFile(this.sessionId);
   }
@@ -194,6 +254,25 @@ export class Memory {
   /** Get the owning session id for approval binding and lifecycle cleanup. */
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** Persist one structured analysis map independently from the transcript. */
+  setAnalysisState(state: AnalysisConversationState): void {
+    if (this.deleted) return;
+    this.analysisState = JSON.parse(JSON.stringify(state)) as AnalysisConversationState;
+    this.saveAnalysisState();
+  }
+
+  /** Return a defensive copy so navigation cannot mutate persisted state accidentally. */
+  getAnalysisState(): AnalysisConversationState | undefined {
+    return this.analysisState
+      ? (JSON.parse(JSON.stringify(this.analysisState)) as AnalysisConversationState)
+      : undefined;
+  }
+
+  clearAnalysisState(): void {
+    this.analysisState = undefined;
+    this.saveAnalysisState();
   }
 
   /**

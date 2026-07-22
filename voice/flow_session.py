@@ -44,6 +44,11 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         "profile": "spacechannel",
         "scheduler": False,
     },
+    "intelligence": {
+        "label": "Document Intelligence",
+        "profile": "intelligence",
+        "scheduler": False,
+    },
     "replicantpm": {
         "label": "Replicant PM",
         "profile": "replicantpm",

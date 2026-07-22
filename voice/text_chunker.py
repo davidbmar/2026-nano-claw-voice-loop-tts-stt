@@ -30,9 +30,22 @@ def normalize_for_speech(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def _clean(text: str) -> str:
-    """Strip markdown formatting (shared intent with webrtc._clean_for_speech)."""
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+def clean_for_speech(text: str) -> str:
+    """Remove visual markup and normalize symbols before any TTS engine.
+
+    Voice models pronounce ``#`` inconsistently ("hash", "pound", or a
+    language-specific equivalent), so heading/citation syntax must never reach
+    synthesis. Preserve a meaningful number sign as spoken "number" while
+    dropping all other hash markers.
+    """
+    # Standard headings plus compact model-generated forms such as
+    # ``###Summary``. A single ``#2`` is not a heading and is handled below.
+    text = re.sub(r"^[ \t]*#{2,6}[ \t]*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]*#[ \t]+", "", text, flags=re.MULTILINE)
+    # Internal citation markers add no spoken value.
+    text = re.sub(r"\[\s*#\s*\d+\s*\]", "", text)
+    text = re.sub(r"#\s*(?=\d)", "number ", text)
+    text = text.replace("#", " ")
     text = re.sub(r"^\s*[-*•]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
@@ -60,7 +73,7 @@ class TextChunker:
                 break
             raw = m.group(0)
             self._buf = self._buf[m.end():]
-            cleaned = _clean(raw)
+            cleaned = clean_for_speech(raw)
             if cleaned:
                 chunks.append(cleaned)
 
@@ -68,6 +81,6 @@ class TextChunker:
 
     def flush(self) -> str:
         """Return and clear the trailing remainder."""
-        cleaned = _clean(self._buf)
+        cleaned = clean_for_speech(self._buf)
         self._buf = ""
         return cleaned

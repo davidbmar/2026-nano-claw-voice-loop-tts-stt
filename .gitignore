@@ -51,6 +51,10 @@ temp/
 # Worktrees
 .worktrees/
 
+# Local agent session artifacts (Claude/Codex queue, browser logs) — never commit
+.context/
+.playwright-mcp/
+
 # OS files
 Thumbs.db
 

@@ -799,7 +799,10 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
 
         async def _synthesize_sentence(self, sentence: str):
             speech = await super()._synthesize_sentence(sentence)
-            add_units(self.call_id, TTS, len(sentence), "characters")
+            # Generated processing earcons use the sentence pipeline for ordered
+            # playback but do not invoke TTS and must not be billed as characters.
+            if sentence != getattr(phone_module, "PROCESSING_CUE_SENTINEL", None):
+                add_units(self.call_id, TTS, len(sentence), "characters")
             return speech
 
         async def _run_turn(self, pcm: bytes) -> None:

@@ -33,6 +33,7 @@ from voice.flow_session import (
     set_region_model,
 )
 from voice.text_chunker import TextChunker
+from voice.processing_audio import processing_chime
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
 from voice import kokoro_client
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("voice-server")
 client_log = logging.getLogger("client")
+DEEP_PROCESSING_CUE_INTERVAL_S = 2.6
 
 
 def _on_agent_task_done(task: asyncio.Task) -> None:
@@ -471,6 +473,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         if "stt" in pending_settings:
             new_session.stt_size = pending_settings["stt"]
             log.info("STT size set (pending): %s", new_session.stt_size)
+        if "analysis_style" in pending_settings:
+            new_session.analysis_style = pending_settings["analysis_style"]
+            log.info("Analysis style set (pending): %s", new_session.analysis_style)
         pending_settings.clear()
         return new_session
 
@@ -644,6 +649,19 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 else:
                     pending_settings["stt"] = size
 
+            elif msg_type == "set_analysis_style":
+                analysis_style = msg.get("analysisStyle", "topic_map")
+                analysis_style = (
+                    analysis_style
+                    if analysis_style in ("topic_map", "principle_graph")
+                    else "topic_map"
+                )
+                if session:
+                    session.analysis_style = analysis_style
+                    log.info("Analysis style set: %s", session.analysis_style)
+                else:
+                    pending_settings["analysis_style"] = analysis_style
+
             elif msg_type == "set_voice":
                 if not session:
                     pending_settings["voice"] = {
@@ -682,7 +700,16 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
             elif msg_type == "stop_speaking":
                 if session:
-                    session.stop_speaking()
+                    if getattr(session, "_resume_task", None):
+                        session._resume_task.cancel()
+                        session._resume_task = None
+                    # A manual stop is a hard stop. Clearing only the current
+                    # queue leaves the reply task synthesizing more audio and
+                    # allows later playback state changes to revive it.
+                    session.cancel_stream()
+                    _abandon_agent_turn(session)
+                    session._backoff.reset()
+                    await ws.send_json({"type": "agent_audio_end"})
 
             elif msg_type == "barge_in":
                 if BARGE_IN_ENABLED and session:
@@ -1092,6 +1119,7 @@ async def _handle_agent_request(
                 "message": text,
                 "sessionId": _agent_session_id(session),
                 "profile": get_flow_profile(),
+                "analysisStyle": getattr(session, "analysis_style", "topic_map"),
                 **({"model": session.model} if session.model else {}),
             },
             headers={"Accept": "text/event-stream"},
@@ -1237,6 +1265,7 @@ async def _consume_sse(
     data_lines: list[str] = []
     final_seen = False
     stream_failed = False
+    last_processing_cue = 0.0
 
     _ensure_agent_turn(session)
 
@@ -1268,6 +1297,51 @@ async def _consume_sse(
                         first_delta = time.monotonic()
                     for chunk in chunker.push(delta):
                         await speak_chunk(chunk)
+                elif ev == "deep_started":
+                    acknowledgement = obj.get(
+                        "acknowledgement", "Let me think deeply about this."
+                    )
+                    if isinstance(acknowledgement, str) and acknowledgement.strip():
+                        acknowledgement = acknowledgement.strip()
+                        _append_agent_delta(session, acknowledgement)
+                        parts = getattr(session, "_history_agent_parts", None)
+                        if isinstance(parts, list):
+                            parts.append("\n\n")
+                        if first_delta is None:
+                            first_delta = time.monotonic()
+                        await speak_chunk(acknowledgement)
+                    last_processing_cue = time.monotonic()
+                    await ws.send_json(
+                        {
+                            "type": "deep_thinking",
+                            "score": obj.get("score"),
+                            "reasons": obj.get("reasons") or [],
+                        }
+                    )
+                elif ev == "deep_progress":
+                    await ws.send_json(
+                        {
+                            "type": "deep_progress",
+                            "phase": obj.get("phase", "running"),
+                            "message": obj.get(
+                                "message", "Deep analysis is running."
+                            ),
+                            "completedSteps": obj.get("completedSteps", 0),
+                            "maxSteps": obj.get("maxSteps", 1),
+                            "retrievalQueries": obj.get("retrievalQueries", 0),
+                        }
+                    )
+                    now = time.monotonic()
+                    if (
+                        obj.get("phase") not in {"completed", "failed", "cancelled"}
+                        and now - last_processing_cue
+                        >= DEEP_PROCESSING_CUE_INTERVAL_S
+                    ):
+                        queued_bytes = session.enqueue_pcm(processing_chime())
+                        total_bytes += queued_bytes
+                        if queued_bytes and first_audio is None:
+                            first_audio = now
+                        last_processing_cue = now
                 elif ev == "tool_pending":
                     tail = chunker.flush()
                     if tail:

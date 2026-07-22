@@ -128,14 +128,14 @@ Set any of these in `.env` to unlock the matching model(s) in the LLM
 picker. All of them stream via the same OpenAI-compatible SSE path except
 Anthropic, which streams natively:
 
-| Env var | Provider | Model(s) in the catalog |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic | Claude Haiku 4.5, Claude Sonnet 4.5 |
-| `GEMINI_API_KEY` | Google Gemini | Gemini 2.0 Flash |
-| `DEEPSEEK_API_KEY` | DeepSeek | DeepSeek Chat |
-| `GROQ_API_KEY` | Groq | Llama 3.3 70B Versatile |
-| `DASHSCOPE_API_KEY` | Alibaba (DashScope) | Qwen Plus |
-| `OPENAI_API_KEY` | OpenAI | GPT-4o mini |
+| Env var             | Provider            | Model(s) in the catalog             |
+| ------------------- | ------------------- | ----------------------------------- |
+| `ANTHROPIC_API_KEY` | Anthropic           | Claude Haiku 4.5, Claude Sonnet 4.5 |
+| `GEMINI_API_KEY`    | Google Gemini       | Gemini 2.0 Flash                    |
+| `DEEPSEEK_API_KEY`  | DeepSeek            | DeepSeek Chat                       |
+| `GROQ_API_KEY`      | Groq                | Llama 3.3 70B Versatile             |
+| `DASHSCOPE_API_KEY` | Alibaba (DashScope) | Qwen Plus                           |
+| `OPENAI_API_KEY`    | OpenAI              | GPT-4o mini                         |
 
 A model whose key is missing still shows up in the list (so you can see
 what's available) but stays disabled with "— no key" until the key is
@@ -144,19 +144,24 @@ computed once at startup, not re-checked live.
 
 ### Barge-in (experimental)
 
-Set `NANO_CLAW_BARGE_IN=1` (default off) to let you interrupt Claude while it's
-speaking. Talking over the reply pauses playback almost immediately; if what
-you said was real speech, it becomes the next turn and the interrupted reply
-is dropped. If it turns out to be a false alarm (a cough, a door closing),
-playback resumes after a short randomized backoff that grows with repeated
-false alarms and resets once a turn completes cleanly. The flag is surfaced
-to the browser via `hello_ack.bargeIn` — with the flag off, playback is not
-interruptible and behavior is unchanged from before this feature existed.
+Set `NANO_CLAW_BARGE_IN=1` to expose browser interruption controls.
+The listener must then explicitly enable **BARGE-IN** in the UI. Talking over a
+reply pauses playback immediately; sustained input commits the interruption and
+drops the reply, while a short false alarm resumes after randomized backoff.
 
-Barge-in works best in **hands-free phone mode**. On speakers, the browser's
-echo cancellation (AEC) plus the backoff absorb most false trips caused by
-the agent's own voice bleeding into the mic; a headset avoids the issue
-entirely.
+The current browser detector is an experimental RMS energy gate. It cannot
+distinguish the listener from the assistant's voice leaking from an open speaker
+back into the mic. The server capability may remain enabled while the browser
+toggle stays off for speaker playback. Use a headset for intentional voice
+interruption testing, or click the deterministic **Stop audio** button shown during
+playback. The separate `NANO_CLAW_PHONE_BARGE_IN` flag controls the phone gateway
+and is unaffected.
+
+The planned open-source path reuses WebRTC Audio Processing for acoustic echo
+cancellation, Silero VAD for fast speech onset, and the existing local
+faster-whisper service for transcript confirmation. RMS or VAD may pause quickly,
+but must not cancel a reply until confirmed words differ from the assistant's
+active TTS text. A matched echo or empty transcript resumes playback.
 
 Regardless of the flag, replies don't queue: with the agent-reply spawn model,
 a second text message sent while a reply is still streaming is dropped
@@ -168,7 +173,7 @@ a second text message sent while a reply is still streaming is dropped
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
 - [Python 3.10+](https://www.python.org/) on your Mac (for the STT service)
-- An [Anthropic API key](https://console.anthropic.com/)
+- At least one supported LLM provider key (DeepSeek is the default model)
 
 ### 1. Clone
 
@@ -177,16 +182,20 @@ git clone https://github.com/davidbmar/2026-nano-claw-voice-loop-tts-stt.git
 cd 2026-nano-claw-voice-loop-tts-stt
 ```
 
-### 2. Set your API key
+### 2. Set a provider API key
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export DEEPSEEK_API_KEY=...
 ```
 
 Or create a `.env` file in the project root:
+
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=...
 ```
+
+Anthropic, Gemini, Groq, DashScope, OpenAI, and OpenRouter credentials are also accepted. The
+selected/default model must be available through a configured provider.
 
 ### 3. Run
 
@@ -195,6 +204,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 This single command:
+
 - Starts the STT service natively on your Mac (for Metal GPU acceleration)
 - Builds the Docker image (TypeScript API server + Python voice server + TTS)
 - Starts the Docker container, which calls the local STT service for transcription
@@ -270,13 +280,13 @@ Click any row for a detailed breakdown explaining what each field means:
 iter 1  msgs 2  model anthropic/claude-sonnet-4-5  tok 897/68/965  dur 2131ms  finish tool_use
 ```
 
-| Field | What it means |
-|-------|---------------|
-| **iter** | Which pass through the agent loop (1 = first call, 2 = after tool result, etc.) |
-| **msgs** | Messages in conversation history — grows as tool calls and results are added |
-| **model** | The LLM model used |
-| **tok** | Tokens: prompt / completion / total — this determines API cost |
-| **dur** | Wall-clock time for the LLM call (network + inference) |
+| Field      | What it means                                                                                       |
+| ---------- | --------------------------------------------------------------------------------------------------- |
+| **iter**   | Which pass through the agent loop (1 = first call, 2 = after tool result, etc.)                     |
+| **msgs**   | Messages in conversation history — grows as tool calls and results are added                        |
+| **model**  | The LLM model used                                                                                  |
+| **tok**    | Tokens: prompt / completion / total — this determines API cost                                      |
+| **dur**    | Wall-clock time for the LLM call (network + inference)                                              |
 | **finish** | Why the LLM stopped: `end_turn` = final answer, `tool_use` = wants a tool, `max_tokens` = hit limit |
 
 See **[docs/DEBUG-PANEL.md](docs/DEBUG-PANEL.md)** for the full observability guide.
@@ -344,7 +354,7 @@ How it works:
   from improvising.
 - **Authored overview.** Crawls of JS-rendered SPAs capture data feeds, not
   page content. `docs/knowledge/<site>.md` (committed) describes what the
-  site *is*; the builder prepends it to every digest.
+  site _is_; the builder prepends it to every digest.
 - **Detail files.** `data/<site>/knowledge/<feed>.md` are small per-feed
   files safe to read into a conversation. The raw `site_index.json` is
   builder input only — at ~474KB it should never enter the context window.
@@ -355,13 +365,13 @@ How it works:
 
 ## Component Details
 
-| Component | Where it runs | Role |
-|-----------|--------------|------|
-| **STT Service** | Mac native (port 8200) | Speech-to-text via faster-whisper, Metal GPU accelerated |
+| Component         | Where it runs                | Role                                                                 |
+| ----------------- | ---------------------------- | -------------------------------------------------------------------- |
+| **STT Service**   | Mac native (port 8200)       | Speech-to-text via faster-whisper, Metal GPU accelerated             |
 | **nano-claw API** | Docker (port 3001, internal) | Agent loop — LLM calls (Claude), tool execution, conversation memory |
-| **Voice server** | Docker (port 8080 → 9090) | WebSocket bridge, TTS, WebRTC audio |
-| **Piper TTS** | Docker | Text-to-speech — runs locally, streams audio via WebRTC |
-| **Browser UI** | Your browser | Hands-free phone VAD, chat bubbles, tool approval cards, debug panel |
+| **Voice server**  | Docker (port 8080 → 9090)    | WebSocket bridge, TTS, WebRTC audio                                  |
+| **Piper TTS**     | Docker                       | Text-to-speech — runs locally, streams audio via WebRTC              |
+| **Browser UI**    | Your browser                 | Hands-free phone VAD, chat bubbles, tool approval cards, debug panel |
 
 ## Docker Details
 
@@ -382,7 +392,7 @@ docker build -t nano-claw-voice .
 # Run (make sure STT service is running on port 8200 first)
 docker run -it --rm \
   -p 9090:8080 \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
   -e STT_SERVICE_URL="http://host.docker.internal:8200" \
   -e NANO_CLAW_KNOWLEDGE="/app/sites/spacechannel/knowledge.md" \
   -v nano-claw-models:/app/voice/models \
@@ -394,6 +404,7 @@ docker run -it --rm \
 ### Inside the container
 
 The entrypoint starts two processes:
+
 1. `node dist/cli/index.js serve --port 3001` — the TypeScript API server
 2. `python -m voice` — the Python voice server on port 8080
 
@@ -401,24 +412,26 @@ The voice server waits for the API to be healthy before starting.
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---------|-----|
-| "Mic access denied" | Allow microphone in browser permissions, use Chrome/Firefox/Safari |
-| Stuck on "Connecting..." | Check that the Docker container is running (`docker ps`) |
-| Transcription fails | Make sure the STT service is running: `curl http://localhost:8200/health` |
-| No sound from agent | Click somewhere on the page first (browsers require user interaction before playing audio) |
-| "nano-claw API did not become ready" | Check your `ANTHROPIC_API_KEY` is valid. Check Docker logs: `docker logs $(docker ps -q)` |
-| Container won't start | Make sure Docker is running and port 9090 isn't in use |
-| STT service won't start | Check Python 3.10+ is installed: `python3 --version` |
+| Problem                              | Fix                                                                                                             |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| "Mic access denied"                  | Allow microphone in browser permissions, use Chrome/Firefox/Safari                                              |
+| Stuck on "Connecting..."             | Check that the Docker container is running (`docker ps`)                                                        |
+| Transcription fails                  | Make sure the STT service is running: `curl http://localhost:8200/health`                                       |
+| No sound from agent                  | Click somewhere on the page first (browsers require user interaction before playing audio)                      |
+| "nano-claw API did not become ready" | Check that the provider key for the configured model is valid. Check Docker logs: `docker logs $(docker ps -q)` |
+| Container won't start                | Make sure Docker is running and port 9090 isn't in use                                                          |
+| STT service won't start              | Check Python 3.10+ is installed: `python3 --version`                                                            |
 
 ## Server Logs
 
 **STT service terminal** shows transcription requests:
+
 ```
 INFO:     POST /transcribe — 4.56s audio, 0.8s inference → "How much disk space do I have?"
 ```
 
 **Docker terminal** shows agent loop iterations:
+
 ```
 voice-server INFO  iter=1 msgs=2 model=anthropic/claude-sonnet-4-5
     tokens={'prompt': 897, 'completion': 68, 'total': 965} duration=2131ms finish=tool_use

@@ -27,6 +27,39 @@ export const ProvidersConfigSchema = z.object({
   vllm: ProviderConfigSchema.optional(),
 });
 
+/** Evidence retrieval from the local intelligence-platform service. */
+export const DeepReasoningConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  routingMode: z.enum(['auto', 'always', 'never']).default('auto'),
+  threshold: z.number().int().min(1).max(20).default(4),
+  acknowledgement: z.string().min(1).max(160).default('Let me think deeply about this.'),
+  maxSteps: z.number().int().min(1).max(20).default(6),
+  maxRetrievalQueries: z.number().int().min(1).max(50).default(10),
+  pollIntervalMs: z.number().int().min(100).max(10000).default(750),
+  requestTimeoutMs: z.number().int().min(100).max(30000).default(5000),
+  taskTimeoutMs: z.number().int().min(1000).max(600000).default(240000),
+  analysisStyle: z.enum(['topic_map', 'principle_graph']).default('topic_map'),
+});
+
+export const IntelligenceConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    apiUrl: z.string().url().default('http://127.0.0.1:8000'),
+    tenantId: z.string().min(1).default('personal'),
+    principalId: z.string().min(1).default('nano-claw'),
+    collectionIds: z.array(z.string().min(1)).default([]),
+    limit: z.number().int().min(1).max(20).default(5),
+    candidatePool: z.number().int().min(1).max(200).default(40),
+    maxChars: z.number().int().min(1000).max(100000).default(16000),
+    timeoutMs: z.number().int().min(10).max(10000).default(750),
+    groundingMode: z.enum(['augment', 'strict']).default('augment'),
+    deepReasoning: DeepReasoningConfigSchema.optional(),
+  })
+  .refine((value) => value.candidatePool >= value.limit, {
+    message: 'candidatePool must be greater than or equal to limit',
+    path: ['candidatePool'],
+  });
+
 /**
  * Agent defaults configuration schema
  */
@@ -36,6 +69,7 @@ export const AgentDefaultsSchema = z.object({
   maxTokens: z.number().positive().optional().default(4096),
   systemPrompt: z.string().optional(),
   knowledgeFiles: z.array(z.string()).optional(),
+  intelligence: IntelligenceConfigSchema.optional(),
   /** Ordered fallback models tried when the primary model errors or is too slow
    * to produce a first token. Fallbacks whose provider has no key are skipped.
    * Empty (default) = no fallback, i.e. unchanged single-model behavior. */
@@ -54,6 +88,7 @@ export const AgentProfileSchema = z.object({
   label: z.string(),
   systemPrompt: z.string(),
   knowledgeFiles: z.array(z.string()),
+  intelligence: IntelligenceConfigSchema.optional(),
 });
 
 /**
@@ -207,6 +242,8 @@ export const ConfigSchema = z.object({
  * Configuration type inferred from schema
  */
 export type Config = z.infer<typeof ConfigSchema>;
+export type IntelligenceConfig = z.infer<typeof IntelligenceConfigSchema>;
+export type DeepReasoningConfig = z.infer<typeof DeepReasoningConfigSchema>;
 export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;

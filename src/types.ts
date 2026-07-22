@@ -64,6 +64,38 @@ export interface AgentConfig {
   maxTokens?: number;
   systemPrompt?: string;
   knowledgeFiles?: string[];
+  intelligence?: IntelligenceConfig;
+}
+
+/** Local evidence retrieval performed before the conversational model call. */
+export interface IntelligenceConfig {
+  enabled: boolean;
+  apiUrl: string;
+  tenantId: string;
+  principalId: string;
+  collectionIds: string[];
+  limit: number;
+  candidatePool: number;
+  maxChars: number;
+  timeoutMs: number;
+  groundingMode: 'augment' | 'strict';
+  deepReasoning?: DeepReasoningConfig;
+}
+
+export type AnalysisStyle = 'topic_map' | 'principle_graph';
+
+/** Asynchronous, evidence-grounded reasoning used only for routed complex turns. */
+export interface DeepReasoningConfig {
+  enabled: boolean;
+  routingMode: 'auto' | 'always' | 'never';
+  threshold: number;
+  acknowledgement: string;
+  maxSteps: number;
+  maxRetrievalQueries: number;
+  pollIntervalMs: number;
+  requestTimeoutMs: number;
+  taskTimeoutMs: number;
+  analysisStyle: AnalysisStyle;
 }
 
 /**
@@ -153,6 +185,21 @@ export const SYSTEM_CACHE_MARKER = '\n[[cache-breakpoint]]\n';
  */
 export type StreamEvent =
   | { type: 'text'; delta: string }
+  | {
+      type: 'deep_started';
+      acknowledgement: string;
+      score: number;
+      reasons: string[];
+    }
+  | {
+      type: 'deep_progress';
+      taskId: string;
+      phase: string;
+      message: string;
+      completedSteps: number;
+      maxSteps: number;
+      retrievalQueries: number;
+    }
   | { type: 'tool_calls'; toolCalls: ToolCall[] }
   | {
       type: 'done';

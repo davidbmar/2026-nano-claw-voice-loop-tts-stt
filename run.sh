@@ -59,12 +59,22 @@ df -h / | tail -1 | awk '{
 }'
 echo ""
 
-# Run — pass ANTHROPIC_API_KEY from env
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-  echo "ERROR: ANTHROPIC_API_KEY not set. Export it first:"
-  echo "  export ANTHROPIC_API_KEY=sk-ant-..."
+# Run with any provider supported by the model catalog. The default config uses
+# DeepSeek, so Anthropic is optional rather than a startup requirement.
+LLM_PROVIDER_KEY=""
+for key_name in DEEPSEEK_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GROQ_API_KEY DASHSCOPE_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY; do
+  if [ -n "${!key_name:-}" ]; then
+    LLM_PROVIDER_KEY="$key_name"
+    break
+  fi
+done
+if [ -z "$LLM_PROVIDER_KEY" ]; then
+  echo "ERROR: no supported LLM provider key found in .env or the environment."
+  echo "Set DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY,"
+  echo "DASHSCOPE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
   exit 1
 fi
+echo "LLM provider credential: $LLM_PROVIDER_KEY"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -224,17 +234,29 @@ fi
 docker run $TTY_FLAGS --rm \
   --name nano-claw-voice \
   -p 127.0.0.1:9090:8080 \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e ANTHROPIC_API_KEY \
   -e GEMINI_API_KEY \
   -e DEEPSEEK_API_KEY \
   -e XAI_API_KEY \
   -e GROQ_API_KEY \
   -e DASHSCOPE_API_KEY \
   -e OPENAI_API_KEY \
+  -e OPENROUTER_API_KEY \
   -e NANO_CLAW_BARGE_IN \
   -e NANO_CLAW_STREAM \
   -e NANO_CLAW_WS_AUDIO="$NANO_CLAW_WS_AUDIO" \
   -e NANO_CLAW_KNOWLEDGE \
+  -e NANO_CLAW_INTELLIGENCE_URL \
+  -e NANO_CLAW_INTELLIGENCE_ENABLED \
+  -e NANO_CLAW_INTELLIGENCE_TENANT \
+  -e NANO_CLAW_INTELLIGENCE_COLLECTIONS \
+  -e NANO_CLAW_INTELLIGENCE_PROFILE \
+  -e NANO_CLAW_INTELLIGENCE_GROUNDING \
+  -e NANO_CLAW_DEEP_REASONING \
+  -e NANO_CLAW_DEEP_ROUTING \
+  -e NANO_CLAW_DEEP_THRESHOLD \
+  -e NANO_CLAW_DEEP_TIMEOUT_MS \
+  -e NANO_CLAW_ANALYSIS_STYLE \
   -e NANO_CLAW_DISABLE_TOOLS \
   -e NANO_CLAW_PHONE \
   -e TELNYX_API_KEY \

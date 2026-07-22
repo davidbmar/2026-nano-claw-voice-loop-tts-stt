@@ -16,6 +16,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration
 from voice.types import AudioChunk
 from voice.audio.audio_queue import AudioQueue
 from voice.audio.webrtc_audio_source import WebRTCAudioSource
+from voice.text_chunker import clean_for_speech
 
 FRAME_SAMPLES = 960  # 20ms at 48kHz
 SAMPLE_RATE = 48000
@@ -71,6 +72,7 @@ class Session:
         # Pipeline settings: model + STT (Whisper) size for this session.
         self.model = ""       # "" → server uses its default
         self.stt_size = "base"
+        self.analysis_style = "topic_map"
 
         self._paused = False
         self._stream_task: asyncio.Task | None = None
@@ -210,18 +212,10 @@ class Session:
 
     @staticmethod
     def _clean_for_speech(text: str) -> str:
-        """Strip markdown formatting so TTS reads clean prose."""
-        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*[-*•]\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'\*{1,3}(.+?)\*{1,3}', r'\1', text)
-        text = re.sub(r'\*{1,3}', '', text)
-        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-        text = re.sub(r'https?://\S+', '', text)
-        text = re.sub(r'`(.+?)`', r'\1', text)
+        """Use the same canonical cleanup as incremental streaming speech."""
+        text = clean_for_speech(text)
         text = re.sub(r'\n{2,}', '. ', text)
         text = re.sub(r'\n', ' ', text)
-        text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\.{2,}', '.', text)
         return text.strip()
 
@@ -241,6 +235,14 @@ class Session:
         """Synthesize one already-clean chunk and enqueue it. Returns bytes queued."""
         from voice.tts import synthesize
         pcm_48k = synthesize(text, voice_id, speed)
+        prepare_tts = getattr(self._audio_source, "prepare_tts", None)
+        pcm = prepare_tts(pcm_48k) if prepare_tts is not None else pcm_48k
+        if pcm:
+            self._audio_queue.enqueue(pcm)
+        return len(pcm)
+
+    def enqueue_pcm(self, pcm_48k: bytes) -> int:
+        """Enqueue generated non-speech PCM through the active playback transport."""
         prepare_tts = getattr(self._audio_source, "prepare_tts", None)
         pcm = prepare_tts(pcm_48k) if prepare_tts is not None else pcm_48k
         if pcm:

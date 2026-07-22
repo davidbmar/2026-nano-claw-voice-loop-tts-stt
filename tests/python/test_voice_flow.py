@@ -406,8 +406,21 @@ def test_browser_flag_off_routes_to_normal_api(monkeypatch):
 
     assert len(client.calls) == 1
     assert client.calls[0][2]["json"]["profile"] == "spacechannel"
+    assert client.calls[0][2]["json"]["analysisStyle"] == "topic_map"
     assert session.spoken == ["normal API reply"]
     assert {"type": "agent_reply", "text": "normal API reply"} in ws.messages
+
+
+def test_browser_passes_experimental_analysis_style(monkeypatch):
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session.analysis_style = "principle_graph"
+    client = FakeHttpClient()
+
+    run(server._handle_agent_request(ws, session, client, "review this strategy deeply"))
+
+    assert client.calls[0][2]["json"]["analysisStyle"] == "principle_graph"
 
 
 def test_browser_passes_current_mode_profile_on_every_agent_request(monkeypatch):
@@ -616,6 +629,7 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     assert list(FLOW_MODES) == [
         "none",
         "spacechannel",
+        "intelligence",
         "replicantpm",
         "scheduler",
     ]
@@ -656,6 +670,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 "options": [
                     {"id": "none", "label": "None"},
                     {"id": "spacechannel", "label": "Space Channel"},
+                    {"id": "intelligence", "label": "Document Intelligence"},
                     {"id": "replicantpm", "label": "Replicant PM"},
                     {"id": "scheduler", "label": "Plumber Scheduler"},
                 ],
