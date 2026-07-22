@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional L16 wideband ("HD Voice") phone audio behind `NANO_CLAW_PHONE_CODEC`
+  (`pcmu` default / `l16`). L16 negotiates a 16 kHz bidirectional Telnyx stream:
+  LuxTTS is downsampled 48k→16k instead of 48k→8k (roughly double the audible
+  bandwidth), inbound audio reaches Whisper at its native 16 kHz (no lossy
+  8→16k upsample), and the utterance endpointer, barge-in detector, and Silero
+  VAD all run rate-aware at 16 kHz. Unset flag keeps byte-identical 8 kHz PCMU
+  behavior. Implemented via the Codex handoff protocol; reviewed and verified.
 - Live phone-line controls in the web UI: the ⚙ panel is split into "This
   browser" (STT/LLM/Voice/Speed for the page session) and "Phone line"
   (Voice/LLM/STT/Speed/VAD/Flow) sections. Phone voice, STT, and speed are

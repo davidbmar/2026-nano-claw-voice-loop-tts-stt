@@ -1,4 +1,4 @@
-"""WebRTC session — PeerConnection lifecycle, mic recording, TTS playback."""
+"""Voice session — shared mic recording/STT and transport-backed TTS playback."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration
 from voice.types import AudioChunk
 from voice.audio.audio_queue import AudioQueue
 from voice.audio.webrtc_audio_source import WebRTCAudioSource
+from voice.text_chunker import clean_for_speech
 
 FRAME_SAMPLES = 960  # 20ms at 48kHz
 SAMPLE_RATE = 48000
@@ -36,11 +37,19 @@ class QueuedGenerator:
 
 
 class Session:
-    """Manages one WebRTC peer connection and its audio track."""
+    """Manage one conversation's shared audio and turn-pipeline state.
 
-    def __init__(self):
-        self._pc = RTCPeerConnection(configuration=RTCConfiguration())
-        self._audio_source = WebRTCAudioSource()
+    With no argument this constructs the original WebRTC source and peer
+    connection.  A transport with the same source interface can instead drain
+    TTS and feed PCM through :meth:`receive_mic_pcm`.
+    """
+
+    def __init__(self, audio_transport=None):
+        self._pc = None
+        self._audio_transport = audio_transport
+        self._audio_source = audio_transport or WebRTCAudioSource()
+        self._mic_sample_rate = getattr(audio_transport, "sample_rate", SAMPLE_RATE)
+        self._playback_sample_rate = getattr(audio_transport, "sample_rate", SAMPLE_RATE)
 
         self._audio_queue = AudioQueue()
         self._tts_generator = QueuedGenerator(self._audio_queue)
@@ -53,6 +62,9 @@ class Session:
         self._mic_recv_task: asyncio.Task | None = None
         self._closed = False
 
+        if audio_transport is not None:
+            audio_transport.attach_session(self)
+
         # Selected voice for this session (browser default: Kokoro af_heart).
         self.voice_id = "af_heart"
         self.speed = 1.0
@@ -60,25 +72,31 @@ class Session:
         # Pipeline settings: model + STT (Whisper) size for this session.
         self.model = ""       # "" → server uses its default
         self.stt_size = "base"
+        self.analysis_style = "topic_map"
 
         self._paused = False
         self._stream_task: asyncio.Task | None = None
         self._turn: dict = {}
 
-        @self._pc.on("connectionstatechange")
-        async def on_conn_state():
-            log.info("Connection state: %s", self._pc.connectionState)
+        if audio_transport is None:
+            self._pc = RTCPeerConnection(configuration=RTCConfiguration())
 
-        @self._pc.on("track")
-        async def on_track(track):
-            if track.kind != "audio":
-                return
-            log.info("Received remote audio track from browser mic")
-            self._mic_track = track
-            self._mic_recv_task = asyncio.ensure_future(self._recv_mic_audio(track))
+            @self._pc.on("connectionstatechange")
+            async def on_conn_state():
+                log.info("Connection state: %s", self._pc.connectionState)
+
+            @self._pc.on("track")
+            async def on_track(track):
+                if track.kind != "audio":
+                    return
+                log.info("Received remote audio track from browser mic")
+                self._mic_track = track
+                self._mic_recv_task = asyncio.ensure_future(self._recv_mic_audio(track))
 
     async def handle_offer(self, sdp: str) -> str:
         """Process client SDP offer, return SDP answer."""
+        if self._pc is None:
+            raise RuntimeError("WebRTC offer received for a non-WebRTC session")
         self._pc.addTrack(self._audio_source)
 
         offer = RTCSessionDescription(sdp=sdp, type="offer")
@@ -121,7 +139,7 @@ class Session:
 
         pcm_data = b"".join(self._mic_frames)
         self._mic_frames.clear()
-        audio_duration_s = len(pcm_data) / (SAMPLE_RATE * 2)
+        audio_duration_s = len(pcm_data) / (self._mic_sample_rate * 2)
 
         log.info("Mic recording stopped: %d bytes, %.2fs", len(pcm_data), audio_duration_s)
 
@@ -133,7 +151,7 @@ class Session:
                     content=pcm_data,
                     headers={
                         "Content-Type": "application/octet-stream",
-                        "X-Sample-Rate": str(SAMPLE_RATE),
+                        "X-Sample-Rate": str(self._mic_sample_rate),
                         "X-Model-Size": self.stt_size,
                     },
                 )
@@ -194,18 +212,10 @@ class Session:
 
     @staticmethod
     def _clean_for_speech(text: str) -> str:
-        """Strip markdown formatting so TTS reads clean prose."""
-        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*[-*•]\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-        text = re.sub(r'\*{1,3}(.+?)\*{1,3}', r'\1', text)
-        text = re.sub(r'\*{1,3}', '', text)
-        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-        text = re.sub(r'https?://\S+', '', text)
-        text = re.sub(r'`(.+?)`', r'\1', text)
+        """Use the same canonical cleanup as incremental streaming speech."""
+        text = clean_for_speech(text)
         text = re.sub(r'\n{2,}', '. ', text)
         text = re.sub(r'\n', ' ', text)
-        text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\.{2,}', '.', text)
         return text.strip()
 
@@ -225,14 +235,24 @@ class Session:
         """Synthesize one already-clean chunk and enqueue it. Returns bytes queued."""
         from voice.tts import synthesize
         pcm_48k = synthesize(text, voice_id, speed)
-        if pcm_48k:
-            self._audio_queue.enqueue(pcm_48k)
-        return len(pcm_48k)
+        prepare_tts = getattr(self._audio_source, "prepare_tts", None)
+        pcm = prepare_tts(pcm_48k) if prepare_tts is not None else pcm_48k
+        if pcm:
+            self._audio_queue.enqueue(pcm)
+        return len(pcm)
+
+    def enqueue_pcm(self, pcm_48k: bytes) -> int:
+        """Enqueue generated non-speech PCM through the active playback transport."""
+        prepare_tts = getattr(self._audio_source, "prepare_tts", None)
+        pcm = prepare_tts(pcm_48k) if prepare_tts is not None else pcm_48k
+        if pcm:
+            self._audio_queue.enqueue(pcm)
+        return len(pcm)
 
     async def end_stream(self, total_bytes: int) -> None:
         """Wait for the queue to drain, then detach the generator (mirrors speak_text tail)."""
         loop = asyncio.get_running_loop()
-        playback_seconds = total_bytes / (SAMPLE_RATE * 2)
+        playback_seconds = total_bytes / (self._playback_sample_rate * 2)
         budget = max(5.0, min(120.0, playback_seconds + 5.0))
         deadline = loop.time() + budget
         while self._audio_queue.available and not self._closed:
@@ -292,10 +312,20 @@ class Session:
             if channels > 1:
                 flat = flat[::channels]
             pcm = flat.astype(np.int16).tobytes()
-            if self._recording:
-                self._mic_frames.append(pcm)
-            else:
-                self._mic_preroll.append(pcm)
+            self.receive_mic_pcm(pcm)
+
+    def receive_mic_pcm(self, pcm: bytes) -> None:
+        """Accumulate transport-provided PCM through the shared mic path."""
+
+        if not pcm:
+            return
+        if len(pcm) % 2:
+            raise ValueError("mic PCM16 must contain complete samples")
+        frame = bytes(pcm)
+        if self._recording:
+            self._mic_frames.append(frame)
+        else:
+            self._mic_preroll.append(frame)
 
     async def close(self):
         """Tear down the peer connection."""
@@ -303,8 +333,11 @@ class Session:
             return
         self._closed = True
         self._recording = False
-        self._audio_source.clear_generator()
         if self._mic_recv_task:
             self._mic_recv_task.cancel()
-        await self._pc.close()
+        if self._audio_transport is not None:
+            await self._audio_transport.close()
+        elif self._pc is not None:
+            self._audio_source.clear_generator()
+            await self._pc.close()
         log.info("Session closed")

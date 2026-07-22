@@ -1,12 +1,25 @@
-import { describe, it, expect } from 'vitest';
-import { BaseProvider, parseAnthropicEvents, parseOpenAIEvents, OpenAIProvider } from '../src/providers/base';
+import { describe, it, expect, vi } from 'vitest';
+import axios from 'axios';
+import {
+  BaseProvider,
+  parseAnthropicEvents,
+  parseOpenAIEvents,
+  OpenAIProvider,
+} from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
 import { __setProviderManagerForTest, stepLoopStream, getAgentConfig } from '../src/api/server';
 import { Memory } from '../src/agent/memory';
+import {
+  createAnalysisConversationState,
+  parseAnalysisArtifact,
+} from '../src/agent/analysis-navigation';
+import { analysisArtifactFixture } from './fixtures/analysis-artifact';
 
 class FakeProvider extends BaseProvider {
-  protected getDefaultApiBase(): string { return 'http://example.invalid'; }
+  protected getDefaultApiBase(): string {
+    return 'http://example.invalid';
+  }
   async complete(): Promise<LLMResponse> {
     return { content: 'Hello world.', finishReason: 'stop' };
   }
@@ -104,7 +117,9 @@ describe('parseAnthropicEvents', () => {
 });
 
 describe('parseOpenAIEvents', () => {
-  function sse(s: string) { return require('node:stream').Readable.from([Buffer.from(s)]); }
+  function sse(s: string) {
+    return require('node:stream').Readable.from([Buffer.from(s)]);
+  }
 
   it('assembles content deltas and ends on [DONE]', async () => {
     const body =
@@ -114,8 +129,13 @@ describe('parseOpenAIEvents', () => {
       'data: [DONE]\n\n';
     const out: any[] = [];
     for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
-    expect(out.filter(e => e.type === 'text').map(e => e.delta).join('')).toBe('Hi there.');
-    const done = out.find(e => e.type === 'done');
+    expect(
+      out
+        .filter((e) => e.type === 'text')
+        .map((e) => e.delta)
+        .join('')
+    ).toBe('Hi there.');
+    const done = out.find((e) => e.type === 'done');
     expect(done.finishReason).toBe('stop');
     expect(done.usage).toEqual({ promptTokens: 5, completionTokens: 3, totalTokens: 8 });
   });
@@ -128,8 +148,12 @@ describe('parseOpenAIEvents', () => {
       'data: [DONE]\n\n';
     const out: any[] = [];
     for await (const e of parseOpenAIEvents(sse(body))) out.push(e);
-    const t = out.find(e => e.type === 'tool_calls');
-    expect(t.toolCalls[0]).toEqual({ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{"cmd":"ls"}' } });
+    const t = out.find((e) => e.type === 'tool_calls');
+    expect(t.toolCalls[0]).toEqual({
+      id: 'c1',
+      type: 'function',
+      function: { name: 'shell', arguments: '{"cmd":"ls"}' },
+    });
   });
 });
 
@@ -159,13 +183,225 @@ describe('stepLoopStream', () => {
     const mem = new Memory('test-stream');
     mem.addMessage({ role: 'user', content: 'hi' });
     const events: any[] = [];
-    for await (const e of stepLoopStream(mem, { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any, 0)) {
+    for await (const e of stepLoopStream(
+      mem,
+      { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any,
+      0
+    )) {
       events.push(e);
     }
-    const texts = events.filter((e) => e.type === 'text').map((e) => e.delta).join('');
+    const texts = events
+      .filter((e) => e.type === 'text')
+      .map((e) => e.delta)
+      .join('');
     expect(texts).toBe('Part one. Part two.');
     const final = events.find((e) => e.type === 'final');
     expect(final.response).toBe('Part one. Part two.');
+  });
+
+  it('emits deep lifecycle events before naturalizing a completed task result', async () => {
+    const post = vi.spyOn(axios, 'post').mockResolvedValue({
+      data: {
+        task_id: 'task_stream',
+        status: 'queued',
+        progress: {
+          phase: 'queued',
+          message: 'Waiting for a reasoning worker.',
+          completed_steps: 0,
+          max_steps: 4,
+          retrieval_queries: 0,
+        },
+      },
+    } as any);
+    const get = vi.spyOn(axios, 'get').mockResolvedValue({
+      data: {
+        task_id: 'task_stream',
+        status: 'succeeded',
+        progress: {
+          phase: 'completed',
+          message: 'Deep analysis completed.',
+          completed_steps: 2,
+          max_steps: 4,
+          retrieval_queries: 2,
+        },
+        result: {
+          answer:
+            'Validate repeatable demand before investing in replication. We can explore Acquisition risk, Pricing economics, or Validation plan.',
+          workflow: 'strategy_review',
+          analysis_artifact: analysisArtifactFixture('task_stream'),
+          snapshot: { snapshot_id: 'snapshot_1' },
+          model_usage: [],
+          claims: [
+            {
+              claim_id: 'claim_sequence',
+              text: 'The plan places proving demand before replication.',
+              disposition: 'supported',
+              evidence_ids: ['ev_1'],
+            },
+          ],
+          evidence: [
+            {
+              evidence_id: 'ev_1',
+              text: 'Replication turns a validated method into a system.',
+              citation: {
+                title: 'Owning the Demand',
+                locator: { section_path: ['Replication'] },
+              },
+            },
+          ],
+        },
+      },
+    } as any);
+    __setProviderManagerForTest({
+      async *completeStream() {
+        yield { type: 'text', delta: Array(70).fill('excess').join(' ') };
+        yield { type: 'done', finishReason: 'stop', usage: undefined };
+      },
+    } as any);
+
+    try {
+      const mem = new Memory('test-deep-stream');
+      mem.addMessage({ role: 'user', content: 'Think deeply about the sequence.' });
+      const events: any[] = [];
+      for await (const event of stepLoopStream(
+        mem,
+        {
+          model: 'anthropic/x',
+          temperature: 0.7,
+          maxTokens: 100,
+          intelligence: {
+            enabled: true,
+            apiUrl: 'http://127.0.0.1:8000',
+            tenantId: 'personal',
+            principalId: 'nano-claw-test',
+            collectionIds: ['owning-the-demand'],
+            limit: 5,
+            candidatePool: 40,
+            maxChars: 16000,
+            timeoutMs: 750,
+            groundingMode: 'strict',
+            deepReasoning: {
+              enabled: true,
+              routingMode: 'auto',
+              threshold: 4,
+              acknowledgement: 'Let me think deeply about this.',
+              maxSteps: 4,
+              maxRetrievalQueries: 6,
+              pollIntervalMs: 1,
+              requestTimeoutMs: 1000,
+              taskTimeoutMs: 10000,
+            },
+          },
+        },
+        0
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]).toMatchObject({
+        type: 'deep_started',
+        acknowledgement: 'Let me think deeply about this.',
+      });
+      expect(events.filter((event) => event.type === 'deep_progress')).toHaveLength(2);
+      const spoken = events
+        .filter((event) => event.type === 'text')
+        .map((event) => event.delta)
+        .join('');
+      expect(spoken).toContain('Validate repeatable demand');
+      expect(spoken).not.toContain('excess');
+      const final = events.find((event) => event.type === 'final');
+      expect(final?.debug.deepReasoning).toMatchObject({
+        status: 'succeeded',
+        completedSteps: 2,
+        artifactId: 'analysis_task_stream',
+      });
+      expect(final?.debug.analysisVoiceGuard).toEqual({ limit: 65, replaced: true });
+      expect(final?.debug.finishReason).toBe('analysis_voice_limit_fallback');
+      expect(post).toHaveBeenCalledOnce();
+      expect(get).toHaveBeenCalledOnce();
+    } finally {
+      post.mockRestore();
+      get.mockRestore();
+    }
+  });
+
+  it('opens the second offered topic without starting another deep-analysis task', async () => {
+    const post = vi.spyOn(axios, 'post');
+    const get = vi.spyOn(axios, 'get');
+    let systemPrompt = '';
+    __setProviderManagerForTest({
+      async *completeStream(messages: Message[]) {
+        systemPrompt = messages[0]?.content || '';
+        yield {
+          type: 'text',
+          delta: 'The pricing economics need measured acquisition cost and margin together.',
+        };
+        yield { type: 'done', finishReason: 'stop', usage: undefined };
+      },
+    } as any);
+
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_followup'))!;
+    const mem = new Memory('test-analysis-followup');
+    mem.setAnalysisState(createAnalysisConversationState(artifact, artifact.taskId));
+    mem.addMessage({ role: 'user', content: 'Tell me about the second one.' });
+
+    try {
+      const events: any[] = [];
+      for await (const event of stepLoopStream(
+        mem,
+        {
+          model: 'anthropic/x',
+          temperature: 0.7,
+          maxTokens: 100,
+          intelligence: {
+            enabled: true,
+            apiUrl: 'http://127.0.0.1:8000',
+            tenantId: 'personal',
+            principalId: 'nano-claw-test',
+            collectionIds: ['owning-the-demand'],
+            limit: 5,
+            candidatePool: 40,
+            maxChars: 16000,
+            timeoutMs: 750,
+            groundingMode: 'strict',
+            deepReasoning: {
+              enabled: true,
+              routingMode: 'auto',
+              threshold: 4,
+              acknowledgement: 'Let me think deeply about this.',
+              maxSteps: 4,
+              maxRetrievalQueries: 6,
+              pollIntervalMs: 1,
+              requestTimeoutMs: 1000,
+              taskTimeoutMs: 10000,
+            },
+          },
+        },
+        0
+      )) {
+        events.push(event);
+      }
+
+      expect(events.some((event) => event.type === 'deep_started')).toBe(false);
+      expect(events.find((event) => event.type === 'final')?.debug.analysisNavigation).toEqual({
+        action: 'open_topic',
+        reason: 'ordinal_menu_selection',
+        selectedTopicIds: ['topic_economics'],
+      });
+      expect(systemPrompt).toContain(
+        'Measure price, acquisition cost, and margin in the same experiment.'
+      );
+      expect(systemPrompt).not.toContain(
+        'The plan should measure a repeatable channel before scaling it.'
+      );
+      expect(mem.getAnalysisState()?.activeTopicId).toBe('topic_economics');
+      expect(post).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      mem.delete();
+      post.mockRestore();
+      get.mockRestore();
+    }
   });
 });
 
@@ -181,7 +417,11 @@ describe('stepLoopStream TTFT', () => {
     const mem = new Memory('ttft-test');
     mem.addMessage({ role: 'user', content: 'hi' });
     let finalEvt: any;
-    for await (const e of stepLoopStream(mem, { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any, 0)) {
+    for await (const e of stepLoopStream(
+      mem,
+      { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any,
+      0
+    )) {
       if ((e as any).type === 'final') finalEvt = e;
     }
     expect(finalEvt.debug.firstTokenMs).toBeGreaterThanOrEqual(15);

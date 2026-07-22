@@ -59,12 +59,22 @@ df -h / | tail -1 | awk '{
 }'
 echo ""
 
-# Run — pass ANTHROPIC_API_KEY from env
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-  echo "ERROR: ANTHROPIC_API_KEY not set. Export it first:"
-  echo "  export ANTHROPIC_API_KEY=sk-ant-..."
+# Run with any provider supported by the model catalog. The default config uses
+# DeepSeek, so Anthropic is optional rather than a startup requirement.
+LLM_PROVIDER_KEY=""
+for key_name in DEEPSEEK_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GROQ_API_KEY DASHSCOPE_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY; do
+  if [ -n "${!key_name:-}" ]; then
+    LLM_PROVIDER_KEY="$key_name"
+    break
+  fi
+done
+if [ -z "$LLM_PROVIDER_KEY" ]; then
+  echo "ERROR: no supported LLM provider key found in .env or the environment."
+  echo "Set DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY,"
+  echo "DASHSCOPE_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY."
   exit 1
 fi
+echo "LLM provider credential: $LLM_PROVIDER_KEY"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -166,24 +176,23 @@ else
   echo "LuxTTS service not set up (optional) — run lux-service/setup.sh to enable the cloned voice"
 fi
 
-# Clean up services on exit
+# On exit, DO NOT kill the STT/TTS/Lux host services. run.sh exits on every
+# container rebuild (docker stop → the foreground `docker run` returns), and
+# killing the services there silently breaks transcription until the next
+# manual restart — a real outage hit on 2026-07-19. The services are designed
+# to be reused (the /health check above reuses a running one), so leaving them
+# up makes a rebuild a seamless swap instead of a service-down window.
+# To stop them deliberately, use NANO_CLAW_STOP_SERVICES=1.
 cleanup() {
-  if [ -n "$STT_PID" ]; then
-    echo ""
-    echo "Stopping STT service (pid $STT_PID)..."
-    kill $STT_PID 2>/dev/null
-    wait $STT_PID 2>/dev/null
+  if [ "${NANO_CLAW_STOP_SERVICES:-}" != "1" ]; then
+    return 0
   fi
-  if [ -n "$TTS_PID" ]; then
-    echo "Stopping TTS service (pid $TTS_PID)..."
-    kill $TTS_PID 2>/dev/null
-    wait $TTS_PID 2>/dev/null
-  fi
-  if [ -n "$LUX_PID" ]; then
-    echo "Stopping LuxTTS service (pid $LUX_PID)..."
-    kill $LUX_PID 2>/dev/null
-    wait $LUX_PID 2>/dev/null
-  fi
+  for pid in "$STT_PID" "$TTS_PID" "$LUX_PID"; do
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -209,6 +218,10 @@ export NANO_CLAW_KNOWLEDGE
 if [ -n "$NANO_CLAW_KNOWLEDGE" ]; then
   echo "Knowledge: $NANO_CLAW_KNOWLEDGE"
 fi
+# WebSocket audio survives the same HTTP tunnel as text and is the remote-safe
+# default. Set NANO_CLAW_WS_AUDIO=0 (or false/off/no) to retain WebRTC for a
+# same-LAN, lower-latency deployment.
+NANO_CLAW_WS_AUDIO="${NANO_CLAW_WS_AUDIO:-1}"
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
@@ -220,16 +233,30 @@ if [ -t 0 ]; then
 fi
 docker run $TTY_FLAGS --rm \
   --name nano-claw-voice \
-  -p 9090:8080 \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -p 127.0.0.1:9090:8080 \
+  -e ANTHROPIC_API_KEY \
   -e GEMINI_API_KEY \
   -e DEEPSEEK_API_KEY \
+  -e XAI_API_KEY \
   -e GROQ_API_KEY \
   -e DASHSCOPE_API_KEY \
   -e OPENAI_API_KEY \
+  -e OPENROUTER_API_KEY \
   -e NANO_CLAW_BARGE_IN \
   -e NANO_CLAW_STREAM \
+  -e NANO_CLAW_WS_AUDIO="$NANO_CLAW_WS_AUDIO" \
   -e NANO_CLAW_KNOWLEDGE \
+  -e NANO_CLAW_INTELLIGENCE_URL \
+  -e NANO_CLAW_INTELLIGENCE_ENABLED \
+  -e NANO_CLAW_INTELLIGENCE_TENANT \
+  -e NANO_CLAW_INTELLIGENCE_COLLECTIONS \
+  -e NANO_CLAW_INTELLIGENCE_PROFILE \
+  -e NANO_CLAW_INTELLIGENCE_GROUNDING \
+  -e NANO_CLAW_DEEP_REASONING \
+  -e NANO_CLAW_DEEP_ROUTING \
+  -e NANO_CLAW_DEEP_THRESHOLD \
+  -e NANO_CLAW_DEEP_TIMEOUT_MS \
+  -e NANO_CLAW_ANALYSIS_STYLE \
   -e NANO_CLAW_DISABLE_TOOLS \
   -e NANO_CLAW_PHONE \
   -e TELNYX_API_KEY \
@@ -238,10 +265,24 @@ docker run $TTY_FLAGS --rm \
   -e NANO_CLAW_PHONE_GREETING \
   -e NANO_CLAW_PHONE_VOICE \
   -e NANO_CLAW_PHONE_STT_SIZE \
+  -e NANO_CLAW_PHONE_CODEC \
   -e NANO_CLAW_PHONE_BARGE_IN \
   -e NANO_CLAW_PHONE_DYNAMIC_ENDPOINT \
   -e NANO_CLAW_PHONE_VAD \
+  -e NANO_CLAW_PHONE_TAP \
+  -e NANO_CLAW_PHONE_TAP_DIR \
+  -e NANO_CLAW_PHONE_RMS_MIN \
+  -e NANO_CLAW_PHONE_RMS_RATIO \
+  -e NANO_CLAW_PHONE_GAIN \
+  -e NANO_CLAW_PHONE_GAIN_TARGET_DB \
+  -e NANO_CLAW_PHONE_PREBUFFER_MS \
+  -e NANO_CLAW_PHONE_PACE_FACTOR \
+  -e NANO_CLAW_GOOGLE_CLIENT_ID \
+  -e NANO_CLAW_AUTH \
+  -e NANO_CLAW_PUBLIC_HTTPS \
   -e NANO_CLAW_VOICE_FLOW \
+  -e SCHED_EVAL_MODEL \
+  -e SCHED_EVAL_THINKING \
   -e NANO_CLAW_FLOW_AVAILABILITY \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \

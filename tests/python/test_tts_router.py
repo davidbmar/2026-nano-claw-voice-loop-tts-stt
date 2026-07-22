@@ -102,3 +102,43 @@ def test_piper_voice_ignores_speed(monkeypatch):
     monkeypatch.setattr(tts, "_synthesize_piper", _fake_piper)
     tts.synthesize("hi", "en_US-lessac-medium", 1.7)
     assert called["args"] == ("hi", "en_US-lessac-medium")
+
+
+def test_kokoro_receives_normalized_scheduler_text(monkeypatch):
+    called = {}
+
+    def _fake_kokoro(text, voice, speed):
+        called["args"] = (text, voice, speed)
+        return _pcm(2400, 24000), 24000
+
+    monkeypatch.setattr(kokoro_client, "synthesize", _fake_kokoro)
+
+    tts.synthesize(
+        "Monday at 10:00 AM — open (for an hour).",
+        "af_heart",
+        1.0,
+    )
+
+    assert called["args"] == (
+        "Monday at 10 AM, open for an hour.",
+        "af_heart",
+        1.0,
+    )
+
+
+def test_sentence_final_chunk_has_160ms_silence_gap(monkeypatch):
+    speech = np.ones(4800, dtype=np.int16).tobytes()
+    monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
+
+    out = tts.synthesize("A complete sentence.", "en_US-lessac-medium", 1.0)
+    gap_bytes = tts.TARGET_RATE * tts.SENTENCE_GAP_MS // 1000 * 2
+
+    assert out[:-gap_bytes] == speech
+    assert out[-gap_bytes:] == bytes(gap_bytes)
+
+
+def test_unpunctuated_final_fragment_has_no_extra_gap(monkeypatch):
+    speech = np.ones(4800, dtype=np.int16).tobytes()
+    monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
+
+    assert tts.synthesize("final fragment", "en_US-lessac-medium", 1.0) == speech

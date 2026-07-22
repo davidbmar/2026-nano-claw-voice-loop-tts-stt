@@ -9,9 +9,13 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample
 
+from voice.text_chunker import normalize_for_speech
+
 log = logging.getLogger("tts")
 
 TARGET_RATE = 48000  # WebRTC Opus expects 48kHz
+SENTENCE_GAP_MS = 160
+_SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 
@@ -136,6 +140,13 @@ def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
+def _with_sentence_gap(text: str, pcm: bytes) -> bytes:
+    """Pad sentence-final PCM so separately queued chunks do not run together."""
+    if pcm and text.rstrip().endswith((".", "!", "?")):
+        return pcm + _SENTENCE_GAP
+    return pcm
+
+
 def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
     """Route to the right engine and return 48kHz mono int16 PCM.
 
@@ -146,11 +157,13 @@ def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
     """
     from voice import voice_catalog
 
+    text = normalize_for_speech(text)
     entry = voice_catalog.lookup(voice_id) if voice_id else None
     if entry and entry["engine"] == "kokoro":
-        return _synthesize_kokoro(text, voice_id, speed)
-    if entry and entry["engine"] == "luxtts":
-        return _synthesize_lux(text, voice_id, speed)
-
-    piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
-    return _synthesize_piper(text, piper_id)
+        pcm = _synthesize_kokoro(text, voice_id, speed)
+    elif entry and entry["engine"] == "luxtts":
+        pcm = _synthesize_lux(text, voice_id, speed)
+    else:
+        piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
+        pcm = _synthesize_piper(text, piper_id)
+    return _with_sentence_gap(text, pcm)

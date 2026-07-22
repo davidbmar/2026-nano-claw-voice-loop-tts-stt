@@ -9,6 +9,14 @@ import { ShellTool } from './tools/shell';
 import { ReadFileTool, WriteFileTool } from './tools/file';
 import { Config } from '../config/schema';
 import { logger } from '../utils/logger';
+import { retrieveTurnEvidence } from './intelligence';
+import {
+  analysisStateFromResult,
+  detectDeepQuestion,
+  guardAnalysisVoiceResponse,
+  resolveExistingAnalysisTurn,
+  runDeepReasoning,
+} from './deep-reasoning';
 
 /**
  * Agent response
@@ -44,6 +52,7 @@ export class AgentLoop {
       maxTokens: config.agents?.defaults?.maxTokens || 4096,
       systemPrompt: config.agents?.defaults?.systemPrompt,
       knowledgeFiles: resolveKnowledgeFiles(config),
+      intelligence: config.agents?.defaults?.intelligence,
       ...agentConfig,
     };
 
@@ -101,10 +110,52 @@ export class AgentLoop {
         const skills = this.skillsLoader.getSkills();
         const tools = this.toolRegistry.getDefinitions();
         const conversationMessages = this.memory.getMessages();
+        const analysisState = iteration === 1 ? this.memory.getAnalysisState() : undefined;
+        const analysisTurn =
+          analysisState && this.config.intelligence
+            ? await resolveExistingAnalysisTurn(
+                conversationMessages,
+                analysisState,
+                this.config.intelligence
+              )
+            : undefined;
+        if (analysisTurn) this.memory.setAnalysisState(analysisTurn.state);
+        const deepRoute =
+          analysisTurn?.deepRoute ||
+          (iteration === 1
+            ? detectDeepQuestion(conversationMessages, this.config.intelligence)
+            : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
+        const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
+        const deepResult =
+          analysisTurn?.result ||
+          (ranDeepTask && this.config.intelligence
+            ? await runDeepReasoning(
+                conversationMessages,
+                this.config.intelligence,
+                undefined,
+                undefined,
+                deepRoute
+              )
+            : undefined);
+        if (deepResult && deepResult.status !== 'succeeded') {
+          const content =
+            "I'm sorry, I couldn't complete the deeper analysis just now. Please try again.";
+          this.memory.addMessage({ role: 'assistant', content });
+          return { content, finishReason: deepResult.errorCode || deepResult.status };
+        }
+        const completedAnalysisState =
+          ranDeepTask && deepResult ? analysisStateFromResult(deepResult) : undefined;
+        if (completedAnalysisState) this.memory.setAnalysisState(completedAnalysisState);
+        const turnEvidence = deepResult
+          ? undefined
+          : await retrieveTurnEvidence(conversationMessages, this.config.intelligence);
+        const modelTools = deepResult ? [] : tools;
         const contextMessages = this.contextBuilder.buildContextMessages(
           conversationMessages,
           skills,
-          tools
+          modelTools,
+          turnEvidence,
+          deepResult
         );
 
         // Call LLM
@@ -113,8 +164,9 @@ export class AgentLoop {
           this.config.model,
           this.config.temperature,
           this.config.maxTokens,
-          tools
+          modelTools
         );
+        const voiceGuard = guardAnalysisVoiceResponse(response.content, deepResult);
 
         logger.debug(
           {
@@ -159,12 +211,14 @@ export class AgentLoop {
           // No tool calls, this is the final response
           this.memory.addMessage({
             role: 'assistant',
-            content: response.content,
+            content: voiceGuard.text,
           });
 
           finalResponse = {
-            content: response.content,
-            finishReason: response.finishReason,
+            content: voiceGuard.text,
+            finishReason: voiceGuard.replaced
+              ? 'analysis_voice_limit_fallback'
+              : response.finishReason,
           };
 
           continueLoop = false;

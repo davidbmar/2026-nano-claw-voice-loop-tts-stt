@@ -1,0 +1,398 @@
+<title>Knowledge Pull — a generic ingestion architecture for voice AI</title>
+<style>
+  :root {
+    /* light (default) — warm paper neutral, deliberately hue-biased */
+    --bg: #F4F1EA;
+    --panel: #FFFFFF;
+    --panel-2: #FBF9F4;
+    --ink: #16181D;
+    --muted: #5D6472;
+    --hair: #E4DFD3;
+    --hair-strong: #D6D0C1;
+    --accent: #D23B3F;      /* voxels red */
+    --accent-ink: #A11E22;
+    --built: #1F9E63;
+    --partial: #B4770B;
+    --spec: #3E5BD6;
+    --proto: #8B4FCF;
+    --shadow: 0 1px 2px rgba(20,20,20,.06), 0 8px 24px rgba(20,20,20,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0B0E14;
+      --panel: #121722;
+      --panel-2: #0F131C;
+      --ink: #E7EAF0;
+      --muted: #8C97AD;
+      --hair: #222A38;
+      --hair-strong: #303B4D;
+      --accent: #F0565A;
+      --accent-ink: #FF8A8D;
+      --built: #3DD68C;
+      --partial: #F5B44B;
+      --spec: #7E97FF;
+      --proto: #C08BF0;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0B0E14; --panel: #121722; --panel-2: #0F131C; --ink: #E7EAF0;
+    --muted: #8C97AD; --hair: #222A38; --hair-strong: #303B4D;
+    --accent: #F0565A; --accent-ink: #FF8A8D; --built: #3DD68C;
+    --partial: #F5B44B; --spec: #7E97FF; --proto: #C08BF0;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F1EA; --panel: #FFFFFF; --panel-2: #FBF9F4; --ink: #16181D;
+    --muted: #5D6472; --hair: #E4DFD3; --hair-strong: #D6D0C1;
+    --accent: #D23B3F; --accent-ink: #A11E22; --built: #1F9E63;
+    --partial: #B4770B; --spec: #3E5BD6; --proto: #8B4FCF;
+    --shadow: 0 1px 2px rgba(20,20,20,.06), 0 8px 24px rgba(20,20,20,.05);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent-ink); text-underline-offset: 3px; }
+
+  /* header */
+  header.top {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--hair);
+  }
+  .top .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .top .meta { font-size: 12px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+
+  /* hero */
+  .hero { padding: 76px 0 40px; border-bottom: 1px solid var(--hair); }
+  .eyebrow { font-size: 12.5px; letter-spacing: .22em; text-transform: uppercase; color: var(--accent-ink); font-weight: 700; }
+  .eyebrow.q { color: var(--muted); }
+  h1 { font-size: clamp(2.2rem, 5.4vw, 3.7rem); line-height: 1.02; letter-spacing: -.03em; margin: 16px 0 0; text-wrap: balance; font-weight: 800; }
+  .lede { font-size: clamp(1.05rem, 2vw, 1.28rem); color: var(--muted); max-width: 60ch; margin: 20px 0 0; }
+  .lede strong { color: var(--ink); font-weight: 650; }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+  .chip {
+    font-size: 13px; padding: 7px 13px; border-radius: 999px;
+    border: 1px solid var(--hair-strong); background: var(--panel);
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .chip b { font-weight: 650; }
+  .chip .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+
+  section { padding: 56px 0; border-bottom: 1px solid var(--hair); }
+  .sec-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+  .sec-num { font-size: 13px; font-weight: 700; color: var(--accent); letter-spacing: .1em; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2.05rem); letter-spacing: -.02em; margin: 0; font-weight: 750; text-wrap: balance; }
+  .sec-lede { color: var(--muted); max-width: 68ch; margin: 10px 0 26px; }
+
+  /* pipeline flow */
+  .flow { display: flex; gap: 0; overflow-x: auto; padding-bottom: 8px; margin: 6px 0 4px; }
+  .stage {
+    flex: 1 0 168px; min-width: 168px; position: relative;
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 12px;
+    padding: 16px 15px; margin-right: 26px; box-shadow: var(--shadow);
+  }
+  .stage:last-child { margin-right: 0; }
+  .stage::after {
+    content: "→"; position: absolute; right: -22px; top: 50%; transform: translateY(-50%);
+    color: var(--hair-strong); font-size: 20px; font-weight: 700;
+  }
+  .stage:last-child::after { content: ""; }
+  .stage .n { font-size: 11px; letter-spacing: .12em; color: var(--muted); font-weight: 700; }
+  .stage .t { font-weight: 700; margin: 4px 0 6px; letter-spacing: -.01em; }
+  .stage .d { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+  .flow-note { font-size: 12.5px; color: var(--muted); margin-top: 14px; }
+  .flow-note b { color: var(--accent-ink); }
+
+  /* cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 12px;
+    padding: 15px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px;
+  }
+  .card h3 { margin: 0; font-size: 15px; letter-spacing: -.01em; font-weight: 680; line-height: 1.3; }
+  .card p { margin: 0; font-size: 13.2px; color: var(--muted); line-height: 1.5; }
+  .card .foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
+  .src { font-size: 11px; color: var(--muted); }
+  .src b { color: var(--ink); font-weight: 600; }
+
+  .badge {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 6px; white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .b-built   { color: var(--built);   background: color-mix(in srgb, var(--built) 14%, transparent);   border-color: color-mix(in srgb, var(--built) 30%, transparent); }
+  .b-partial { color: var(--partial); background: color-mix(in srgb, var(--partial) 15%, transparent); border-color: color-mix(in srgb, var(--partial) 32%, transparent); }
+  .b-spec    { color: var(--spec);    background: color-mix(in srgb, var(--spec) 14%, transparent);    border-color: color-mix(in srgb, var(--spec) 30%, transparent); }
+  .b-proto   { color: var(--proto);   background: color-mix(in srgb, var(--proto) 15%, transparent);   border-color: color-mix(in srgb, var(--proto) 32%, transparent); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 26px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; }
+
+  /* measured callout */
+  .measure {
+    background: var(--panel-2); border: 1px solid var(--hair-strong);
+    border-left: 3px solid var(--accent); border-radius: 12px; padding: 22px 24px;
+  }
+  .measure h3 { margin: 0 0 4px; font-size: 16px; letter-spacing: -.01em; }
+  .measure .sub { font-size: 12.5px; color: var(--muted); margin-bottom: 18px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 18px; }
+  .metric .v { font-size: clamp(1.5rem, 3.4vw, 2rem); font-weight: 800; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+  .metric .v small { font-size: 55%; font-weight: 650; color: var(--muted); letter-spacing: 0; }
+  .metric .l { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+  .metric.good .v { color: var(--built); }
+
+  /* principles */
+  .prin { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .prin .card h3 { display: flex; gap: 9px; align-items: flex-start; }
+  .prin .card h3 .ic { color: var(--accent); font-weight: 800; }
+
+  /* matrix table */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--hair); border-radius: 12px; box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 560px; }
+  thead th { text-align: left; background: var(--panel-2); color: var(--muted); font-weight: 650; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; padding: 12px 16px; border-bottom: 1px solid var(--hair-strong); }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.tech { font-weight: 620; }
+  td .m { color: var(--muted); font-size: 12.5px; }
+
+  .rec { background: var(--panel); border: 1px solid var(--hair); border-radius: 14px; padding: 26px; box-shadow: var(--shadow); }
+  .rec ol { margin: 6px 0 0; padding-left: 20px; }
+  .rec li { margin: 9px 0; }
+  .rec li b { font-weight: 680; }
+  .pill { display:inline-block; font-size: 11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color: var(--accent-ink); border:1px solid color-mix(in srgb, var(--accent) 34%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 2px 8px; border-radius: 999px; }
+
+  footer { padding: 44px 0 72px; color: var(--muted); font-size: 13px; }
+  footer .srcs { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 20px; }
+  footer .srcs .chip { font-size: 12px; }
+
+  @media (max-width: 640px) {
+    .hero { padding: 52px 0 32px; }
+    section { padding: 44px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span> Knowledge&nbsp;Pull</div>
+    <div class="meta">Architecture&nbsp;·&nbsp;2026-07-19</div>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Generic knowledge ingestion for voice AI</div>
+    <h1>How the voice AI learns a website — for any website.</h1>
+    <p class="lede">One pipeline, a small <strong>adapter per source</strong>. The same machine that lets the Space&nbsp;Channel voice answer about launches and UFO cases should answer about the <strong>JFK archive</strong> or an <strong>IBT news feed</strong> — by swapping a config, not forking the code. This is the map of every way we pull knowledge in, what's built today, and what's specced next.</p>
+    <div class="chips">
+      <span class="chip"><span class="k">instance</span> <b>Space Channel</b> · space-news SPA</span>
+      <span class="chip"><span class="k">instance</span> <b>JFK Archive</b> · declassified docs</span>
+      <span class="chip"><span class="k">instance</span> <b>IBT</b> · news + FOIA</span>
+      <span class="chip"><span class="k">engine</span> <b>voice-optimal-RAG</b> · ~57&nbsp;ms retrieval</span>
+    </div>
+  </div>
+</div>
+
+<section id="thesis">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">THESIS</span><h2>The source-connector pattern</h2></div>
+    <p class="sec-lede">Across four of our own repos the shape is identical: a <b>stable five-stage pipeline</b> with a thin, swappable <b>adapter</b> at the acquisition edge. It's the same idea as this codebase's provider registry — one interface, many backends. A new site is a new adapter + a config, never a new pipeline. Everything below hangs on that spine.</p>
+
+    <div class="flow" role="list" aria-label="Five-stage knowledge pipeline">
+      <div class="stage" role="listitem"><div class="n">STAGE 01</div><div class="t">Acquire</div><div class="d">Per-source adapters pull raw data: crawl, feed capture, search &amp; news APIs, document archives, files.</div></div>
+      <div class="stage" role="listitem"><div class="n">STAGE 02</div><div class="t">Distill</div><div class="d">Normalize into sourced records + a compact, cache-friendly digest. Full provenance attached.</div></div>
+      <div class="stage" role="listitem"><div class="n">STAGE 03</div><div class="t">Dedup</div><div class="d">Content-hash IDs drop repeats; overlap raises a corroboration score instead of adding noise.</div></div>
+      <div class="stage" role="listitem"><div class="n">STAGE 04</div><div class="t">Index</div><div class="d">Two axes: an always-on digest for identity, a vector/keyword index for scale and recall.</div></div>
+      <div class="stage" role="listitem"><div class="n">STAGE 05</div><div class="t">Retrieve&nbsp;&amp;&nbsp;Inject</div><div class="d">Per turn: pick the relevant slice and inject it into the prompt — no tool, before the model speaks.</div></div>
+    </div>
+    <p class="flow-note">The <b>voice constraint</b> shapes stage 05: a knowledge <em>tool</em> pauses the loop for approval and wrecks the conversation, so retrieval must be a <b>non-tool, pre-model step</b> measured in tens of milliseconds — and it must always <b>degrade to the digest</b> rather than fail.</p>
+  </div>
+</section>
+
+<section id="acquire">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Acquire — pull the raw data</h2></div>
+    <p class="sec-lede">One thin adapter per source type, all implementing <span class="mono">fetch_new(since)</span> + <span class="mono">fetch_dry_run()</span>. Dry-run sample data ships with each adapter so the whole pipeline runs offline and is testable without API spend.</p>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--built)"></span> Built in nano-claw</span>
+      <span><span class="swatch" style="background:var(--partial)"></span> Partial / exists elsewhere</span>
+      <span><span class="swatch" style="background:var(--spec)"></span> Specced, not built</span>
+      <span><span class="swatch" style="background:var(--proto)"></span> Prototyped</span>
+    </div>
+    <div class="grid">
+      <div class="card"><h3>HTML / SSR crawl</h3><p>Walk pages with stdlib urllib + a parser; zero-dependency and archive-friendly.</p><div class="foot"><span class="src"><b>crawl_site.py</b> · grassyknoll</span><span class="badge b-built">Built</span></div></div>
+      <div class="card"><h3>SPA JSON-feed capture</h3><p>Capture the XHR/JSON feeds a JS site calls — the real data behind a page that renders client-side.</p><div class="foot"><span class="src"><b>site_index.json</b></span><span class="badge b-built">Built</span></div></div>
+      <div class="card"><h3>Pluggable adapter framework</h3><p>An abstract <span class="mono">BaseSourceAdapter</span> so adding a source = writing one subclass.</p><div class="foot"><span class="src"><b>sources/base.py</b> · grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>RSS / Atom / sitemap</h3><p>Structured content lists — the cheapest freshness signal a news site offers.</p><div class="foot"><span class="src">news instances</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Search API (Serper → DuckDuckGo)</h3><p>Planner-generated queries with a keyless HTML fallback; recent coverage without a crawl.</p><div class="foot"><span class="src">ibt · grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>News APIs (GDELT / NewsAPI)</h3><p>Firehose of recent articles by topic, with a <span class="mono">since=24h</span> window.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Document / PDF archives</h3><p>FOIA search + download + text extract (PyPDF2); NARA / Warren&nbsp;Commission batches.</p><div class="foot"><span class="src">grassyknoll · ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>File upload</h3><p>Drag-and-drop PDFs/markdown/docx straight into the index for hand-curated corpora.</p><div class="foot"><span class="src">voice-optimal-RAG</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Collection Ledger (freshness)</h3><p>Per-source <span class="mono">last_collected</span> + counts drive staleness-first, incremental refresh &amp; dry-run planning.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Immutable raw store</h3><p>Keep every fetched doc verbatim (<span class="mono">raw/{source}/{date}/</span>) so re-extraction never re-crawls.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-partial">Partial</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="distill">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">02</span><h2>Distill — raw into sourced knowledge</h2></div>
+    <p class="sec-lede">The atomic unit should be a <b>sourced claim</b>, not a blob: every record carries its origin so answers can be traced. Alongside, a dense digest is precomputed for the always-on prompt.</p>
+    <div class="grid">
+      <div class="card"><h3>Compact digest builder</h3><p>Distill the raw crawl into a dense markdown digest — rollups precomputed, dates normalized, stable sections first for prompt-cache hits.</p><div class="foot"><span class="src"><b>build_knowledge.py</b></span><span class="badge b-built">Built</span></div></div>
+      <div class="card"><h3>Per-topic detail files</h3><p>Fuller ~1–2k-token files per feed (launches, ufo-cases, …) — already generated, ready to inject selectively.</p><div class="foot"><span class="src"><b>knowledge/*.md</b></span><span class="badge b-partial">Built · unused</span></div></div>
+      <div class="card"><h3>Provenance-first record schema</h3><p>Force <span class="mono">source_url, title, type, document_date, retrieved_date, confidence</span> on every item — validated at ingest.</p><div class="foot"><span class="src">grassyknoll evidence.ts</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>LLM structured extraction</h3><p>Claude pulls Events / Entities / Claims / Topics from a fixed taxonomy into typed records.</p><div class="foot"><span class="src">ibt-ufo · grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Multi-format text extraction</h3><p>PyMuPDF (page-aware), python-docx, trafilatura for HTML — one funnel for every file type.</p><div class="foot"><span class="src">voice-RAG · ibt-ufo</span><span class="badge b-partial">Partial</span></div></div>
+      <div class="card"><h3>Content-hash IDs</h3><p><span class="mono">SHA-256(claim|source_url)</span> = free idempotency, safe merges, and stable citation anchors.</p><div class="foot"><span class="src">grassyknoll · ibt</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Date-provenance precedence</h3><p><span class="mono">published_at</span> → date-in-URL → <span class="mono">collected_at</span>, so document date ≠ ingest date.</p><div class="foot"><span class="src">grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Confidence scoring</h3><p><span class="mono">reliability × certainty × corroboration</span>, with per-source-type default reliabilities.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="dedup">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Dedup — turn repetition into trust</h2></div>
+    <p class="sec-lede">Redundancy isn't noise to discard — it's a corroboration signal. Skip what you've already fetched; when duplicates slip through, <b>merge and raise confidence</b> rather than stacking copies.</p>
+    <div class="grid">
+      <div class="card"><h3>Dedup-before-fetch</h3><p>Skip any source whose URL / doc-id is already stored — never re-pull the web.</p><div class="foot"><span class="src">ibt-ufo · grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Merge raises corroboration</h3><p>A second source for the same fact bumps a corroboration factor instead of adding a node.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Three-layer dedup</h3><p>Source (URL) → entity (fuzzy + LLM alias) → event (timestamp window + embedding &gt; 0.85).</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Source-diversity weighting</h3><p>Down-weight over-represented / recently-cited sources; enforce a minimum distinct sources per claim.</p><div class="foot"><span class="src">grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="index">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Index — make it findable, fast</h2></div>
+    <p class="sec-lede">Two axes side by side: a small <b>always-on digest</b> for identity and common facts, and a <b>vector or keyword index</b> for scale and semantic recall. The vector engine already exists and clears the voice latency budget with room to spare.</p>
+    <div class="grid">
+      <div class="card"><h3>Always-on digest + cache split</h3><p>The whole compact digest rides in the system prompt, marked as a cacheable prefix.</p><div class="foot"><span class="src">knowledge.ts · base.ts</span><span class="badge b-built">Built</span></div></div>
+      <div class="card"><h3>Embedded vector index</h3><p>LanceDB in-process + <span class="mono">nomic-embed-text-v1.5</span> (768-d), model warmed at boot — no server hop.</p><div class="foot"><span class="src">voice-optimal-RAG</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>File-level BM25 selection</h3><p>Keyword + feed aliases pick the right detail file — measured 8/8 correct at ~0.014&nbsp;ms.</p><div class="foot"><span class="src"><b>knowledge_retrieval_spike.py</b></span><span class="badge b-proto">Prototyped</span></div></div>
+      <div class="card"><h3>Recursive token chunker</h3><p>500-token chunks, 50 overlap, separator hierarchy; or sentence-boundary 800/100 for prose.</p><div class="foot"><span class="src">voice-RAG · grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Asymmetric task prefixes</h3><p><span class="mono">search_document:</span> vs <span class="mono">search_query:</span>, config-mapped per model — better retrieval, model-agnostic.</p><div class="foot"><span class="src">voice-optimal-RAG</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Structured-record path</h3><p>Pre-structured rows stored 1:1 (no chunk) so a result maps to exactly one launch / doc / date.</p><div class="foot"><span class="src">voice-optimal-RAG</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Full rebuild + auto-migration</h3><p>Nightly re-index; detect embedding-dim change and drop+recreate — model upgrades without a migration project.</p><div class="foot"><span class="src">voice-RAG · build_knowledge</span><span class="badge b-partial">Partial</span></div></div>
+      <div class="card"><h3>Knowledge graph (advanced)</h3><p>Typed nodes/edges + MetaPath2Vec embeddings for cross-source correlation. Heavy; for intel-style corpora.</p><div class="foot"><span class="src">ibt-ufo</span><span class="badge b-spec">Spec</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="retrieve">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Retrieve &amp; Inject — feed the model, mid-conversation</h2></div>
+    <p class="sec-lede">The recommendation: a <b>hybrid</b>. Keep a small always-on core digest for identity, and per turn inject the one relevant detail slice selected from the transcribed question — before the model call, no tool, with citations, degrading to the digest on any failure.</p>
+    <div class="grid">
+      <div class="card"><h3>Digest-in-prompt (core)</h3><p>Always-on identity + rollups + common facts. The floor that everything degrades back to.</p><div class="foot"><span class="src">nano-claw · grassyknoll</span><span class="badge b-built">Built</span></div></div>
+      <div class="card"><h3>Non-tool pre-retrieval</h3><p>Embed/score the STT text → top-k → inject before the LLM turn. Adds tens of ms, no approval pause.</p><div class="foot"><span class="src">voice-RAG design</span><span class="badge b-proto">Prototyped</span></div></div>
+      <div class="card"><h3>Hybrid: core + per-turn suffix</h3><p>Small generated core digest + the selected detail file appended for that turn only.</p><div class="foot"><span class="src"><b>task 055 recommendation</b></span><span class="badge b-proto">Prototyped</span></div></div>
+      <div class="card"><h3>Inline citations</h3><p><span class="mono">[evidence:N]</span> markers back-linking to a <span class="mono">references[]</span> array; persisted per message.</p><div class="foot"><span class="src">grassyknoll</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Citation integrity as a CI gate</h3><p>Tests assert every marker resolves to a real source and hits ≥N distinct sources — grounding becomes machine-checked.</p><div class="foot"><span class="src">grassyknoll tests</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Degrade-to-digest</h3><p>If retrieval errors or times out, fall back to the flat digest — never take the assistant down.</p><div class="foot"><span class="src">principle</span><span class="badge b-spec">Spec</span></div></div>
+      <div class="card"><h3>Model tiering</h3><p>Cheap model for volume turns, strong model for synthesis — pairs with the fallback chain already shipped.</p><div class="foot"><span class="src">grassyknoll · nano-claw</span><span class="badge b-partial">Partial</span></div></div>
+      <div class="card"><h3>Tool lookup (non-voice only)</h3><p>For text channels: a search tool with a hard 2&nbsp;s timeout + graceful-empty so it never stalls.</p><div class="foot"><span class="src">voice-optimal-RAG</span><span class="badge b-spec">Reference</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="measured">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">PROOF</span><h2>Measured on the real Space Channel corpus</h2></div>
+    <p class="sec-lede">A stdlib-only spike ran file-level selection over the eight existing detail files against eight representative questions. It routes correctly every time, at a latency that is effectively free relative to speech.</p>
+    <div class="measure">
+      <h3>knowledge_retrieval_spike.py — reproduced 2026-07-19</h3>
+      <div class="sub">Digest 38,490 chars (~9,622 tok) · 8 detail files 45,026 chars (~11,256 tok) · char/4 estimator</div>
+      <div class="metrics">
+        <div class="metric good"><div class="v">8/8</div><div class="l">Questions routed correctly</div></div>
+        <div class="metric good"><div class="v">0.014<small> ms</small></div><div class="l">Median selection time</div></div>
+        <div class="metric good"><div class="v">0.021<small> ms</small></div><div class="l">Worst p95</div></div>
+        <div class="metric"><div class="v">3.4<small> ms</small></div><div class="l">Cold index build</div></div>
+        <div class="metric"><div class="v">~1–2k<small> tok</small></div><div class="l">Added per turn (1 file vs all&nbsp;8)</div></div>
+      </div>
+    </div>
+    <p class="flow-note" style="margin-top:16px">Injecting <b>all eight</b> detail files would more than double the prompt (+11k tokens every turn). Selecting the <b>one</b> relevant file is the win — and at 0.014&nbsp;ms the selection cost is nothing next to STT, the model, and TTS.</p>
+  </div>
+</section>
+
+<section id="principles">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">RULES</span><h2>Cross-cutting principles</h2></div>
+    <p class="sec-lede">What makes it generic, safe, and voice-ready — independent of which site is plugged in.</p>
+    <div class="prin">
+      <div class="card"><h3><span class="ic">◆</span> One interface, many adapters</h3><p>The connector interface is the product; each site is an adapter + config. Space Channel, JFK, and IBT are three configs of one system.</p></div>
+      <div class="card"><h3><span class="ic">◆</span> Provenance is a schema requirement</h3><p>Every fact stores its source, type, and date, validated at ingest — not bolted on. This is what lets JFK-grade answers cite.</p></div>
+      <div class="card"><h3><span class="ic">◆</span> Freshness by ledger, not by clock</h3><p>Track <span class="mono">last_collected</span> per source and refresh the stalest first; a dirty-flag gate keeps expensive re-indexing rare.</p></div>
+      <div class="card"><h3><span class="ic">◆</span> Voice retrieval is non-tool</h3><p>Embedded store, model warmed at boot, selection under a millisecond, injected before the turn. A tool round-trip blows the budget.</p></div>
+      <div class="card"><h3><span class="ic">◆</span> Always degrade, never fail</h3><p>Retrieval down? Fall back to the digest. A stale answer beats a dead assistant — the same rule as the model fallback chain.</p></div>
+      <div class="card"><h3><span class="ic">◆</span> Four uniform surfaces</h3><p>Every corpus is reachable via CLI, REST, MCP, and Cron — so humans, agents, and schedules all use the same knowledge.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="matrix">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">STATUS</span><h2>nano-claw today → what to build next</h2></div>
+    <p class="sec-lede">Where the current Space Channel pipeline sits against the generic architecture, and the next concrete moves.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Capability</th><th>Status</th><th>Next move</th></tr></thead>
+        <tbody>
+          <tr><td class="tech">Crawl + JSON-feed capture</td><td><span class="badge b-built">Built</span></td><td class="m">Keep; wrap behind the adapter interface.</td></tr>
+          <tr><td class="tech">Digest builder + detail files</td><td><span class="badge b-built">Built</span></td><td class="m">Detail files exist but aren't used at answer time — wire them in.</td></tr>
+          <tr><td class="tech">Digest-in-prompt injection</td><td><span class="badge b-built">Built</span></td><td class="m">Becomes the always-on core + the degrade target.</td></tr>
+          <tr><td class="tech">Per-turn detail selection</td><td><span class="badge b-proto">Prototyped</span></td><td class="m">BM25 spike proves 8/8 @ 0.014 ms — promote to a TS canary + hook in <span class="mono">stepLoopStream</span>.</td></tr>
+          <tr><td class="tech">Semantic vector retrieval</td><td><span class="badge b-spec">Spec</span></td><td class="m">Stand up the LanceDB engine as a second axis for paraphrase/long-tail.</td></tr>
+          <tr><td class="tech">Provenance records + citations</td><td><span class="badge b-spec">Spec</span></td><td class="m">Adopt the sourced-claim schema; add citation-integrity tests.</td></tr>
+          <tr><td class="tech">Source-adapter framework</td><td><span class="badge b-spec">Spec</span></td><td class="m">Extract <span class="mono">BaseSourceAdapter</span>; makes JFK/IBT a config away.</td></tr>
+          <tr><td class="tech">Freshness ledger</td><td><span class="badge b-spec">Spec</span></td><td class="m">Replace mtime-only refresh with a per-source collection ledger.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="next">
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">NEXT</span><h2>Recommended path &amp; prototype</h2></div>
+    <div class="rec">
+      <span class="pill">Recommended for Space Channel</span>
+      <p style="margin:14px 0 0"><b>Hybrid pre-retrieval, digest as floor.</b> Ship in latency-safe order, each step reversible behind a flag:</p>
+      <ol>
+        <li><b>Promote the BM25 spike to production selection</b> — a non-tool step before <span class="mono">providerManager.completeStream</span>; inject the one selected detail file as a per-turn suffix. Core digest stays always-on; retrieval failure degrades to it.</li>
+        <li><b>Broaden the eval</b> beyond 8 clean questions — STT-mangled input, paraphrases, compound and follow-up questions, and no-match cases — before enabling by default.</li>
+        <li><b>Add the vector axis</b> (LanceDB + nomic-embed) for semantic recall where keywords miss, gated by the same latency budget.</li>
+        <li><b>Adopt provenance records + citation tests</b> so answers are sourced — the prerequisite for a JFK-grade corpus.</li>
+        <li><b>Extract the adapter framework + ledger</b> — at which point JFK and IBT become new configs, not new projects.</li>
+      </ol>
+      <p style="margin:16px 0 0" class="flow-note">Prototype status: the file-level selection spike is built and reproduces (8/8, 0.014 ms). Next we design and test the broadened eval and the TypeScript hook — same swap-the-corpus test on a second site validates the "generic" claim.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div style="font-weight:650;color:var(--ink)">Grounded in four repos + the live Space Channel corpus</div>
+    <div class="srcs">
+      <span class="chip"><b>nano-claw</b> · current pipeline</span>
+      <span class="chip"><b>2026-feb-voice-optimal-RAG</b> · retrieval engine</span>
+      <span class="chip"><b>grassyknoll</b> · JFK · provenance</span>
+      <span class="chip"><b>ibt-ufo</b> · news + FOIA graph</span>
+    </div>
+    <div>Every technique above is traceable to a file in one of these repos or a measured spike. Status labels reflect nano-claw as of 2026-07-19.</div>
+  </div>
+</footer>

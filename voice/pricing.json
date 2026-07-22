@@ -1,0 +1,238 @@
+{
+  "as_of": "2026-07-18",
+  "duty_cycle": 0.139,
+  "reference_model": "haiku",
+  "telephony": {
+    "usd_per_minute": 0.007,
+    "usd_per_did_month": 1.0
+  },
+  "models": [
+    {
+      "id": "haiku",
+      "name": "Claude Haiku 4.5",
+      "provider": "Anthropic",
+      "wire_model": "claude-haiku-4-5",
+      "aliases": ["anthropic/claude-haiku-4-5"],
+      "pin": 1.0,
+      "pout": 5.0,
+      "pcache": 0.1,
+      "pcache_write": 1.25,
+      "lat": "1.6–3.2 s",
+      "score": "11/11 every run",
+      "zero": true,
+      "m24": 72.0,
+      "mreal": 10.0
+    },
+    {
+      "id": "grok",
+      "name": "Grok 4.20 fast",
+      "provider": "xAI",
+      "wire_model": "xai/grok-4.20-0309-non-reasoning",
+      "aliases": ["grok-4.20-0309-non-reasoning"],
+      "pin": 2.0,
+      "pout": 6.0,
+      "lat": "0.8–1.3 s",
+      "score": "10–11/11",
+      "zero": false,
+      "m24": 130.0,
+      "mreal": 18.0
+    },
+    {
+      "id": "scout",
+      "name": "Llama 4 Scout",
+      "provider": "OpenRouter",
+      "wire_model": "openrouter/meta-llama/llama-4-scout",
+      "aliases": ["meta-llama/llama-4-scout"],
+      "pin": 0.08,
+      "pout": 0.3,
+      "lat": "0.7–2.5 s",
+      "score": "10–11/11",
+      "zero": false,
+      "m24": 13.4,
+      "mreal": 1.86
+    },
+    {
+      "id": "gptoss",
+      "name": "GPT-OSS 20B",
+      "provider": "OpenRouter",
+      "wire_model": "openrouter/openai/gpt-oss-20b:nitro",
+      "aliases": ["openai/gpt-oss-20b", "groq/openai/gpt-oss-20b"],
+      "pin": 0.03,
+      "pout": 0.14,
+      "lat": "0.45–1.5 s",
+      "score": "10/11",
+      "zero": false,
+      "m24": 4.4,
+      "mreal": 0.61
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek V4 Flash",
+      "provider": "DeepSeek",
+      "wire_model": "deepseek/deepseek-v4-flash",
+      "aliases": ["deepseek-v4-flash"],
+      "pin": 0.07,
+      "pout": 0.28,
+      "pcache": 0.014,
+      "lat": "3.4–7.2 s",
+      "score": "11/11",
+      "zero": false,
+      "m24": 5.0,
+      "mreal": 0.7
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen Flash",
+      "provider": "Alibaba",
+      "wire_model": "qwen/qwen-flash",
+      "aliases": ["qwen-flash"],
+      "pin": 0.05,
+      "pout": 0.4,
+      "lat": "1.6–2.0 s",
+      "score": "10/11",
+      "zero": false,
+      "m24": 9.2,
+      "mreal": 1.28
+    },
+    {
+      "id": "conversation-sonnet",
+      "name": "Claude Sonnet 4.5",
+      "provider": "Anthropic",
+      "wire_model": "anthropic/claude-sonnet-4-5",
+      "aliases": ["claude-sonnet-4-5"],
+      "pin": 3.0,
+      "pout": 15.0,
+      "pcache": 0.3,
+      "pcache_write": 3.75,
+      "fleet": false
+    },
+    {
+      "id": "conversation-opus",
+      "name": "Claude Opus 4.5",
+      "provider": "Anthropic",
+      "wire_model": "anthropic/claude-opus-4-5",
+      "aliases": ["claude-opus-4-5"],
+      "pin": 5.0,
+      "pout": 25.0,
+      "pcache": 0.5,
+      "pcache_write": 6.25,
+      "fleet": false
+    },
+    {
+      "id": "conversation-gemini-lite",
+      "name": "Gemini Flash-Lite",
+      "provider": "Google",
+      "wire_model": "gemini/gemini-flash-lite-latest",
+      "aliases": ["gemini-flash-lite-latest"],
+      "pin": 0.1,
+      "pout": 0.4,
+      "fleet": false
+    },
+    {
+      "id": "conversation-gemini-flash",
+      "name": "Gemini Flash",
+      "provider": "Google",
+      "wire_model": "gemini/gemini-flash-latest",
+      "aliases": ["gemini-flash-latest"],
+      "pin": 0.3,
+      "pout": 2.5,
+      "fleet": false
+    },
+    {
+      "id": "conversation-deepseek-chat",
+      "name": "DeepSeek Chat",
+      "provider": "DeepSeek",
+      "wire_model": "deepseek/deepseek-chat",
+      "aliases": ["deepseek-chat"],
+      "pin": 0.28,
+      "pout": 1.1,
+      "fleet": false
+    },
+    {
+      "id": "conversation-groq-llama",
+      "name": "Llama 3.3 70B",
+      "provider": "Groq",
+      "wire_model": "groq/llama-3.3-70b-versatile",
+      "aliases": ["llama-3.3-70b-versatile"],
+      "pin": 0.59,
+      "pout": 0.79,
+      "fleet": false
+    },
+    {
+      "id": "conversation-qwen-plus",
+      "name": "Qwen Plus",
+      "provider": "Alibaba",
+      "wire_model": "dashscope/qwen-plus",
+      "aliases": ["qwen/qwen-plus", "qwen-plus"],
+      "pin": 0.4,
+      "pout": 1.2,
+      "fleet": false
+    },
+    {
+      "id": "conversation-gpt-4o-mini",
+      "name": "GPT-4o mini",
+      "provider": "OpenAI",
+      "wire_model": "openai/gpt-4o-mini",
+      "aliases": ["gpt-4o-mini"],
+      "pin": 0.15,
+      "pout": 0.6,
+      "fleet": false
+    }
+  ],
+  "components": [
+    {
+      "id": "telephony",
+      "ledger_component": "telephony",
+      "label": "Telephony (Telnyx)",
+      "color": "#ff775f",
+      "per_minute": 0.007,
+      "unit_rates": {"minutes": 0.007},
+      "math": "2 legs × $0.0035/min + $1.00/DID·month (amortized in business totals, not the bar)"
+    },
+    {
+      "id": "sched",
+      "ledger_component": "scheduler_llm",
+      "label": "Scheduler LLM",
+      "color": "#ffca5c",
+      "per_minute": 0.01,
+      "unit_rates": {},
+      "math": "Supervisor input, output, and cached tokens × the selected model's $/1M rates"
+    },
+    {
+      "id": "agent",
+      "ledger_component": "conversation_llm",
+      "label": "Conversation LLM",
+      "color": "#e8a2ff",
+      "per_minute": 0.004,
+      "unit_rates": {},
+      "math": "Conversation input, output, and cached tokens × the call-end model rate snapshot"
+    },
+    {
+      "id": "stt",
+      "ledger_component": "stt",
+      "label": "STT (Whisper, local)",
+      "color": "#72ddff",
+      "per_minute": 0.0006,
+      "unit_rates": {"audio_seconds": 0.00001},
+      "math": "Audio seconds submitted × local compute amortization per audio-second"
+    },
+    {
+      "id": "tts",
+      "ledger_component": "tts",
+      "label": "TTS (Kokoro/Lux, local)",
+      "color": "#52f5a8",
+      "per_minute": 0.0009,
+      "unit_rates": {"characters": 0.000001},
+      "math": "Characters synthesized × local/API-equivalent character rate"
+    },
+    {
+      "id": "infra",
+      "ledger_component": "infra",
+      "label": "Infra (nodes + tunnel)",
+      "color": "#7181d8",
+      "per_minute": 0.002,
+      "unit_rates": {"call_minutes": 0.002},
+      "math": "Connected call minutes × node and tunnel amortization per minute"
+    }
+  ]
+}

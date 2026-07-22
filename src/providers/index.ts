@@ -4,6 +4,12 @@ import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider } from './base';
 import { findProviderByModel } from './registry';
+import { completeWithFallback, streamWithFallback } from './fallback';
+
+/** Gateway providers that can route an arbitrary model id (so a fallback model
+ * is reachable even without its own direct provider key). */
+const GATEWAY_PROVIDERS = ['openrouter', 'aihubmix'];
+const DEFAULT_FALLBACK_TIMEOUT_MS = 4000;
 
 /**
  * Provider manager - handles provider selection and instantiation
@@ -143,7 +149,46 @@ export class ProviderManager {
   }
 
   /**
-   * Complete a chat conversation
+   * True when `model` can actually be routed: its own provider has a key, or a
+   * gateway provider (which can serve any model id) is configured. Used to skip
+   * fallback models whose provider isn't set up, rather than misrouting them.
+   */
+  private isModelRoutable(model: string): boolean {
+    const providers = (this.config.providers as Record<string, ProviderConfig>) || {};
+    const spec = findProviderByModel(model);
+    if (spec && providers[spec.name]?.apiKey) return true;
+    return GATEWAY_PROVIDERS.some((g) => providers[g]?.apiKey);
+  }
+
+  /**
+   * Ordered model chain: the requested model first (always tried, preserving
+   * prior behavior), then each configured fallback whose provider is routable.
+   * Duplicates and unroutable fallbacks are dropped.
+   */
+  private resolveModelChain(model: string): string[] {
+    const fallbacks = this.config.agents?.defaults?.fallbackModels || [];
+    const chain = [model];
+    const seen = new Set([model]);
+    for (const m of fallbacks) {
+      if (!m || seen.has(m)) continue;
+      seen.add(m);
+      if (this.isModelRoutable(m)) {
+        chain.push(m);
+      } else {
+        logger.debug({ model: m }, 'Fallback model skipped (provider not configured)');
+      }
+    }
+    return chain;
+  }
+
+  private fallbackTimeoutMs(): number {
+    return this.config.agents?.defaults?.fallbackTimeoutMs ?? DEFAULT_FALLBACK_TIMEOUT_MS;
+  }
+
+  /**
+   * Complete a chat conversation, falling back through the configured model
+   * chain on error or timeout. With no fallbacks configured the chain is just
+   * the requested model, so behavior is unchanged.
    */
   async complete(
     messages: Message[],
@@ -152,19 +197,34 @@ export class ProviderManager {
     maxTokens?: number,
     tools?: ToolDefinition[]
   ): Promise<LLMResponse> {
-    const providerName = this.detectProvider(model);
-    const provider = this.getProviderInstance(providerName);
-
-    logger.info(
-      { provider: providerName, model, messageCount: messages.length },
-      'Completing chat'
+    const chain = this.resolveModelChain(model);
+    return completeWithFallback(
+      chain.map((m) => ({
+        label: m,
+        run: () => {
+          const providerName = this.detectProvider(m);
+          logger.info(
+            { provider: providerName, model: m, messageCount: messages.length },
+            'Completing chat'
+          );
+          return this.getProviderInstance(providerName).complete(
+            messages,
+            m,
+            temperature,
+            maxTokens,
+            tools
+          );
+        },
+      })),
+      this.fallbackTimeoutMs()
     );
-
-    return provider.complete(messages, model, temperature, maxTokens, tools);
   }
 
   /**
-   * Streaming variant of complete() — routes to the model's provider.
+   * Streaming variant of complete() with time-to-first-token fallback. If the
+   * current model produces no first token within the timeout (or errors before
+   * one), the next routable model in the chain is tried. Once the first token
+   * streams, the model is committed for the rest of the reply.
    */
   async *completeStream(
     messages: Message[],
@@ -173,14 +233,26 @@ export class ProviderManager {
     maxTokens?: number,
     tools?: ToolDefinition[]
   ): AsyncGenerator<StreamEvent> {
-    const providerName = this.detectProvider(model);
-    const provider = this.getProviderInstance(providerName);
-
-    logger.info(
-      { provider: providerName, model, messageCount: messages.length },
-      'Completing chat (stream)'
+    const chain = this.resolveModelChain(model);
+    yield* streamWithFallback(
+      chain.map((m) => ({
+        label: m,
+        run: () => {
+          const providerName = this.detectProvider(m);
+          logger.info(
+            { provider: providerName, model: m, messageCount: messages.length },
+            'Completing chat (stream)'
+          );
+          return this.getProviderInstance(providerName).completeStream(
+            messages,
+            m,
+            temperature,
+            maxTokens,
+            tools
+          );
+        },
+      })),
+      this.fallbackTimeoutMs()
     );
-
-    yield* provider.completeStream(messages, model, temperature, maxTokens, tools);
   }
 }

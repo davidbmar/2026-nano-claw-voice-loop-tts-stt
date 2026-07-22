@@ -1,16 +1,19 @@
-"""Phone-audio primitives: G.711 μ-law codec, resampling, and endpointing.
+"""Phone-audio primitives: PCMU/L16 codecs, resampling, and endpointing.
 
-The Telnyx media WebSocket carries base64 μ-law @ 8 kHz in both directions;
-the rest of nano-claw speaks PCM16 (STT accepts any rate via X-Sample-Rate,
-TTS emits 48 kHz). This module owns every conversion in between, plus the
-silence-based utterance endpointer phone callers need (there is no mic
-button on a phone).
+The Telnyx media WebSocket carries base64 PCMU @ 8 kHz by default or raw L16
+PCM @ 16 kHz when wideband audio is enabled. The rest of nano-claw speaks
+PCM16 (STT accepts any rate via X-Sample-Rate, TTS emits 48 kHz). This module
+owns every conversion in between, plus the silence-based utterance endpointer
+phone callers need (there is no mic button on a phone).
 
 μ-law kernels adapted from riff/phone/audio_codec.py (same owner) — they
 have carried live PSTN traffic on this exact number.
 """
 
 from __future__ import annotations
+
+import os
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -21,6 +24,133 @@ TELNYX_RATE = 8000
 TTS_RATE = 48000
 FRAME_MS = 20  # Telnyx media frame duration
 FRAME_SAMPLES = TELNYX_RATE * FRAME_MS // 1000  # 160 samples / 20 ms
+
+PCMU_RMS_MIN = 350.0
+PCMU_RMS_RATIO = 0.0
+L16_RMS_MIN = 120.0
+L16_RMS_RATIO = 3.0
+NOISE_FLOOR_ALPHA = 0.05
+
+PCM16_FULL_SCALE = 32768.0
+PCM16_MIN = -32768.0
+PCM16_MAX = 32767.0
+DEFAULT_PHONE_GAIN_TARGET_DBFS = -3.0
+MAX_PHONE_GAIN_DB = 12.0
+MAX_PHONE_GAIN_STEP_DB = 3.0
+
+
+@dataclass(frozen=True)
+class GainAdjustment:
+    """One sentence's normalized PCM and the decision that produced it."""
+
+    pcm16: bytes
+    measured_peak_dbfs: float
+    applied_gain_db: float
+
+
+class SentencePeakNormalizer:
+    """Measure, decide, and apply bounded peak gain to PCM16 sentences.
+
+    PCM16 dBFS uses ``20 * log10(peak / 32768)``: an absolute sample peak of
+    32768 is 0 dBFS, and digital silence is ``-inf`` dBFS. For each audible
+    sentence, :meth:`decide` moves its measured peak toward ``target_dbfs``,
+    caps amplification at ``max_gain_db``, then limits the change from the
+    preceding sentence to ``max_step_db``. Call :meth:`reset` at a reply
+    boundary so smoothing never depends on module-global state.
+
+    Gain is applied in float64. A final clamp to the exact PCM16 bounds is a
+    true full-scale guard before conversion, so an aggressive smoothed gain
+    cannot wrap around on ``astype(np.int16)``. Disabled and zero-gain paths
+    return the original bytes, which makes bypass bit-exact.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_dbfs: float = DEFAULT_PHONE_GAIN_TARGET_DBFS,
+        max_gain_db: float = MAX_PHONE_GAIN_DB,
+        max_step_db: float = MAX_PHONE_GAIN_STEP_DB,
+        enabled: bool = True,
+    ) -> None:
+        if not np.isfinite(target_dbfs):
+            raise ValueError("target_dbfs must be finite")
+        if not np.isfinite(max_gain_db) or max_gain_db < 0.0:
+            raise ValueError("max_gain_db must be finite and non-negative")
+        if not np.isfinite(max_step_db) or max_step_db < 0.0:
+            raise ValueError("max_step_db must be finite and non-negative")
+        self.target_dbfs = float(target_dbfs)
+        self.max_gain_db = float(max_gain_db)
+        self.max_step_db = float(max_step_db)
+        self.enabled = bool(enabled)
+        self.reset()
+
+    @property
+    def previous_gain_db(self) -> float | None:
+        """Gain used for the preceding sentence in this reply."""
+        return self._previous_gain_db
+
+    def reset(self) -> None:
+        """Start a reply with no gain-smoothing history."""
+        self._previous_gain_db: float | None = None
+
+    @staticmethod
+    def measure(pcm16: bytes) -> float:
+        """Return the absolute sample peak in dBFS; silence is ``-inf``."""
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        if not len(samples):
+            return float("-inf")
+        peak = float(np.max(np.abs(samples.astype(np.float64))))
+        if peak == 0.0:
+            return float("-inf")
+        return float(20.0 * np.log10(peak / PCM16_FULL_SCALE))
+
+    def decide(self, measured_peak_dbfs: float) -> float:
+        """Choose this sentence's gain and advance reply-local smoothing."""
+        if not self.enabled:
+            return 0.0
+        if np.isfinite(measured_peak_dbfs):
+            desired_gain_db = min(
+                self.target_dbfs - float(measured_peak_dbfs),
+                self.max_gain_db,
+            )
+        else:
+            # Silence stays byte-identical, but a zero-gain decision still
+            # advances smoothing so every consecutive sentence obeys the
+            # same maximum step.
+            desired_gain_db = 0.0
+        if self._previous_gain_db is None:
+            applied_gain_db = desired_gain_db
+        else:
+            applied_gain_db = float(
+                np.clip(
+                    desired_gain_db,
+                    self._previous_gain_db - self.max_step_db,
+                    self._previous_gain_db + self.max_step_db,
+                )
+            )
+        self._previous_gain_db = applied_gain_db
+        return applied_gain_db
+
+    @staticmethod
+    def apply(pcm16: bytes, gain_db: float) -> bytes:
+        """Apply ``gain_db`` in float, guard PCM16 full scale, and convert."""
+        if gain_db == 0.0 or not pcm16:
+            return pcm16
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        scale = 10.0 ** (float(gain_db) / 20.0)
+        gained = samples.astype(np.float64) * scale
+        guarded = np.clip(gained, PCM16_MIN, PCM16_MAX)
+        return guarded.astype(np.int16).tobytes()
+
+    def normalize(self, pcm16: bytes) -> GainAdjustment:
+        """Run measure → decide → apply for one PCM16 sentence."""
+        measured_peak_dbfs = self.measure(pcm16)
+        applied_gain_db = self.decide(measured_peak_dbfs)
+        return GainAdjustment(
+            pcm16=self.apply(pcm16, applied_gain_db),
+            measured_peak_dbfs=measured_peak_dbfs,
+            applied_gain_db=applied_gain_db,
+        )
 
 
 def ulaw_encode(pcm16: np.ndarray) -> bytes:
@@ -56,6 +186,7 @@ def ulaw_decode(ulaw_bytes: bytes) -> np.ndarray:
 
 
 _FIR_48K_TO_8K: np.ndarray | None = None
+_FIR_48K_TO_16K: np.ndarray | None = None
 
 
 def _fir_48k_to_8k() -> np.ndarray:
@@ -75,6 +206,25 @@ def _fir_48k_to_8k() -> np.ndarray:
         taps /= taps.sum()
         _FIR_48K_TO_8K = taps
     return _FIR_48K_TO_8K
+
+
+def _fir_48k_to_16k() -> np.ndarray:
+    """Unity-gain Hamming-windowed sinc lowpass for 48k→16k decimation.
+
+    A 7.8 kHz cutoff preserves the wideband speech range while remaining
+    below the 8 kHz Nyquist frequency of the 16 kHz output.
+    """
+    global _FIR_48K_TO_16K
+    if _FIR_48K_TO_16K is None:
+        num_taps = 127
+        cutoff_hz = 7800.0
+        n = np.arange(num_taps, dtype=np.float64) - ((num_taps - 1) / 2.0)
+        normalized = cutoff_hz / TTS_RATE
+        taps = 2.0 * normalized * np.sinc(2.0 * normalized * n)
+        taps *= np.hamming(num_taps)
+        taps /= taps.sum()
+        _FIR_48K_TO_16K = taps
+    return _FIR_48K_TO_16K
 
 
 def resample_8k_to_16k(pcm16_8k: np.ndarray) -> np.ndarray:
@@ -102,32 +252,163 @@ def resample_48k_to_8k(pcm16_48k: np.ndarray) -> np.ndarray:
     return np.clip(decimated, -32768, 32767).astype(np.int16)
 
 
-class UtteranceEndpointer:
-    """Energy-based end-of-utterance detection for 8 kHz phone frames.
+def resample_48k_to_16k(pcm16_48k: np.ndarray) -> np.ndarray:
+    """Downsample 48 kHz PCM16 to 16 kHz: FIR lowpass then decimate by 3."""
+    if len(pcm16_48k) == 0:
+        return np.zeros(0, dtype=np.int16)
+    filtered = np.convolve(pcm16_48k.astype(np.float64), _fir_48k_to_16k(), mode="same")
+    decimated = filtered[::3]
+    return np.clip(decimated, -32768, 32767).astype(np.int16)
 
-    feed() consumes PCM16 frames and returns a completed utterance's PCM
-    bytes when the caller has spoken and then gone quiet, else None.
 
-    Tuned for PSTN: μ-law noise floors are high, so the speech threshold is
-    RMS over int16 samples rather than anything adaptive. Utterances are
-    capped so a monologue (or hold music) can't buffer unbounded audio.
+def _nonnegative_env_float(name: str, default: float) -> float:
+    """Read a finite, non-negative float from the environment."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if np.isfinite(value) and value >= 0.0 else default
+
+
+class NoiseFloorEstimator:
+    """Rolling non-speech RMS floor and its adaptive speech threshold.
+
+    ``floor`` and ``min_threshold`` are linear int16 RMS values. Each frame
+    already classified as non-speech updates ``floor`` with an exponential
+    moving average; speech frames leave it untouched. The resulting decision
+    boundary is always ``max(min_threshold, floor * ratio)``.
     """
 
     def __init__(
         self,
         *,
-        rms_threshold: float = 350.0,
+        min_threshold: float,
+        ratio: float,
+        alpha: float = NOISE_FLOOR_ALPHA,
+    ) -> None:
+        if not np.isfinite(min_threshold) or min_threshold < 0.0:
+            raise ValueError("min_threshold must be finite and non-negative")
+        if not np.isfinite(ratio) or ratio < 0.0:
+            raise ValueError("ratio must be finite and non-negative")
+        if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be finite and in (0, 1]")
+        self.min_threshold = float(min_threshold)
+        self.ratio = float(ratio)
+        self.alpha = float(alpha)
+        self.floor = 0.0
+        self._initialized = False
+
+    @property
+    def effective_threshold(self) -> float:
+        """Current speech boundary in linear int16 RMS units."""
+        return max(self.min_threshold, self.floor * self.ratio)
+
+    def observe(self, rms: float, *, is_speech: bool) -> None:
+        """Observe one classified frame, updating only for non-speech."""
+        if is_speech or not np.isfinite(rms):
+            return
+        sample = max(0.0, float(rms))
+        if not self._initialized:
+            self.floor = sample
+            self._initialized = True
+            return
+        self.floor += self.alpha * (sample - self.floor)
+
+    def classify(self, rms: float) -> bool:
+        """Classify one RMS sample, then learn from it when it is noise."""
+        is_speech = float(rms) >= self.effective_threshold
+        self.observe(rms, is_speech=is_speech)
+        return is_speech
+
+
+class UtteranceEndpointer:
+    """Energy-based end-of-utterance detection for PCM16 phone frames.
+
+    feed() consumes PCM16 frames and returns a completed utterance's PCM
+    bytes when the caller has spoken and then gone quiet, else None.
+
+    Energy and floor values are linear RMS over int16 samples (0–32768). The
+    rolling floor is an EMA of frames classified non-speech, and the effective
+    threshold is ``max(rms_min, floor * rms_ratio)``. The floor is frozen on
+    speech so a caller's voice cannot raise the boundary and swallow their
+    next soft word. By default PCMU retains the historical fixed 350-RMS
+    decision exactly (its ratio is zero); L16 uses a lower minimum plus the
+    adaptive floor. ``NANO_CLAW_PHONE_RMS_MIN`` and
+    ``NANO_CLAW_PHONE_RMS_RATIO`` override those codec defaults.
+
+    Utterances are capped so a monologue (or hold music) cannot buffer
+    unbounded audio.
+    """
+
+    def __init__(
+        self,
+        *,
+        rms_threshold: float | None = None,
         min_speech_ms: int = 250,
         end_silence_ms: int = 700,
         max_utterance_ms: int = 15_000,
         preroll_ms: int = 240,
+        rate_hz: int = 8000,
+        codec: str | None = None,
+        rms_min: float | None = None,
+        rms_ratio: float | None = None,
+        noise_floor_alpha: float = NOISE_FLOOR_ALPHA,
     ) -> None:
-        self.rms_threshold = rms_threshold
+        self.codec = (codec or ("l16" if rate_hz == 16000 else "pcmu")).lower()
+        if self.codec not in ("pcmu", "l16"):
+            raise ValueError("codec must be 'pcmu' or 'l16'")
+        if rms_threshold is not None and rms_min is not None:
+            raise ValueError("use rms_threshold or rms_min, not both")
+        default_min = L16_RMS_MIN if self.codec == "l16" else PCMU_RMS_MIN
+        default_ratio = L16_RMS_RATIO if self.codec == "l16" else PCMU_RMS_RATIO
+        explicit_min = rms_min if rms_min is not None else rms_threshold
+        resolved_min = (
+            float(explicit_min)
+            if explicit_min is not None
+            else _nonnegative_env_float("NANO_CLAW_PHONE_RMS_MIN", default_min)
+        )
+        resolved_ratio = (
+            float(rms_ratio)
+            if rms_ratio is not None
+            else _nonnegative_env_float("NANO_CLAW_PHONE_RMS_RATIO", default_ratio)
+        )
+        self.rms_min = resolved_min
+        self.rms_ratio = resolved_ratio
+        # Preserve the public legacy attribute: for PCMU's default ratio=0 it
+        # remains the exact fixed threshold used before adaptive endpointing.
+        self.rms_threshold = resolved_min
+        self._noise_floor = NoiseFloorEstimator(
+            min_threshold=resolved_min,
+            ratio=resolved_ratio,
+            alpha=noise_floor_alpha,
+        )
+        self.current_rms = 0.0
         self.min_speech_ms = min_speech_ms
         self.end_silence_ms = end_silence_ms
         self.max_utterance_ms = max_utterance_ms
-        self._preroll_frames = max(1, preroll_ms // FRAME_MS)
+        self.rate_hz = rate_hz
+        frame_samples = max(1, rate_hz * FRAME_MS // 1000)
+        preroll_samples = rate_hz * preroll_ms // 1000
+        self._preroll_frames = max(1, preroll_samples // frame_samples)
         self.reset()
+
+    @property
+    def noise_floor(self) -> float:
+        """Current rolling non-speech floor in linear int16 RMS units."""
+        return self._noise_floor.floor
+
+    @property
+    def effective_threshold(self) -> float:
+        """Current energy-mode speech threshold in int16 RMS units."""
+        return self._noise_floor.effective_threshold
+
+    @property
+    def in_utterance(self) -> bool:
+        """Whether caller audio is currently being accumulated."""
+        return self._in_utterance
 
     def reset(self) -> None:
         self._frames: list[np.ndarray] = []
@@ -144,19 +425,24 @@ class UtteranceEndpointer:
             return
         self._in_utterance = True
         self._frames = list(frames)
-        self._speech_ms = sum(len(f) for f in frames) * 1000 // TELNYX_RATE
+        self._speech_ms = sum(len(f) for f in frames) * 1000 // self.rate_hz
         self._silence_ms = 0
 
     def feed(self, frame: np.ndarray, is_speech: bool | None = None) -> bytes | None:
-        """Consume one PCM16 frame (any length ≥ 1 sample at 8 kHz).
+        """Consume one PCM16 frame (any length ≥ 1 sample at ``rate_hz``).
 
         is_speech: externally-decided speech flag (e.g. Silero VAD). When
-        None, falls back to the internal RMS threshold (energy mode).
+        None, uses the adaptive energy threshold. External decisions remain
+        authoritative but still teach the floor when they classify non-speech.
         """
-        frame_ms = len(frame) * 1000 // TELNYX_RATE
+        frame_ms = len(frame) * 1000 // self.rate_hz
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
+        self.current_rms = rms
         if is_speech is None:
-            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
-            is_speech = rms >= self.rms_threshold
+            is_speech = self._noise_floor.classify(rms)
+        else:
+            is_speech = bool(is_speech)
+            self._noise_floor.observe(rms, is_speech=is_speech)
 
         if not self._in_utterance:
             # Keep a short preroll so the first syllable isn't clipped.
@@ -178,7 +464,7 @@ class UtteranceEndpointer:
         else:
             self._silence_ms += frame_ms
 
-        utterance_ms = sum(len(f) for f in self._frames) * 1000 // TELNYX_RATE
+        utterance_ms = sum(len(f) for f in self._frames) * 1000 // self.rate_hz
         ended = (
             self._silence_ms >= self.end_silence_ms
             or utterance_ms >= self.max_utterance_ms
@@ -251,9 +537,11 @@ class BargeInDetector:
         rms_threshold: float = 550.0,
         trigger_ms: int = 240,
         window_ms: int = 800,
+        rate_hz: int = 8000,
     ) -> None:
         self.rms_threshold = rms_threshold
         self.trigger_ms = trigger_ms
+        self.rate_hz = rate_hz
         self._window_frames = max(1, window_ms // FRAME_MS)
         self.reset()
 
@@ -273,7 +561,7 @@ class BargeInDetector:
         self._recent.append((frame, is_speech))
         if len(self._recent) > self._window_frames:
             self._recent.pop(0)
-        speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // TELNYX_RATE
+        speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // self.rate_hz
         return speech_ms >= self.trigger_ms
 
     def take_frames(self) -> list[np.ndarray]:
@@ -289,3 +577,14 @@ def pcm48k_to_ulaw_frames(pcm48k_bytes: bytes) -> list[bytes]:
     pcm8k = resample_48k_to_8k(pcm48k)
     ulaw = ulaw_encode(pcm8k)
     return [ulaw[i : i + FRAME_SAMPLES] for i in range(0, len(ulaw), FRAME_SAMPLES)]
+
+
+def pcm48k_to_l16_frames(pcm48k_bytes: bytes) -> list[bytes]:
+    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in 20 ms Telnyx frames."""
+    pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
+    pcm16k = resample_48k_to_16k(pcm48k)
+    frame_samples = 16000 * FRAME_MS // 1000
+    return [
+        pcm16k[i : i + frame_samples].tobytes()
+        for i in range(0, len(pcm16k), frame_samples)
+    ]

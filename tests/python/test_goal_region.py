@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from voice import flow_session
 from voice.goal_region import FreeWindow, GoalRegionRunner, RegionConfig
 
 
@@ -47,7 +48,10 @@ class RawMessages:
             raise AssertionError("supervisor should not have been called")
         if self.clock is not None:
             self.clock.value += 0.25
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def raw_response(text, *, stop_reason="end_turn"):
@@ -77,7 +81,13 @@ def response(
     }
 
 
-def config(*, max_turns=6, deadline_s=60):
+def config(
+    *,
+    max_turns=6,
+    deadline_s=60,
+    escape_on_provider_failure=True,
+    suppress_premature_confirmation=True,
+):
     return RegionConfig(
         goal="Book a plumbing appointment.",
         persona="You are a helpful plumbing scheduler.",
@@ -94,6 +104,8 @@ def config(*, max_turns=6, deadline_s=60):
         escape_phrases=("operator", "human", "goodbye"),
         max_turns=max_turns,
         deadline_s=deadline_s,
+        escape_on_provider_failure=escape_on_provider_failure,
+        suppress_premature_confirmation=suppress_premature_confirmation,
     )
 
 
@@ -323,6 +335,25 @@ def test_transcript_and_structured_api_shape_grow_across_turns(monkeypatch):
     ]
 
 
+def test_runtime_region_model_switch_applies_to_existing_runner(monkeypatch):
+    monkeypatch.setattr(flow_session, "_region_model", None)
+    monkeypatch.setenv("SCHED_EVAL_MODEL", "environment-supervisor")
+    client = FakeClient([
+        response(reply="What day works?"),
+        response(reply="What time works?"),
+    ])
+    runner = GoalRegionRunner(config(), [], client=client)
+
+    runner.turn("I need a plumber.")
+    assert flow_session.set_region_model("claude-haiku-4-5") is True
+    runner.turn("Monday works.")
+
+    assert [call["model"] for call in client.messages.calls] == [
+        "environment-supervisor",
+        "claude-haiku-4-5",
+    ]
+
+
 def test_truncated_supervisor_output_retries_once_then_succeeds():
     recovered = response(reply="Which day works?", job="leak repair")
     messages = RawMessages([
@@ -390,4 +421,179 @@ def test_max_tokens_stop_reason_retries_even_with_valid_json():
     assert len(messages.calls) == 2
     assert messages.calls[0] == messages.calls[1]
     assert turn.reply == "What time works for you?"
+    assert turn.rejected == []
+
+
+def test_provider_failure_retries_once_and_returns_successful_turn():
+    recovered = response(reply="What time works for you?")
+    messages = RawMessages([
+        TimeoutError("first request timed out"),
+        raw_response(json.dumps(recovered)),
+    ])
+    runner = GoalRegionRunner(
+        config(), [], client=SimpleNamespace(messages=messages)
+    )
+
+    turn = runner.turn("I need an appointment.")
+
+    assert len(messages.calls) == 2
+    assert messages.calls[0] == messages.calls[1]
+    assert turn.reply == "What time works for you?"
+    assert turn.exit is None
+    assert turn.rejected == []
+
+
+def test_two_provider_failures_degrade_without_raising():
+    messages = RawMessages([
+        TimeoutError("first request timed out"),
+        TimeoutError("retry timed out"),
+    ])
+    runner = GoalRegionRunner(
+        config(), [], client=SimpleNamespace(messages=messages)
+    )
+
+    turn = runner.turn("I need an appointment.")
+
+    assert len(messages.calls) == 2
+    assert turn.reply == "Sorry — could you say that again?"
+    assert turn.exit is None
+    assert turn.rejected == [
+        "supervisor: provider failure TimeoutError (after retry)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("escape_on_provider_failure", "expected_second_exit"),
+    [(True, "escape"), (False, None)],
+)
+def test_consecutive_degraded_provider_turns_follow_escape_policy(
+    escape_on_provider_failure,
+    expected_second_exit,
+):
+    messages = RawMessages([
+        ConnectionError("turn one request failed"),
+        ConnectionError("turn one retry failed"),
+        ConnectionError("turn two request failed"),
+        ConnectionError("turn two retry failed"),
+    ])
+    runner = GoalRegionRunner(
+        config(escape_on_provider_failure=escape_on_provider_failure),
+        [],
+        client=SimpleNamespace(messages=messages),
+    )
+
+    first = runner.turn("I need an appointment.")
+    second = runner.turn("Monday might work.")
+
+    assert first.exit is None
+    assert second.exit == expected_second_exit
+    assert second.reply == "Sorry — could you say that again?"
+    assert second.rejected == [
+        "supervisor: provider failure ConnectionError (after retry)"
+    ]
+    assert len(messages.calls) == 4
+
+
+@pytest.mark.parametrize("reply", ("", "   \t"))
+def test_empty_reply_without_exit_returns_reprompt_and_records_rejection(reply):
+    client = FakeClient([response(reply=reply)])
+    runner = GoalRegionRunner(config(), [], client=client)
+
+    turn = runner.turn("Can you help me find a time?")
+
+    assert turn.reply == "Sorry — could you say that again?"
+    assert turn.exit is None
+    assert turn.rejected == [
+        "supervisor: empty reply — substituted reprompt"
+    ]
+    assert runner.transcript[-1] == {
+        "role": "assistant",
+        "content": "Sorry — could you say that again?",
+    }
+
+
+def test_rejection_names_invalid_interval_and_compares_window_capacity():
+    runner = GoalRegionRunner(
+        config(),
+        [window("2026-07-20T09:00:00", "2026-07-20T12:00:00")],
+        client=FakeClient(),
+    )
+
+    updates, rejected = runner._validate_candidates({
+        "slot_start": "2026-07-20T11:30:00",
+        "duration_minutes": 60,
+    })
+
+    assert updates == {}
+    assert rejected == [
+        "slot_start 2026-07-20T11:30:00: "
+        "interval does not fit entirely inside one free window "
+        "(that window fits at most 180m; this visit needs 60m — choose a window "
+        "marked as fitting at least 60m)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    (
+        "You are BOOKED.",
+        "You're all set.",
+        "Your appointment is confirmed.",
+        "I've scheduled you for Monday.",
+    ),
+)
+def test_premature_confirmation_language_is_suppressed_without_exit(reply):
+    client = FakeClient([response(reply=reply, job="leaking sink")])
+    runner = GoalRegionRunner(config(), [], client=client)
+
+    turn = runner.turn("Can you book it?")
+
+    assert turn.exit is None
+    assert turn.reply == "Sorry — could you say that again?"
+    assert turn.rejected == [
+        "reply: premature confirmation language suppressed"
+    ]
+    assert runner.transcript[-1] == {
+        "role": "assistant",
+        "content": "Sorry — could you say that again?",
+    }
+
+
+def test_disabling_premature_confirmation_suppression_restores_old_behavior():
+    client = FakeClient([
+        response(reply="You are booked.", job="leaking sink")
+    ])
+    runner = GoalRegionRunner(
+        config(suppress_premature_confirmation=False),
+        [],
+        client=client,
+    )
+
+    turn = runner.turn("Book that.")
+
+    assert turn.exit is None
+    assert turn.reply == "You are booked."
+    assert turn.rejected == []
+
+
+def test_empty_reply_on_legitimate_booked_exit_is_unaffected():
+    client = FakeClient([
+        response(
+            reply="",
+            job="leaking sink",
+            start="2026-07-20T09:00:00",
+            duration=60,
+            exit_candidate="booked",
+        )
+    ])
+    runner = GoalRegionRunner(
+        config(),
+        [window("2026-07-20T09:00:00", "2026-07-20T12:00:00")],
+        client=client,
+    )
+
+    turn = runner.turn("Monday at nine works.")
+
+    assert turn.exit == "booked"
+    assert turn.reply == ""
     assert turn.rejected == []

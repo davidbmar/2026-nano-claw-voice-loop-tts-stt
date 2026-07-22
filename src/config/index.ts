@@ -127,11 +127,92 @@ export function mergeEnvConfig(config: Config): Config {
     (process.env.NANO_CLAW_DISABLE_TOOLS || '').toLowerCase()
   );
 
-  return {
+  const intelligenceUrl = process.env.NANO_CLAW_INTELLIGENCE_URL?.trim();
+  const intelligenceEnabledValue = process.env.NANO_CLAW_INTELLIGENCE_ENABLED?.trim().toLowerCase();
+  const intelligenceEnabled = intelligenceEnabledValue
+    ? ['1', 'true', 'yes'].includes(intelligenceEnabledValue)
+    : intelligenceUrl
+      ? true
+      : undefined;
+  const intelligenceCollections = process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS?.split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const existingIntelligence = config.agents?.defaults?.intelligence;
+  const deepEnabledValue = process.env.NANO_CLAW_DEEP_REASONING?.trim().toLowerCase();
+  const deepEnabled = deepEnabledValue
+    ? ['1', 'true', 'yes'].includes(deepEnabledValue)
+    : undefined;
+  const deepThresholdValue = Number(process.env.NANO_CLAW_DEEP_THRESHOLD);
+  const deepThreshold = Number.isInteger(deepThresholdValue) ? deepThresholdValue : undefined;
+  const deepTimeoutValue = Number(process.env.NANO_CLAW_DEEP_TIMEOUT_MS);
+  const deepTimeoutMs = Number.isInteger(deepTimeoutValue) ? deepTimeoutValue : undefined;
+  const analysisStyle = process.env.NANO_CLAW_ANALYSIS_STYLE?.trim();
+  const hasDeepOverride =
+    deepEnabled !== undefined ||
+    process.env.NANO_CLAW_DEEP_ROUTING !== undefined ||
+    deepThreshold !== undefined ||
+    deepTimeoutMs !== undefined ||
+    analysisStyle !== undefined;
+  const deepReasoning = hasDeepOverride
+    ? {
+        ...existingIntelligence?.deepReasoning,
+        ...(deepEnabled !== undefined && { enabled: deepEnabled }),
+        ...(process.env.NANO_CLAW_DEEP_ROUTING && {
+          routingMode: process.env.NANO_CLAW_DEEP_ROUTING,
+        }),
+        ...(deepThreshold !== undefined && { threshold: deepThreshold }),
+        ...(deepTimeoutMs !== undefined && { taskTimeoutMs: deepTimeoutMs }),
+        ...(analysisStyle && { analysisStyle }),
+      }
+    : existingIntelligence?.deepReasoning;
+  const hasIntelligenceOverride =
+    intelligenceEnabled !== undefined ||
+    intelligenceUrl !== undefined ||
+    process.env.NANO_CLAW_INTELLIGENCE_TENANT !== undefined ||
+    intelligenceCollections !== undefined ||
+    process.env.NANO_CLAW_INTELLIGENCE_GROUNDING !== undefined ||
+    hasDeepOverride;
+  const intelligence = hasIntelligenceOverride
+    ? {
+        ...existingIntelligence,
+        ...(intelligenceEnabled !== undefined && { enabled: intelligenceEnabled }),
+        ...(intelligenceUrl && { apiUrl: intelligenceUrl }),
+        ...(process.env.NANO_CLAW_INTELLIGENCE_TENANT && {
+          tenantId: process.env.NANO_CLAW_INTELLIGENCE_TENANT,
+        }),
+        ...(intelligenceCollections && { collectionIds: intelligenceCollections }),
+        ...(process.env.NANO_CLAW_INTELLIGENCE_GROUNDING && {
+          groundingMode: process.env.NANO_CLAW_INTELLIGENCE_GROUNDING,
+        }),
+        ...(deepReasoning && { deepReasoning }),
+      }
+    : existingIntelligence;
+  const intelligenceProfileId = process.env.NANO_CLAW_INTELLIGENCE_PROFILE?.trim();
+  const existingProfiles = config.agents?.profiles;
+  const profiles =
+    intelligence && intelligenceProfileId && existingProfiles?.[intelligenceProfileId]
+      ? {
+          ...existingProfiles,
+          [intelligenceProfileId]: {
+            ...existingProfiles[intelligenceProfileId],
+            intelligence,
+          },
+        }
+      : existingProfiles;
+
+  return ConfigSchema.parse({
     ...config,
     providers: mergedProviders,
+    agents: {
+      ...config.agents,
+      defaults: {
+        ...config.agents?.defaults,
+        ...(intelligence && { intelligence }),
+      },
+      ...(profiles && { profiles }),
+    },
     ...(disableTools && { tools: { ...config.tools, enabled: false } }),
-  };
+  });
 }
 
 /**

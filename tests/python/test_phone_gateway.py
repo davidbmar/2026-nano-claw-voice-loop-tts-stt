@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ def phone_env(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_BARGE_IN", "0")
     monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "0")
     monkeypatch.setenv("NANO_CLAW_PHONE_VAD", "energy")
+    monkeypatch.delenv("NANO_CLAW_PHONE_CODEC", raising=False)
     monkeypatch.setattr(phone, "_vad_mode", None)
     phone._answered.clear()
     phone._overrides.clear()
@@ -65,6 +67,26 @@ def feed_pcm(call: phone.PhoneCall, pcm: np.ndarray) -> list[np.ndarray]:
     return decoded
 
 
+class RecordingWebSocket:
+    def __init__(self, *, closed=False, send_error=None):
+        self.closed = closed
+        self.send_error = send_error
+        self.messages = []
+        self.send_attempts = 0
+        self.media_sent = asyncio.Event()
+        self.clear_sent = asyncio.Event()
+
+    async def send_json(self, message):
+        self.send_attempts += 1
+        if self.send_error:
+            raise self.send_error
+        self.messages.append(message)
+        if message.get("event") == "media":
+            self.media_sent.set()
+        elif message == {"event": "clear"}:
+            self.clear_sent.set()
+
+
 def test_webhook_rejects_bad_token(monkeypatch):
     async def _run():
         client = TestClient(TestServer(make_app()))
@@ -107,6 +129,62 @@ def test_call_initiated_answers_with_streaming(monkeypatch):
     assert (cid, command) == ("cc-123", "answer")
     assert payload["stream_url"] == "wss://nano.example.com/ws/phone-media?token=sekrit"
     assert payload["stream_bidirectional_codec"] == "PCMU"
+
+
+def test_l16_call_answers_with_wideband_streaming(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_CODEC", "l16")
+    commands = []
+
+    async def fake_cmd(client, cid, command, payload):
+        commands.append((cid, command, payload))
+        return True
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_cmd)
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/phone/incoming?token=sekrit",
+                json=initiated_event("cc-l16"),
+            )
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    run(_run())
+    assert len(commands) == 1
+    cid, command, payload = commands[0]
+    assert (cid, command) == ("cc-l16", "answer")
+    assert payload["stream_codec"] == "L16"
+    assert payload["stream_bidirectional_codec"] == "L16"
+    assert payload["stream_bidirectional_sampling_rate"] == 16000
+
+
+def test_l16_media_is_decoded_as_raw_pcm16(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_CODEC", "l16")
+
+    async def _run():
+        call = phone.PhoneCall(object(), "cc-l16-media")
+        captured = []
+
+        def capture_frame(frame, is_speech=None):
+            captured.append(frame.copy())
+            return None
+
+        call.endpointer.feed = capture_frame
+        source = np.arange(-160, 160, dtype=np.int16)
+        try:
+            call.feed_media(base64.b64encode(source.tobytes()).decode())
+            assert call.endpointer.rate_hz == 16000
+            assert len(captured) == 1
+            assert len(captured[0]) == len(source)
+            assert np.array_equal(captured[0], source)
+        finally:
+            await call.close()
+
+    run(_run())
 
 
 def test_media_ws_rejects_bad_token():
@@ -237,6 +315,81 @@ def test_audio_while_speaking_without_barge_in_is_dropped():
         finally:
             call.speaking = False
             await call.close()
+
+    run(_run())
+
+
+def test_barge_in_clears_buffer_once_and_stops_playback(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_BARGE_IN", "1")
+    pcm48k = np.full(48_000 * 2, 2_000, dtype=np.int16).tobytes()
+    monkeypatch.setattr(phone, "tts_synthesize", lambda *args: pcm48k)
+
+    async def _run():
+        ws = RecordingWebSocket()
+        call = phone.PhoneCall(ws, "cc-barge-clear")
+        tap = Mock()
+        call.tap = tap
+        try:
+            call.speaking = True
+            playback = asyncio.create_task(call._speak_chunk("long answer"))
+            await asyncio.wait_for(ws.media_sent.wait(), timeout=1)
+
+            feed_pcm(call, tone(300, 240))
+            await asyncio.wait_for(ws.clear_sent.wait(), timeout=1)
+            await playback
+            await call._flush_playback()  # one-shot even if requested again
+
+            media = [message for message in ws.messages if message["event"] == "media"]
+            clears = [message for message in ws.messages if message == {"event": "clear"}]
+            assert 0 < len(media) < 100
+            assert clears == [{"event": "clear"}]
+            assert call.speaking is False
+            assert sum(
+                event.args == ("clear_sent",) for event in tap.event.call_args_list
+            ) == 1
+        finally:
+            call.speaking = False
+            await call.close()
+
+        closed_ws = RecordingWebSocket(closed=True)
+        closed_call = phone.PhoneCall(closed_ws, "cc-barge-closed")
+        try:
+            closed_call.speaking = True
+            closed_call._interrupt()
+            await asyncio.sleep(0)
+        finally:
+            closed_call.speaking = False
+            await closed_call.close()
+        assert closed_ws.send_attempts == 0
+
+    run(_run())
+
+
+def test_close_while_speaking_clears_buffer_once():
+    async def _run():
+        ws = RecordingWebSocket()
+        call = phone.PhoneCall(ws, "cc-hangup-clear")
+        call.speaking = True
+
+        await call.close()
+        await call.close()
+
+        assert ws.messages == [{"event": "clear"}]
+        assert call.speaking is False
+
+    run(_run())
+
+
+def test_clear_send_failure_does_not_escape_hangup():
+    async def _run():
+        ws = RecordingWebSocket(send_error=RuntimeError("media socket failed"))
+        call = phone.PhoneCall(ws, "cc-clear-error")
+        call.speaking = True
+
+        await call.close()
+
+        assert ws.send_attempts == 1
+        assert call.closed is True
 
     run(_run())
 

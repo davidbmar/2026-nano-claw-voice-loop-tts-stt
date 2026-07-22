@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 from voice.goal_region import (
     BUSINESS_TIMEZONE,
@@ -27,8 +27,58 @@ SCHEDULER_GREETING = (
 )
 
 FlowOutcome = Literal["booked", "escape", "budget"]
-FLOW_MODES = ("off", "scheduler")
+
+
+class FlowModeConfig(TypedDict):
+    """One labeled assistant mode exposed by the voice configuration API."""
+
+    label: str
+    profile: str
+    scheduler: bool
+
+
+FLOW_MODES: dict[str, FlowModeConfig] = {
+    "none": {"label": "None", "profile": "none", "scheduler": False},
+    "spacechannel": {
+        "label": "Space Channel",
+        "profile": "spacechannel",
+        "scheduler": False,
+    },
+    "intelligence": {
+        "label": "Document Intelligence",
+        "profile": "intelligence",
+        "scheduler": False,
+    },
+    "replicantpm": {
+        "label": "Replicant PM",
+        "profile": "replicantpm",
+        "scheduler": False,
+    },
+    "scheduler": {
+        "label": "Plumber Scheduler",
+        # If the scheduler is unavailable or ends, retain today's Space Channel
+        # fallback behavior for subsequent normal agent turns.
+        "profile": "spacechannel",
+        "scheduler": True,
+    },
+}
+DEFAULT_FLOW_MODE = "spacechannel"
 _flow_mode: str | None = None
+# Keep the provider-verified dropdown registry centralized here. These exact
+# IDs were checked against the live provider /v1/models endpoints on 2026-07-17.
+REGION_MODELS = {
+    "claude-haiku-4-5": "Claude Haiku 4.5 — proven",
+    "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash — cheapest",
+    "xai/grok-4.20-0309-non-reasoning": "Grok 4.20 fast",
+    "xai/grok-4.3": "Grok 4.3",
+    "gemini/gemini-2.5-flash-lite": "Gemini Flash-Lite — fastest TTFT",
+    "groq/openai/gpt-oss-20b": "GPT-OSS 20B (Groq) — fastest",
+    "openrouter/meta-llama/llama-4-scout": "Llama 4 Scout — 11/11",
+    "openrouter/openai/gpt-oss-20b:nitro": "GPT-OSS 20B (fastest route)",
+    "local/qwen3:14b": "Local Ollama qwen3:14b",
+}
+DEFAULT_REGION_MODEL = "claude-haiku-4-5"
+_region_model: str | None = None
 _AVAILABILITY_ERRORS = (
     OSError,
     json.JSONDecodeError,
@@ -54,13 +104,21 @@ class FlowReply:
     supervisor_ms: float | None = None
 
 
+def _normalize_flow_mode(mode: str) -> str | None:
+    """Return a registered mode, including the legacy ``off`` alias."""
+
+    if mode == "off":
+        return DEFAULT_FLOW_MODE
+    return mode if mode in FLOW_MODES else None
+
+
 def get_flow_mode() -> str:
     """Return the runtime flow selection, initialized from the environment."""
 
     global _flow_mode
     if _flow_mode is None:
         configured = os.environ.get("NANO_CLAW_VOICE_FLOW", "").strip()
-        _flow_mode = configured if configured in FLOW_MODES else "off"
+        _flow_mode = _normalize_flow_mode(configured) or DEFAULT_FLOW_MODE
     return _flow_mode
 
 
@@ -68,17 +126,47 @@ def set_flow_mode(mode: str) -> bool:
     """Select a flow for new calls and browser sessions."""
 
     global _flow_mode
-    if mode not in FLOW_MODES:
+    normalized = _normalize_flow_mode(mode) if isinstance(mode, str) else None
+    if normalized is None:
         return False
-    _flow_mode = mode
-    log.info("Voice flow switched to %s (applies to new sessions/calls)", mode)
+    _flow_mode = normalized
+    log.info("Voice flow switched to %s (applies to new sessions/calls)", normalized)
+    return True
+
+
+def get_flow_profile(mode: str | None = None) -> str:
+    """Return the agent profile paired with a runtime assistant mode."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        active = DEFAULT_FLOW_MODE
+    return FLOW_MODES[active]["profile"]
+
+
+def get_region_model() -> str:
+    """Return the runtime scheduler model or its environment/default fallback."""
+
+    if _region_model is not None:
+        return _region_model
+    configured = os.environ.get("SCHED_EVAL_MODEL", "").strip()
+    return configured or DEFAULT_REGION_MODEL
+
+
+def set_region_model(name: str) -> bool:
+    """Select the supervisor model used when the next scheduler turn starts."""
+
+    global _region_model
+    if not isinstance(name, str) or name not in REGION_MODELS:
+        return False
+    _region_model = name
+    log.info("Scheduler model switched to %s (applies to new turns)", name)
     return True
 
 
 def scheduler_flow_enabled() -> bool:
     """Compatibility helper for callers that only need a boolean check."""
 
-    return get_flow_mode() == "scheduler"
+    return FLOW_MODES[get_flow_mode()]["scheduler"]
 
 
 def scheduler_region_config(digest: str) -> RegionConfig:
@@ -93,7 +181,10 @@ def scheduler_region_config(digest: str) -> RegionConfig:
             "You are a concise, warm plumbing scheduler. Offer concrete available "
             "times, clarify constraints, and never claim a time outside the digest. "
             "Keep every reply to one or two short spoken sentences; offer at most "
-            "two candidate times per turn."
+            "two candidate times per turn. When a requested duration does not fit "
+            "any window on a day, say so plainly and offer the nearest other day "
+            "whose window fits it; never keep proposing a day that cannot fit the "
+            "duration."
         ),
         digest=digest,
         slots={
@@ -124,6 +215,13 @@ def load_free_windows(availability: dict) -> list[FreeWindow]:
     ]
 
 
+def _render_availability_window(window: dict) -> str:
+    start = datetime.fromisoformat(window["start"])
+    end = datetime.fromisoformat(window["end"])
+    capacity_minutes = int((end - start).total_seconds() // 60)
+    return f"{start:%H:%M}–{end:%H:%M} (fits ≤{capacity_minutes}m)"
+
+
 def availability_digest(availability: dict) -> str:
     """Render availability for the goal-region supervisor prompt."""
 
@@ -135,7 +233,8 @@ def availability_digest(availability: dict) -> str:
         parsed_day = datetime.fromisoformat(day)
         label = f"{parsed_day:%A %B} {parsed_day.day}"
         rendered = ", ".join(
-            f"{window['start'][11:16]}–{window['end'][11:16]}" for window in windows
+            _render_availability_window(window)
+            for window in windows
         )
         lines.append(f"- {label} ({day}): {rendered or 'no availability'}")
     return "\n".join(lines)

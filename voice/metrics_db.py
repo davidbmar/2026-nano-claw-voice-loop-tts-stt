@@ -29,8 +29,8 @@ SEED_PRICES = {
 
 _COLUMNS = [
     "ts", "session_id", "provider", "model", "model_version", "stt_size", "voice_id",
-    "asked_text", "said_text", "stt_ms", "llm_ttft_ms", "llm_total_ms",
-    "tokens_in", "tokens_out", "tok_per_sec", "tts_ms", "e2e_ms", "est_cost_usd",
+    "stt_ms", "llm_ttft_ms", "llm_total_ms", "tokens_in", "tokens_out",
+    "tok_per_sec", "tts_ms", "e2e_ms", "est_cost_usd",
 ]
 
 _SCHEMA = """
@@ -71,6 +71,18 @@ def init_db(path: str | None = None) -> sqlite3.Connection | None:
             os.makedirs(d, exist_ok=True)
         conn = connect(p)
         conn.executescript(_SCHEMA)
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if user_version < 1:
+            # Transcript columns existed in the original metrics schema. Keep
+            # the nullable columns for an in-place migration, but overwrite
+            # the deleted cell contents so they cannot be recovered by
+            # scanning the database file at rest.
+            conn.execute("PRAGMA secure_delete = ON")
+            conn.execute(
+                "UPDATE turns SET asked_text = NULL, said_text = NULL "
+                "WHERE asked_text IS NOT NULL OR said_text IS NOT NULL"
+            )
+            conn.execute("PRAGMA user_version = 1")
         now = datetime.now().isoformat(timespec="seconds")
         for model, (i, o) in SEED_PRICES.items():
             conn.execute(

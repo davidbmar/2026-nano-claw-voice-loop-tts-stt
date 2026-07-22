@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Self-healing voice-path watchdog: runs the synthetic end-to-end check on
+     boot (RunAtLoad) and every hour (StartInterval), remediating STT/TTS/
+     container on failure. Install:
+       cp scripts/com.nanoclaw.voice-watchdog.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nanoclaw.voice-watchdog.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nanoclaw.voice-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/davidmar/src/nano-claw/scripts/voice_watchdog.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>StandardOutPath</key><string>/Users/davidmar/src/nano-claw/logs/voice_watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/davidmar/src/nano-claw/logs/voice_watchdog.err.log</string>
+</dict>
+</plist>
