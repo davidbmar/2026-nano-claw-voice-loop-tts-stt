@@ -92,6 +92,22 @@ export NANO_CLAW_DEEP_TIMEOUT_MS=240000
 export NANO_CLAW_ANALYSIS_STYLE=topic_map
 ```
 
+## Artifact-aware answer routing (task 062)
+
+A fresh conversation whose question is analysis-shaped ("key principles",
+"what does it lack", "what's missing") first searches the platform's analysis
+registry tenant-wide and, when a completed artifact matches, answers from that
+artifact — topic navigation for principle questions, the `gaps` presentation
+(built from the artifact's `missing_evidence`) for gap questions — instead of
+spending a fresh deep pass or bare retrieval. Explicit fresh-analysis phrases
+("think deeply", "re-analyze", "fresh analysis") always bypass reuse, and any
+registry failure degrades silently to the normal path.
+
+```bash
+export NANO_CLAW_ARTIFACT_ROUTING=1      # 0 disables registry adoption
+export NANO_CLAW_ARTIFACT_ROUTE_MIN=0.35 # normalized-score floor for adoption
+```
+
 Verify the provider and indexed document directly before enabling voice:
 
 ```bash

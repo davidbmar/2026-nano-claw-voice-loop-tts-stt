@@ -3,7 +3,9 @@ import { ContextBuilder } from '../src/agent/context';
 import {
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
+  isRegistryAnalysisQuestion,
   resolveExistingAnalysisTurn,
+  resolveRegistryAnalysisTurn,
   runDeepReasoning,
   streamDeepReasoning,
   type DeepReasoningResult,
@@ -11,6 +13,7 @@ import {
 import {
   createAnalysisConversationState,
   parseAnalysisArtifact,
+  resolveAnalysisFollowUp,
 } from '../src/agent/analysis-navigation';
 import type { IntelligenceConfig, Message } from '../src/types';
 import { analysisArtifactFixture } from './fixtures/analysis-artifact';
@@ -765,5 +768,126 @@ describe('deep result naturalization', () => {
     );
     expect(prompt).toContain('Validation plan: Run a bounded paid-demand test before replication.');
     expect(prompt).not.toContain('Market positioning:');
+  });
+});
+
+describe('registry artifact routing', () => {
+  const searchResponse = {
+    matches: [
+      {
+        node: {
+          artifact_id: 'analysis_task_1',
+          tenant_id: 'personal',
+          kind: 'topic',
+          ref_id: 'topic_economics',
+        },
+        raw_score: 3,
+        normalized_score: 0.7,
+        rank: 1,
+      },
+    ],
+  };
+
+  function mockHttp(overrides: Record<string, unknown> = {}) {
+    return {
+      post: vi.fn().mockResolvedValue({ data: searchResponse }),
+      get: vi.fn().mockResolvedValue({
+        data: { artifact: analysisArtifactFixture(), analysis_style: 'topic_map' },
+      }),
+      ...overrides,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+
+  it('adopts a registry artifact for a fresh analysis-shaped question', async () => {
+    const http = mockHttp();
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What are the key principles behind the pricing economics?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeDefined();
+    expect(turn!.decision.artifactId).toBe('analysis_task_1');
+    expect(turn!.result?.presentation?.mode).toBe('topic');
+    expect(turn!.state.artifact.artifactId).toBe('analysis_task_1');
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes gap questions to the gaps presentation with all missing evidence', async () => {
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What does the document lack in terms of strategy?' }],
+      intelligence,
+      undefined,
+      mockHttp()
+    );
+    expect(turn!.decision.action).toBe('show_gaps');
+    expect(turn!.result?.presentation?.mode).toBe('gaps');
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt(
+      [],
+      [],
+      undefined,
+      turn!.result
+    );
+    expect(prompt).toContain('What is measured acquisition cost by channel?');
+    expect(prompt).toContain('gaps the analysis flagged');
+  });
+
+  it('never adopts for explicit fresh-analysis requests', async () => {
+    const http = mockHttp();
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'Think deeply about the business plan and critique the strategy' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+    expect(http.post).not.toHaveBeenCalled();
+    expect(isRegistryAnalysisQuestion('re-analyze the plan with fresh assumptions')).toBe(false);
+  });
+
+  it('degrades silently when the registry search fails', async () => {
+    const http = mockHttp({ post: vi.fn().mockRejectedValue(new Error('search down')) });
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What are the principles of the analysis?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+  });
+
+  it('ignores matches below the confidence floor', async () => {
+    const http = mockHttp({
+      post: vi.fn().mockResolvedValue({
+        data: {
+          matches: [
+            {
+              node: { artifact_id: 'analysis_task_1', tenant_id: 'personal' },
+              raw_score: 1,
+              normalized_score: 0.1,
+              rank: 1,
+            },
+          ],
+        },
+      }),
+    });
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What are the principles of the analysis?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+    expect(http.get).not.toHaveBeenCalled();
+  });
+
+  it('answers gap follow-ups from an already active artifact', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const state = createAnalysisConversationState(artifact, 'task_1', 'topic_map');
+    const decision = resolveAnalysisFollowUp('what is missing from this analysis?', state);
+    expect(decision?.action).toBe('show_gaps');
+    expect(decision?.selectedTopicIds).toContain('topic_acquisition');
   });
 });

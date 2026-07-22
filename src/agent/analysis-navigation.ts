@@ -98,14 +98,28 @@ export interface AnalysisConversationState {
 }
 
 export type AnalysisNavigationAction =
-  'open_topic' | 'show_evidence' | 'list_topics' | 'render_report' | 'reanalyze';
+  | 'open_topic'
+  | 'show_evidence'
+  | 'list_topics'
+  | 'render_report'
+  | 'reanalyze'
+  | 'show_gaps';
 
 export interface AnalysisNavigationDecision {
   action: AnalysisNavigationAction;
   selectedTopicIds: string[];
   confidence: number;
   reason: string;
+  /** Set when the decision adopted an artifact from the registry (debug surface). */
+  artifactId?: string;
 }
+
+/**
+ * Gap-shaped questions ask what the analyzed document does NOT contain. Exported
+ * so the registry router and the 060 routing-evaluation corpus share one intent test.
+ */
+export const ANALYSIS_GAPS_RE =
+  /\b(lacks?|lacking|missing|gaps?|not (?:cover(?:ed)?|address(?:ed)?|included?)|doesn'?t (?:cover|address|include)|left out|omit(?:s|ted)?|unresolved|open questions?)\b/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -573,6 +587,15 @@ const EXPAND_RE =
   /\b(tell me|explain|expand|go deeper|more about|what about|discuss|open|walk me through)\b/;
 
 /** Resolve only high-confidence references to the current artifact. */
+/** Topics the artifact's missing-evidence entries point at, capped for a spoken answer. */
+export function gapRelatedTopicIds(artifact: AnalysisArtifact): string[] {
+  const known = new Set(artifact.topics.map((topic) => topic.topicId));
+  const related = artifact.missingEvidence
+    .flatMap((item) => item.relatedTopicIds)
+    .filter((id) => known.has(id));
+  return [...new Set(related)].slice(0, 3);
+}
+
 export function resolveAnalysisFollowUp(
   userText: string,
   state: AnalysisConversationState
@@ -602,6 +625,14 @@ export function resolveAnalysisFollowUp(
       selectedTopicIds: state.activeTopicId ? [state.activeTopicId] : [],
       confidence: 0.95,
       reason: 'changed_analytical_question',
+    };
+  }
+  if (ANALYSIS_GAPS_RE.test(text)) {
+    return {
+      action: 'show_gaps',
+      selectedTopicIds: gapRelatedTopicIds(state.artifact),
+      confidence: 0.9,
+      reason: 'analysis_gaps_request',
     };
   }
   if (MENU_RE.test(text) || ANALYSIS_OVERVIEW_RE.test(text)) {

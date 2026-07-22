@@ -15,6 +15,7 @@ import {
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
   resolveExistingAnalysisTurn,
+  resolveRegistryAnalysisTurn,
   runDeepReasoning,
 } from './deep-reasoning';
 
@@ -118,7 +119,9 @@ export class AgentLoop {
                 analysisState,
                 this.config.intelligence
               )
-            : undefined;
+            : iteration === 1 && this.config.intelligence
+              ? await resolveRegistryAnalysisTurn(conversationMessages, this.config.intelligence)
+              : undefined;
         if (analysisTurn) this.memory.setAnalysisState(analysisTurn.state);
         const deepRoute =
           analysisTurn?.deepRoute ||

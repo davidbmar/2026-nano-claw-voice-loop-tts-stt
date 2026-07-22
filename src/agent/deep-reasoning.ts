@@ -2,11 +2,13 @@ import axios from 'axios';
 import type { DeepReasoningConfig, IntelligenceConfig, Message } from '../types';
 import { logger } from '../utils/logger';
 import {
+  ANALYSIS_GAPS_RE,
   AnalysisArtifact,
   AnalysisConversationState,
   AnalysisNavigationDecision,
   applyAnalysisNavigation,
   createAnalysisConversationState,
+  gapRelatedTopicIds,
   parseAnalysisArtifact,
   resolveAnalysisFollowUp,
 } from './analysis-navigation';
@@ -65,7 +67,7 @@ export interface DeepClaim {
   evidenceIds: string[];
 }
 
-export type AnalysisPresentationMode = 'brief' | 'topic' | 'evidence' | 'menu' | 'report';
+export type AnalysisPresentationMode = 'brief' | 'topic' | 'evidence' | 'menu' | 'report' | 'gaps';
 
 export interface AnalysisPresentation {
   mode: AnalysisPresentationMode;
@@ -246,20 +248,33 @@ function latestUserText(messages: Message[]): string | undefined {
     ?.content.trim();
 }
 
+/** Explicit fresh-analysis requests always bypass artifact reuse. Exported for 060's corpus. */
+export const EXPLICIT_FRESH_ANALYSIS_RE =
+  /\b(think deeply|deep analysis|analy[sz]e deeply|deep dive|reason through|re-?analy[sz]e|fresh analysis)\b/;
+
+const SOURCE_QUOTE_RE =
+  /\b(quote|citation|source passage|where in|how many)\b|\bwhat does (?:it|the (?:document|doc|paper|chapter|section)) say\b/;
+
+/** Vocabulary that marks a question as being about analysis rather than source lookup. */
+export const ANALYSIS_VOCAB_RE =
+  /\b(analysis|conclusion|recommendation|assumption|weakness|risk|option|trade-?off|principles?|tension|finding|confidence|boundary|condition|what would change|why do you think)\b/;
+
 function shouldSearchActiveAnalysis(userText: string): boolean {
   const text = userText.toLowerCase();
-  if (/\b(think deeply|deep analysis|analy[sz]e deeply|deep dive|reason through)\b/.test(text)) {
-    return false;
-  }
-  if (
-    /\b(quote|citation|source passage|where in|how many)\b/.test(text) ||
-    /\bwhat does (?:it|the (?:document|doc|paper|chapter|section)) say\b/.test(text)
-  ) {
-    return false;
-  }
-  return /\b(analysis|conclusion|recommendation|assumption|weakness|risk|option|trade-?off|principle|tension|finding|confidence|boundary|condition|what would change|why do you think)\b/.test(
-    text
-  );
+  if (EXPLICIT_FRESH_ANALYSIS_RE.test(text)) return false;
+  if (SOURCE_QUOTE_RE.test(text)) return false;
+  return ANALYSIS_VOCAB_RE.test(text);
+}
+
+/**
+ * Whether a fresh conversation's question is worth checking against the tenant's
+ * analysis registry before spending a new deep pass or bare retrieval on it.
+ */
+export function isRegistryAnalysisQuestion(userText: string): boolean {
+  const text = userText.toLowerCase();
+  if (EXPLICIT_FRESH_ANALYSIS_RE.test(text)) return false;
+  if (SOURCE_QUOTE_RE.test(text)) return false;
+  return ANALYSIS_GAPS_RE.test(text) || ANALYSIS_VOCAB_RE.test(text);
 }
 
 function analysisSearchDecision(
@@ -337,6 +352,109 @@ async function searchActiveAnalysis(
         error: error instanceof Error ? error.message : String(error),
       },
       'Active analysis node search unavailable'
+    );
+    return undefined;
+  }
+}
+
+interface AnalysisArtifactRecordView {
+  artifact?: unknown;
+  analysis_style?: unknown;
+}
+
+/** Highest-scoring artifact across tenant-wide node matches. */
+function bestRegistryMatch(raw: AnalysisSearchView): { artifactId: string; score: number } | undefined {
+  if (!Array.isArray(raw.matches)) return undefined;
+  let best: { artifactId: string; score: number } | undefined;
+  for (const rawMatch of raw.matches) {
+    if (!isRecord(rawMatch) || !isRecord(rawMatch.node)) continue;
+    const artifactId = nonempty(rawMatch.node.artifact_id);
+    if (!artifactId) continue;
+    const score = Math.max(0, Math.min(1, finiteNumber(rawMatch.normalized_score)));
+    if (!best || score > best.score) best = { artifactId, score };
+  }
+  return best;
+}
+
+/**
+ * Adopt an existing registry artifact for a fresh conversation whose question is
+ * analysis-shaped, instead of spending a new deep pass or bare retrieval. Degrades
+ * silently to the caller's normal path on any failure.
+ */
+export async function resolveRegistryAnalysisTurn(
+  messages: Message[],
+  intelligence: IntelligenceConfig,
+  signal?: AbortSignal,
+  http: DeepHttpClient = axios
+): Promise<ExistingAnalysisTurn | undefined> {
+  if (!intelligence.enabled) return undefined;
+  if (process.env.NANO_CLAW_ARTIFACT_ROUTING === '0') return undefined;
+  const userText = latestUserText(messages);
+  if (!userText || !isRegistryAnalysisQuestion(userText)) return undefined;
+  const config = settings(intelligence);
+  const base = intelligence.apiUrl.replace(/\/$/, '');
+  try {
+    const search = await http.post<AnalysisSearchView>(
+      `${base}/v1/analysis/search`,
+      {
+        text: userText,
+        policy: {
+          tenant_id: intelligence.tenantId,
+          principal_id: intelligence.principalId,
+          permissions: ['knowledge:reason'],
+        },
+        limit: 5,
+      },
+      { timeout: config.requestTimeoutMs, signal }
+    );
+    const best = bestRegistryMatch(search.data);
+    const floor = Number(process.env.NANO_CLAW_ARTIFACT_ROUTE_MIN ?? '0.35');
+    if (!best || !(best.score >= floor)) return undefined;
+    const record = await http.get<AnalysisArtifactRecordView>(
+      `${base}/v1/analysis/artifacts/${encodeURIComponent(best.artifactId)}`,
+      {
+        timeout: config.requestTimeoutMs,
+        signal,
+        headers: {
+          'X-Tenant-Id': intelligence.tenantId,
+          'X-Permissions': 'knowledge:reason',
+        },
+      }
+    );
+    const artifact = parseAnalysisArtifact(record.data?.artifact);
+    if (!artifact) return undefined;
+    const style =
+      record.data?.analysis_style === 'principle_graph' ? 'principle_graph' : 'topic_map';
+    const state = createAnalysisConversationState(artifact, artifact.taskId, style);
+    let decision: AnalysisNavigationDecision | undefined = ANALYSIS_GAPS_RE.test(
+      userText.toLowerCase()
+    )
+      ? {
+          action: 'show_gaps',
+          selectedTopicIds: gapRelatedTopicIds(artifact),
+          confidence: best.score,
+          reason: 'registry_artifact_gaps',
+        }
+      : analysisSearchDecision(search.data, state);
+    if (!decision) {
+      decision = {
+        action: 'list_topics',
+        selectedTopicIds: state.offeredTopicIds,
+        confidence: best.score,
+        reason: 'registry_artifact_menu',
+      };
+    }
+    decision = { ...decision, artifactId: artifact.artifactId };
+    const nextState = applyAnalysisNavigation(state, decision);
+    return {
+      decision,
+      state: nextState,
+      result: resultForAnalysisNavigation(nextState, decision),
+    };
+  } catch (error) {
+    logger.warn(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Registry artifact routing unavailable'
     );
     return undefined;
   }
@@ -1035,7 +1153,9 @@ export function resultForAnalysisNavigation(
         ? 'menu'
         : decision.action === 'render_report'
           ? 'report'
-          : 'topic';
+          : decision.action === 'show_gaps'
+            ? 'gaps'
+            : 'topic';
   return {
     status: 'succeeded',
     workflow: state.artifact.workflow,

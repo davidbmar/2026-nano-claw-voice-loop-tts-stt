@@ -177,6 +177,15 @@ export class ContextBuilder {
                 'offering only the listed next topics. Skip a move rather than inventing ' +
                 'content for it, and preserve all material qualifications.'
             );
+          } else if (presentation.mode === 'gaps') {
+            parts.push(
+              'Answer what the prior analysis identified as missing, unresolved, or not ' +
+                'covered, in concise natural spoken language of normally no more than 120 ' +
+                'words. Ground the answer in the listed missing-evidence questions and any ' +
+                'supplied topics. Never present the absence of content as something the ' +
+                'document states; say plainly these are gaps the analysis flagged. Close by ' +
+                'offering one listed topic to explore.'
+            );
           } else {
             parts.push(
               'Answer only about the selected topic. Use concise natural spoken language, ' +
@@ -226,6 +235,7 @@ export class ContextBuilder {
           const missing = artifact.missingEvidence.filter(
             (item) =>
               presentation.mode === 'report' ||
+              presentation.mode === 'gaps' ||
               item.relatedTopicIds.some((topicId) => selected.has(topicId))
           );
           if (missing.length) {

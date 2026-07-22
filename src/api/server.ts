@@ -40,6 +40,7 @@ import {
   guardAnalysisVoiceResponse,
   analysisVoiceWordLimit,
   resolveExistingAnalysisTurn,
+  resolveRegistryAnalysisTurn,
   runDeepReasoning,
   streamDeepReasoning,
 } from '../agent/deep-reasoning';
@@ -85,6 +86,7 @@ interface DebugInfo {
     action: AnalysisNavigationDecision['action'];
     reason: string;
     selectedTopicIds: string[];
+    artifactId?: string;
   };
   analysisVoiceGuard?: {
     limit: number;
@@ -326,7 +328,9 @@ async function stepLoop(
     const analysisTurn =
       analysisState && agentConfig.intelligence
         ? await resolveExistingAnalysisTurn(messages, analysisState, agentConfig.intelligence)
-        : undefined;
+        : iteration === 1 && agentConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, agentConfig.intelligence)
+          : undefined;
     if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
     const deepRoute =
       analysisTurn?.deepRoute ||
@@ -362,6 +366,7 @@ async function stepLoop(
               action: analysisTurn.decision.action,
               reason: analysisTurn.decision.reason,
               selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+              artifactId: analysisTurn.decision.artifactId,
             },
           }),
         },
@@ -427,6 +432,7 @@ async function stepLoop(
           action: analysisTurn.decision.action,
           reason: analysisTurn.decision.reason,
           selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+          artifactId: analysisTurn.decision.artifactId,
         },
       }),
       ...(voiceGuard.limit !== undefined && {
@@ -695,6 +701,7 @@ export async function* stepLoopStream(
           action: analysisTurn.decision.action,
           reason: analysisTurn.decision.reason,
           selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+          artifactId: analysisTurn.decision.artifactId,
         },
       }),
       ...(voiceGuard.limit !== undefined && {
