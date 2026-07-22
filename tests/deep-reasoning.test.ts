@@ -84,6 +84,34 @@ describe('deep question routing', () => {
     expect(route).toMatchObject({ deep: true, workflow: 'strategy_review' });
   });
 
+  it('uses assistant strategy context for a short document-critique follow-up', () => {
+    const route = detectDeepQuestion(
+      [
+        {
+          role: 'assistant',
+          content:
+            'The document covers lead-generation economics, contractor pricing, and market strategy.',
+        },
+        { role: 'user', content: 'Tell me only the biggest weaknesses of the doc.' },
+      ],
+      intelligence
+    );
+
+    expect(route).toMatchObject({ deep: true, workflow: 'strategy_review' });
+    expect(route.reasons).toContain('strategy_review');
+  });
+
+  it('routes a standalone document critique even without a known strategy subject', () => {
+    const route = detectDeepQuestion(
+      user('What are the biggest weaknesses of this document?'),
+      intelligence
+    );
+
+    expect(route).toMatchObject({ deep: true, workflow: 'evidence_analysis' });
+    expect(route.reasons).toContain('critical_analysis');
+    expect(route.reasons).not.toContain('direct_lookup_shape');
+  });
+
   it.each([
     ['What is the pricing strategy?', false, 'evidence_analysis'],
     ['What does the business model charge?', false, 'evidence_analysis'],
@@ -132,7 +160,33 @@ describe('deep reasoning task client', () => {
         },
       },
     });
-    const get = vi.fn().mockResolvedValue({
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          task_id: 'task_1',
+          status: 'running',
+          progress: {
+            phase: 'reasoning',
+            message: 'Analyzing retrieved evidence, pass 1 of up to 6.',
+            completed_steps: 0,
+            max_steps: 6,
+            retrieval_queries: 5,
+            reasoning: { current: 1, completed: 0, maximum: 6 },
+            retrieval: { planned: 5, completed: 5, evidence_items: 19 },
+            model: {
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              thinking: 'enabled',
+              effort: 'high',
+            },
+            artifact: { status: 'not_applicable', artifact_id: null },
+            phase_started_at: '2026-07-22T01:00:54Z',
+            heartbeat_at: '2026-07-22T01:01:34Z',
+          },
+        },
+      })
+      .mockResolvedValueOnce({
       data: {
         task_id: 'task_1',
         status: 'succeeded',
@@ -143,6 +197,9 @@ describe('deep reasoning task client', () => {
           completed_steps: 2,
           max_steps: 6,
           retrieval_queries: 3,
+          reasoning: { current: 2, completed: 2, maximum: 6 },
+          retrieval: { planned: 3, completed: 3, evidence_items: 1 },
+          artifact: { status: 'indexed', artifact_id: 'analysis_task_1' },
         },
         result: {
           workflow: 'strategy_review',
@@ -182,7 +239,7 @@ describe('deep reasoning task client', () => {
           ],
         },
       },
-    });
+      });
     const events = [];
     for await (const event of streamDeepReasoning(
       user('Critique the business plan strategy and recommend what to validate first.'),
@@ -193,7 +250,39 @@ describe('deep reasoning task client', () => {
       events.push(event);
     }
 
-    expect(events.filter((event) => event.type === 'progress')).toHaveLength(2);
+    expect(events.filter((event) => event.type === 'progress')).toHaveLength(3);
+    const reasoning = events.find(
+      (event) => event.type === 'progress' && event.progress.phase === 'reasoning'
+    );
+    expect(reasoning).toMatchObject({
+      type: 'progress',
+      progress: {
+        currentPass: 1,
+        completedPasses: 0,
+        maxPasses: 6,
+        retrievalPlanned: 5,
+        retrievalCompleted: 5,
+        evidenceItems: 19,
+        model: {
+          provider: 'deepseek',
+          name: 'deepseek-v4-pro',
+          thinking: 'enabled',
+          effort: 'high',
+        },
+        phaseStartedAt: '2026-07-22T01:00:54Z',
+        heartbeatAt: '2026-07-22T01:01:34Z',
+      },
+    });
+    const completed = events.find(
+      (event) => event.type === 'progress' && event.progress.phase === 'completed'
+    );
+    expect(completed).toMatchObject({
+      type: 'progress',
+      progress: {
+        artifactStatus: 'indexed',
+        artifactId: 'analysis_task_1',
+      },
+    });
     const final = events.find((event) => event.type === 'result');
     expect(final).toMatchObject({
       type: 'result',
@@ -226,6 +315,7 @@ describe('deep reasoning task client', () => {
       'X-Tenant-Id': 'personal',
       'X-Permissions': 'knowledge:reason',
     });
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed when task submission is unavailable', async () => {
@@ -415,6 +505,62 @@ describe('deep reasoning task client', () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it('repeats the top artifact topics for a request for the biggest weaknesses', async () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_overview'))!;
+    const post = vi.fn();
+
+    const turn = await resolveExistingAnalysisTurn(
+      user('Tell me the biggest weaknesses of the document.'),
+      createAnalysisConversationState(artifact, artifact.taskId),
+      intelligence,
+      undefined,
+      { post, get: vi.fn() }
+    );
+
+    expect(turn?.decision).toMatchObject({
+      action: 'list_topics',
+      selectedTopicIds: artifact.topics.slice(0, 3).map((topic) => topic.topicId),
+      reason: 'analysis_overview',
+    });
+    expect(turn?.result?.presentation?.mode).toBe('menu');
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('allows document wording in a semantic artifact search', async () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_document_search'))!;
+    const post = vi.fn().mockResolvedValue({
+      data: {
+        matches: [
+          {
+            normalized_score: 0.9,
+            node: {
+              artifact_id: artifact.artifactId,
+              tenant_id: artifact.tenantId,
+              kind: 'finding',
+              ref_id: 'finding_gate_scaling',
+              topic_ids: ['topic_acquisition'],
+            },
+          },
+        ],
+      },
+    });
+
+    const turn = await resolveExistingAnalysisTurn(
+      user('What conclusion did this document reach about defensibility?'),
+      createAnalysisConversationState(artifact, artifact.taskId),
+      intelligence,
+      undefined,
+      { post, get: vi.fn() }
+    );
+
+    expect(turn?.decision).toMatchObject({
+      action: 'open_topic',
+      selectedTopicIds: ['topic_acquisition'],
+      reason: 'artifact_node_search',
+    });
+    expect(post).toHaveBeenCalledOnce();
+  });
+
   it('does not search analysis memory for an unrelated source-fact lookup', async () => {
     const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_source'))!;
     const post = vi.fn();
@@ -457,8 +603,41 @@ describe('deep result naturalization', () => {
 
     const guarded = guardAnalysisVoiceResponse(Array(70).fill('excess').join(' '), result);
 
-    expect(guarded).toMatchObject({ limit: 65, replaced: true, text: result.answer });
+    expect(guarded).toMatchObject({ limit: 65, replaced: true });
+    expect(guarded.text).toBe(
+      'Validate repeatable demand before investing in replication. Which should we explore first: Acquisition risk, Pricing economics, or Validation plan?'
+    );
     expect(guarded.text.trim().split(/\s+/).length).toBeLessThanOrEqual(65);
+  });
+
+  it('repairs a short artifact brief that trails off without a navigation question', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const result: DeepReasoningResult = {
+      status: 'succeeded',
+      workflow: 'strategy_review',
+      taskId: artifact.taskId,
+      claims: [],
+      evidence: [],
+      artifact,
+      presentation: {
+        mode: 'brief',
+        selectedTopicIds: artifact.topics.slice(0, 3).map((topic) => topic.topicId),
+        reason: 'completed_deep_analysis',
+      },
+      modelUsage: [],
+      durationMs: 0,
+      completedSteps: 1,
+      retrievalQueries: 5,
+    };
+
+    const guarded = guardAnalysisVoiceResponse(
+      'Validate demand first. Acquisition risk. Pricing economics. Validation plan.',
+      result
+    );
+
+    expect(guarded.replaced).toBe(true);
+    expect(guarded.text.endsWith('?')).toBe(true);
+    expect(guarded.text).toContain('Which should we explore first');
   });
 
   it('places validated claims after the stable cache marker and forbids new facts', () => {
@@ -524,9 +703,31 @@ describe('deep result naturalization', () => {
     expect(prompt).toContain('Acquisition risk:');
     expect(prompt).toContain('Pricing economics:');
     expect(prompt).toContain('Validation plan:');
+    expect(prompt).toContain('end by explicitly asking which topic');
     expect(prompt).not.toContain('Market positioning:');
     expect(prompt).not.toContain('The plan should measure a repeatable channel before scaling it.');
     expect(prompt).not.toContain('What is measured acquisition cost by channel?');
+  });
+
+  it('permits evidence-based critique without treating an inference as a quoted fact', () => {
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt([], [], {
+      status: 'retrieved',
+      groundingMode: 'strict',
+      items: [
+        {
+          rank: 1,
+          evidenceId: 'ev_1',
+          citationId: 'cite_1',
+          title: 'Plan',
+          sectionPath: ['Economics'],
+          text: 'The plan assumes acquisition cost remains fixed.',
+        },
+      ],
+      durationMs: 1,
+    });
+
+    expect(prompt).toContain('you may draw reasoned conclusions');
+    expect(prompt).toContain('rather than claiming the document explicitly states them');
   });
 
   it('exposes only the selected topic when navigating an existing analysis', () => {
@@ -557,5 +758,12 @@ describe('deep result naturalization', () => {
     expect(prompt).toContain('Measure price, acquisition cost, and margin in the same experiment.');
     expect(prompt).not.toContain('The plan should measure a repeatable channel before scaling it.');
     expect(prompt).not.toContain('Test whether the narrower promise improves qualified demand.');
+    expect(prompt).toContain('making these moves in order');
+    expect(prompt).toContain('Next topics to offer:');
+    expect(prompt).toContain(
+      'Acquisition risk: The repeatable acquisition channel remains unproven.'
+    );
+    expect(prompt).toContain('Validation plan: Run a bounded paid-demand test before replication.');
+    expect(prompt).not.toContain('Market positioning:');
   });
 });
