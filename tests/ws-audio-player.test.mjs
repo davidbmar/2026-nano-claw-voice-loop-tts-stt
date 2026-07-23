@@ -157,7 +157,7 @@ assert.deepEqual(
 assert.equal(player.context.createdWorkletNodes.length, 1, "one continuous player node is created");
 assert.equal(player.context.createdSources.length, 0, "the worklet path creates no buffer sources");
 assert.equal(player.context.createdBuffers.length, 0, "the worklet path creates no per-frame buffers");
-assert.match(player.context.addedModules[0], /pcm-player-worklet\.js$/);
+assert.match(player.context.addedModules[0], /pcm-player-worklet\.js\?v=/);
 assert.equal(player.analyser.destination, player.context.destination);
 
 const node = player.context.createdWorkletNodes[0];

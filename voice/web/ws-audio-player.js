@@ -5,7 +5,14 @@
 export const DEFAULT_INITIAL_LEAD_SECONDS = 0.15;
 const MAX_INITIAL_LEAD_SECONDS = 0.18;
 const PLAYER_PROCESSOR_NAME = "nano-claw-pcm-player";
-const DEFAULT_WORKLET_MODULE_URL = new URL("./pcm-player-worklet.js", import.meta.url).href;
+// AudioWorklet modules cache aggressively and the browser will keep an old copy
+// forever without a changing URL. Bump this whenever the worklet changes so a
+// plain reload always fetches the current player (no hard-refresh required).
+const WORKLET_VERSION = "0.4.0";
+const DEFAULT_WORKLET_MODULE_URL = new URL(
+    "./pcm-player-worklet.js?v=" + WORKLET_VERSION,
+    import.meta.url,
+).href;
 
 function browserAudioContextClass() {
     if (typeof window === "undefined") return null;
@@ -105,6 +112,21 @@ export class Pcm16AudioPlayer {
         );
         node.connect(this.analyser);
         this.worklet = node;
+
+        // Diagnostics: prove which worklet build is live and surface playback
+        // underruns (the source of the between-sentence tick) as they happen.
+        if (typeof console !== "undefined" && console.info) {
+            console.info("[nano-claw] audio player worklet v" + WORKLET_VERSION + " loaded");
+        }
+        node.port.onmessage = function (event) {
+            const data = event && event.data;
+            if (data && data.type === "underrun" && typeof console !== "undefined" && console.warn) {
+                console.warn(
+                    "[nano-claw] playback underrun #" + data.count +
+                    " (buffer ran dry between chunks; declicked)",
+                );
+            }
+        };
 
         const pending = this._pendingMessages;
         this._pendingMessages = [];

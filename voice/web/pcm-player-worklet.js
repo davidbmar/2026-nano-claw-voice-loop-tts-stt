@@ -83,6 +83,7 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
         this.ring = new Float32RingBuffer(Math.max(2048, this.prebufferSamples + 128));
         this.started = false;
         this._underran = false;
+        this._underrunCount = 0;
         this.sourcePosition = 0;
 
         this.port.onmessage = (event) => {
@@ -172,6 +173,16 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             const tail = Math.min(fade, rendered);
             for (let i = 0; i < tail; i += 1) {
                 output[rendered - tail + i] *= (tail - 1 - i) / tail;
+            }
+            if (!this._underran) {
+                // Count only the transition INTO an underrun (one event per gap,
+                // not per starved block). Reported to the main thread so the
+                // page can show that underruns are the tick source and that the
+                // declick is smoothing them.
+                this._underrunCount += 1;
+                if (this.port && typeof this.port.postMessage === "function") {
+                    this.port.postMessage({ type: "underrun", count: this._underrunCount });
+                }
             }
             this._underran = true;
         }
