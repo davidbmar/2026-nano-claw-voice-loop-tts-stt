@@ -35,31 +35,71 @@ class FlowModeConfig(TypedDict):
     label: str
     profile: str
     scheduler: bool
+    abstract: str
 
 
 FLOW_MODES: dict[str, FlowModeConfig] = {
-    "none": {"label": "None", "profile": "none", "scheduler": False},
+    "none": {
+        "label": "None",
+        "profile": "none",
+        "scheduler": False,
+        "abstract": "Plain assistant with no persona and no document knowledge.",
+    },
     "spacechannel": {
-        "label": "HYPERRIFF",
+        "label": "Spacechannel",
         "profile": "spacechannel",
         "scheduler": False,
+        "abstract": "Space Channel persona for general conversation and demos.",
     },
     "intelligence": {
         "label": "Document Intelligence",
         "profile": "intelligence",
         "scheduler": False,
+        "abstract": (
+            "Answers from ingested documents with citations; deep strategy "
+            "analysis on request. Currently loaded: the Owning the Demand playbook."
+        ),
+    },
+    "riff": {
+        "label": "Riff",
+        "profile": "riff",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the Riff codebase (~/src/riff) from its "
+            "indexed source files."
+        ),
+    },
+    "nanoclaw": {
+        "label": "nano-claw",
+        "profile": "nanoclaw",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the nano-claw voice agent codebase from "
+            "its indexed source files."
+        ),
+    },
+    "intelligence-platform": {
+        "label": "intelligence-platform",
+        "profile": "intelligence-platform",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the intelligence-platform codebase from "
+            "its indexed source files."
+        ),
     },
     "replicantpm": {
         "label": "Replicant PM",
         "profile": "replicantpm",
         "scheduler": False,
+        "abstract": "Replicant product-manager persona.",
     },
     "scheduler": {
         "label": "Plumber Scheduler",
-        # If the scheduler is unavailable or ends, retain today's Space Channel
+        # If the scheduler is unavailable or ends, retain the Space Channel
         # fallback behavior for subsequent normal agent turns.
         "profile": "spacechannel",
         "scheduler": True,
+        "abstract": "Goal-driven plumber scheduling flow with live availability.",
     },
 }
 DEFAULT_FLOW_MODE = "spacechannel"

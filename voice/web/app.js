@@ -178,6 +178,8 @@ const benchmarkSupervisor = document.getElementById('benchmark-supervisor');
 const benchmarkP50 = document.getElementById('benchmark-p50');
 const benchmarkTurns = document.getElementById('benchmark-turns');
 const contextCollections = document.getElementById('context-collections');
+const modeAbstract = document.getElementById('mode-abstract');
+var flowModeAbstracts = {};
 const latencyStt = document.getElementById('latency-stt');
 const latencyLlm = document.getElementById('latency-llm');
 const latencyTts = document.getElementById('latency-tts');
@@ -1155,6 +1157,12 @@ function renderFlowConfig(config) {
     : [];
   if (!options.length) options = DEFAULT_FLOW_OPTIONS.slice();
   var active = typeof config.active === 'string' ? config.active : '';
+  flowModeAbstracts = {};
+  options.forEach(function (option) {
+    if (option && typeof option.abstract === 'string') {
+      flowModeAbstracts[option.id] = option.abstract;
+    }
+  });
   var selected = Pipeline.applyModelOptions(
     flowSelect,
     options.map(function (option) {
@@ -1168,6 +1176,12 @@ function renderFlowConfig(config) {
     'hidden',
     selected !== 'scheduler' || config.availability_ok === true
   );
+  updateModeAbstract(selected);
+}
+
+function updateModeAbstract(modeId) {
+  if (!modeAbstract) return;
+  modeAbstract.textContent = flowModeAbstracts[modeId] || '';
 }
 
 function loadFlowConfig() {
@@ -1188,6 +1202,7 @@ function loadFlowConfig() {
 }
 
 flowSelect.addEventListener('change', function () {
+  updateModeAbstract(flowSelect.value);
   flowSelect.disabled = true;
   fetch('/api/voice/flow', {
     method: 'POST',

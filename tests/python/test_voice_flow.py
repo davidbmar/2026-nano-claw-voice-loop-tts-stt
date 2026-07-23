@@ -487,6 +487,7 @@ def test_browser_flow_greets_speaks_and_reverts_to_normal_api(monkeypatch):
     monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
     ws = FakeWebSocket()
     session = FakeBrowserSession()
+    assert set_flow_mode("scheduler") is True
     session._scheduler_flow_enabled = True
     session._scheduler_flow_attempted = False
     session._scheduler_flow = None
@@ -534,6 +535,7 @@ def test_browser_first_flow_reply_keeps_audio_gate_closed(monkeypatch):
         monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
         ws = FakeWebSocket()
         session = FakeBrowserSession()
+        assert set_flow_mode("scheduler") is True
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = False
         session._scheduler_flow = None
@@ -594,6 +596,7 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
         monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
         ws = FakeWebSocket()
         session = BlockingSession()
+        assert set_flow_mode("scheduler") is True
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = True
         session._scheduler_flow = TerminalFlow()
@@ -630,9 +633,13 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
         "none",
         "spacechannel",
         "intelligence",
+        "riff",
+        "nanoclaw",
+        "intelligence-platform",
         "replicantpm",
         "scheduler",
     ]
+    assert all(mode.get("abstract") for mode in FLOW_MODES.values())
     assert DEFAULT_FLOW_MODE == "spacechannel"
     assert get_flow_mode() == "spacechannel"
     assert get_flow_profile() == "spacechannel"
@@ -665,17 +672,23 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
         try:
             response = await client.get("/api/voice/flow")
             assert response.status == 200
-            assert await response.json() == {
-                "active": "scheduler",
-                "options": [
-                    {"id": "none", "label": "None"},
-                    {"id": "spacechannel", "label": "HYPERRIFF"},
-                    {"id": "intelligence", "label": "Document Intelligence"},
-                    {"id": "replicantpm", "label": "Replicant PM"},
-                    {"id": "scheduler", "label": "Plumber Scheduler"},
-                ],
-                "availability_ok": True,
-            }
+            payload = await response.json()
+            assert payload["active"] == "scheduler"
+            assert payload["availability_ok"] is True
+            assert [(o["id"], o["label"]) for o in payload["options"]] == [
+                ("none", "None"),
+                ("spacechannel", "Spacechannel"),
+                ("intelligence", "Document Intelligence"),
+                ("riff", "Riff"),
+                ("nanoclaw", "nano-claw"),
+                ("intelligence-platform", "intelligence-platform"),
+                ("replicantpm", "Replicant PM"),
+                ("scheduler", "Plumber Scheduler"),
+            ]
+            assert all(
+                isinstance(o.get("abstract"), str) and o["abstract"]
+                for o in payload["options"]
+            )
 
             response = await client.post(
                 "/api/voice/flow", json={"mode": "off"}
@@ -804,6 +817,7 @@ def test_browser_flow_turn_emits_live_flow_state(monkeypatch):
     monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
     ws = FakeWebSocket()
     session = FakeBrowserSession()
+    assert set_flow_mode("scheduler") is True
     session._scheduler_flow_enabled = True
     session._scheduler_flow_attempted = True
     session._scheduler_flow = FakeFlow()
@@ -865,6 +879,7 @@ def test_cancelled_flow_reply_serializes_next_runner_turn(monkeypatch):
         monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
         ws = FakeWebSocket()
         browser_session = FakeBrowserSession()
+        assert set_flow_mode("scheduler") is True
         browser_session._scheduler_flow_enabled = True
         browser_session._scheduler_flow_attempted = True
         browser_session._scheduler_flow = FlowSession(SlowRunner())
@@ -974,3 +989,60 @@ def test_orphaned_flow_exception_does_not_break_next_turn(caplog):
     run(exercise())
     assert "Discarded scheduler flow turn failed" in caplog.text
     assert "orphan failed" in caplog.text
+
+
+def test_browser_mid_session_switch_to_scheduler_engages_flow(monkeypatch):
+    """Switching MODE to the scheduler mid-session must engage the flow on the
+    next turn instead of leaving the session on the fallback persona forever
+    (regression: the gate was a snapshot taken at session creation)."""
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    created = []
+
+    class TrackingFlowSession:
+        @classmethod
+        def create(cls):
+            created.append(True)
+            return None  # availability missing -> graceful fallback after the attempt
+
+    monkeypatch.setattr(server, "FlowSession", TrackingFlowSession)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()  # created while a non-scheduler mode was active
+    client = FakeHttpClient()
+
+    assert set_flow_mode("scheduler") is True
+    try:
+        run(server._handle_agent_request(ws, session, client, "book me a plumber"))
+    finally:
+        set_flow_mode("spacechannel")
+
+    assert created, "mid-session switch to scheduler must attempt the flow engine"
+    assert len(client.calls) == 1, "failed activation falls back to the normal agent path"
+
+
+def test_browser_switch_away_from_scheduler_disengages_flow(monkeypatch):
+    """Switching MODE away from the scheduler mid-session routes the next turn
+    to the normal agent path without touching the retained flow."""
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+
+    class UnexpectedFlowSession:
+        @classmethod
+        def create(cls):
+            raise AssertionError("flow must not be created when the mode is not scheduler")
+
+    monkeypatch.setattr(server, "FlowSession", UnexpectedFlowSession)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._scheduler_flow_enabled = True
+    session._scheduler_flow_attempted = True
+    session._scheduler_flow = object()  # active flow retained for a switch-back
+
+    client = FakeHttpClient()
+    assert set_flow_mode("intelligence") is True
+    try:
+        run(server._handle_agent_request(ws, session, client, "hello"))
+    finally:
+        set_flow_mode("spacechannel")
+
+    assert len(client.calls) == 1
+    assert client.calls[0][2]["json"]["profile"] == "intelligence"
+    assert session._scheduler_flow is not None, "flow is retained for switch-back"

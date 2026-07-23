@@ -1222,24 +1222,32 @@ async def _handle_scheduler_request(
 ) -> bool:
     """Handle an enabled scheduler turn before the normal API route."""
 
-    if not getattr(session, "_scheduler_flow_enabled", False):
+    # Live gate: the runtime mode is read per turn so switching to the
+    # scheduler mid-session engages the flow on the next utterance instead of
+    # silently falling through to the FLOW_MODES fallback persona for the rest
+    # of the session (the pre-fix behavior: a stale snapshot taken at session
+    # creation left the engine off and every turn spoke as Space Channel).
+    if get_flow_mode() != "scheduler":
         return False
 
     flow = getattr(session, "_scheduler_flow", None)
+    if flow is None and getattr(session, "_scheduler_flow_attempted", False):
+        # A prior activation failed or the flow already completed; later
+        # scheduler-mode turns stay on the normal agent path per FLOW_MODES.
+        return False
     greeting = None
     greeting_token = None
     current_token = None
     greeting_receipt = None
     current_receipt = None
     if flow is None:
-        if getattr(session, "_scheduler_flow_attempted", False):
-            return False
         session._scheduler_flow_attempted = True
         flow = FlowSession.create()
         if flow is None:
             session._scheduler_flow_enabled = False
             return False
         session._scheduler_flow = flow
+        session._scheduler_flow_enabled = True
         greeting = flow.greeting
         await ws.send_json({"type": "agent_reply", "text": greeting})
         # One audio gate covers both the greeting and the pending first reply;
@@ -2515,7 +2523,11 @@ def _flow_api_payload() -> dict:
     return {
         "active": get_flow_mode(),
         "options": [
-            {"id": mode_id, "label": mode["label"]}
+            {
+                "id": mode_id,
+                "label": mode["label"],
+                "abstract": mode.get("abstract", ""),
+            }
             for mode_id, mode in FLOW_MODES.items()
         ],
         "availability_ok": FlowSession.availability_ok(),

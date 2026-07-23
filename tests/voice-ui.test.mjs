@@ -75,16 +75,20 @@ const flowOptions = [
 ].map((match) => [match[1], match[2]]);
 assert.deepEqual(flowOptions, [
   ['none', 'None'],
-  ['spacechannel', 'HYPERRIFF'],
+  ['spacechannel', 'Spacechannel'],
   ['intelligence', 'Document Intelligence'],
+  ['riff', 'Riff'],
+  ['nanoclaw', 'nano-claw'],
+  ['intelligence-platform', 'intelligence-platform'],
   ['replicantpm', 'Replicant PM'],
   ['scheduler', 'Plumber Scheduler'],
 ]);
 assert.match(
   flowSelect,
-  /<option value="spacechannel" selected>HYPERRIFF<\/option>/,
-  'assistant mode must render HYPERRIFF instead of a blank value before fetch resolves'
+  /<option value="spacechannel" selected>Spacechannel<\/option>/,
+  'assistant mode must render a non-blank default before fetch resolves'
 );
+assert.match(voiceHtml, /id="mode-abstract"/, 'context panel must describe the active mode');
 assert.match(
   appSource,
   /Pipeline\.applyModelOptions\(\s*flowSelect,/,
