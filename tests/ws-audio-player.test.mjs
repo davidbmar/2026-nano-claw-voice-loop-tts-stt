@@ -192,9 +192,13 @@ assert.ok(
 );
 
 player.enqueue(frame);
+// The very first block after start ramps in from zero (a clean onset, no
+// startup tick), then plays at full level.
+const firstBlock = node.render(128)[0];
+assert.ok(firstBlock[0] < 0.5, "playback onset ramps up from zero");
 assert.ok(
-    node.render(128)[0].every((sample) => sample === 0.5),
-    "crossing the prebuffer threshold starts PCM playback",
+    firstBlock.subarray(48).every((sample) => sample === 0.5),
+    "playback reaches full level after the onset fade-in",
 );
 
 const drained = node.render(8000)[0];

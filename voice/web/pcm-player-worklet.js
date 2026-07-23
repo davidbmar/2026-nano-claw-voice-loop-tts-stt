@@ -82,7 +82,8 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             : Math.round(this.sourceSampleRate * 0.15);
         this.ring = new Float32RingBuffer(Math.max(2048, this.prebufferSamples + 128));
         this.started = false;
-        this._underran = false;
+        // Fade the very first block in from zero (a clean playback onset).
+        this._underran = true;
         this._underrunCount = 0;
         this.sourcePosition = 0;
 
@@ -92,6 +93,10 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             if (message.type === "flush") {
                 this.ring.clear();
                 this.started = false;
+                // Fade the first block in after a (re)start, exactly as after an
+                // underrun, so playback onset ramps from zero instead of
+                // stepping — the tick heard right before speech begins.
+                this._underran = true;
                 this.sourcePosition = 0;
                 return;
             }
