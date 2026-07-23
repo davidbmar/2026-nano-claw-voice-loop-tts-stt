@@ -402,13 +402,18 @@ export function createAnalysisConversationState(
   taskId: string,
   analysisStyle: AnalysisStyle = artifact.promptVersion.includes('principle_graph')
     ? 'principle_graph'
-    : 'topic_map'
+    : 'topic_map',
+  offeredTopicIds?: string[]
 ): AnalysisConversationState {
+  const known = new Set(artifact.topics.map((item) => item.topicId));
+  const offered = offeredTopicIds?.filter((id) => known.has(id));
   return {
     artifact,
     taskId,
     analysisStyle,
-    offeredTopicIds: artifact.topics.slice(0, 3).map((item) => item.topicId),
+    offeredTopicIds: offered?.length
+      ? offered
+      : artifact.topics.slice(0, 3).map((item) => item.topicId),
     visitedTopicIds: [],
     updatedAt: new Date().toISOString(),
   };

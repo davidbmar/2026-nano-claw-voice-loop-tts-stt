@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextBuilder } from '../src/agent/context';
 import {
+  ENUMERATE_INTENT_RE,
+  analysisStateFromResult,
+  applyEnumerateIntent,
   classifyAffirmationReply,
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
@@ -805,7 +808,7 @@ describe('registry artifact routing', () => {
   it('adopts a registry artifact for a fresh analysis-shaped question', async () => {
     const http = mockHttp();
     const turn = await resolveRegistryAnalysisTurn(
-      [{ role: 'user', content: 'What are the key principles behind the pricing economics?' }],
+      [{ role: 'user', content: 'What assumptions drive the pricing economics conclusion?' }],
       intelligence,
       undefined,
       http
@@ -1068,5 +1071,90 @@ describe('reflect-hydrate-affirm gate', () => {
     }
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0][1].goal).toBe('Hydrated goal.');
+  });
+});
+
+describe('enumerate presentation', () => {
+  it('detects list-shaped deep asks', () => {
+    expect(ENUMERATE_INTENT_RE.test('Enumerate the core principles and rank them')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('list the key principles of the plan')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('what are the core principles?')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('tell me about the pricing model')).toBe(false);
+  });
+
+  it('upgrades a fresh artifact result to the full ranked enumeration', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const brief: DeepReasoningResult = {
+      status: 'succeeded',
+      workflow: 'strategy_review',
+      taskId: 'task_1',
+      claims: [],
+      evidence: [],
+      artifact,
+      presentation: {
+        mode: 'brief',
+        selectedTopicIds: artifact.topics.slice(0, 3).map((t) => t.topicId),
+        reason: 'completed_deep_analysis',
+      },
+      modelUsage: [],
+      durationMs: 0,
+      completedSteps: 0,
+      retrievalQueries: 0,
+    };
+    const upgraded = applyEnumerateIntent(brief, 'Enumerate and rank the core principles');
+    expect(upgraded.presentation?.mode).toBe('enumerate');
+    expect(upgraded.presentation?.selectedTopicIds).toHaveLength(artifact.topics.length);
+    const untouched = applyEnumerateIntent(brief, 'critique the strategy');
+    expect(untouched.presentation?.mode).toBe('brief');
+
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt(
+      [],
+      [],
+      undefined,
+      upgraded
+    );
+    expect(prompt).toContain('spoken rank');
+    expect(prompt).toContain('Market positioning:');
+    expect(prompt).toContain('Validation plan:');
+
+    const guard = guardAnalysisVoiceResponse('way too short', upgraded);
+    expect(guard.replaced).toBe(true);
+    expect(guard.text).toContain('first, Acquisition risk');
+    expect(guard.text).toContain('fourth, Market positioning');
+    expect(guard.limit).toBe(110);
+
+    const state = analysisStateFromResult(upgraded, 'topic_map');
+    expect(state?.offeredTopicIds).toHaveLength(artifact.topics.length);
+  });
+
+  it('enumerates from the registry for fresh list-shaped questions', async () => {
+    const http = {
+      post: vi.fn().mockResolvedValue({
+        data: {
+          matches: [
+            {
+              node: { artifact_id: 'analysis_task_1', tenant_id: 'personal' },
+              raw_score: 3,
+              normalized_score: 0.7,
+              rank: 1,
+            },
+          ],
+        },
+      }),
+      get: vi.fn().mockResolvedValue({
+        data: { artifact: analysisArtifactFixture(), analysis_style: 'topic_map' },
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'List the key principles of the plan and rank them' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn!.decision.reason).toBe('registry_artifact_enumerate');
+    expect(turn!.result?.presentation?.mode).toBe('enumerate');
+    expect(turn!.result?.presentation?.selectedTopicIds).toHaveLength(4);
+    expect(turn!.state.offeredTopicIds).toHaveLength(4);
   });
 });

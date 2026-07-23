@@ -150,6 +150,20 @@ export class ContextBuilder {
           for (const topic of selectedTopics) {
             parts.push(`- ${topic.label}: ${topic.voicePreview}`);
           }
+        } else if (presentation.mode === 'enumerate') {
+          parts.push(
+            'The caller asked for the full enumeration. State the bottom line, then name ' +
+              'every listed topic in rank order as the ranked list the caller asked for, ' +
+              'introducing each with its spoken rank — first, second, third — followed by ' +
+              'the topic label and at most a short phrase. Normally no more than 110 words. ' +
+              'End by asking which topic to explore. Do not use markdown, numbered-list ' +
+              'punctuation, URLs, or citation syntax.'
+          );
+          parts.push(`\nBottom line: ${artifact.bottomLine}`);
+          parts.push('\nTopics in rank order:');
+          for (const topic of selectedTopics) {
+            parts.push(`- ${topic.label}: ${topic.voicePreview}`);
+          }
         } else if (presentation.mode === 'menu') {
           parts.push(
             'Offer only these topics in the supplied order, in at most 45 words. Give each a ' +

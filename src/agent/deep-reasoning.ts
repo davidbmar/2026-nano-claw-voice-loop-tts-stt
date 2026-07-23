@@ -67,7 +67,14 @@ export interface DeepClaim {
   evidenceIds: string[];
 }
 
-export type AnalysisPresentationMode = 'brief' | 'topic' | 'evidence' | 'menu' | 'report' | 'gaps';
+export type AnalysisPresentationMode =
+  | 'brief'
+  | 'topic'
+  | 'evidence'
+  | 'menu'
+  | 'report'
+  | 'gaps'
+  | 'enumerate';
 
 export interface AnalysisPresentation {
   mode: AnalysisPresentationMode;
@@ -175,6 +182,19 @@ function spokenWordCount(text: string): number {
   return normalized ? normalized.split(/\s+/).length : 0;
 }
 
+const ORDINAL_WORDS = [
+  'first',
+  'second',
+  'third',
+  'fourth',
+  'fifth',
+  'sixth',
+  'seventh',
+  'eighth',
+  'ninth',
+  'tenth',
+];
+
 function spokenList(labels: string[]): string {
   if (labels.length === 1) return labels[0];
   if (labels.length === 2) return `${labels[0]} or ${labels[1]}`;
@@ -189,6 +209,7 @@ export function analysisVoiceWordLimit(
   const mode = result.presentation?.mode || 'brief';
   if (mode === 'brief') return 65;
   if (mode === 'menu') return 45;
+  if (mode === 'enumerate') return 110;
   return undefined;
 }
 
@@ -209,6 +230,12 @@ function deterministicAnalysisSpeech(result: DeepReasoningResult): string {
     return `Which should we explore: ${menu}?`;
   }
   const bottomLine = artifact.bottomLine.replace(/[.!?]+$/, '');
+  if (result.presentation?.mode === 'enumerate') {
+    const ranked = (labels.length ? labels : artifact.topics.map((item) => item.label))
+      .map((label, index) => `${ORDINAL_WORDS[index] || `number ${index + 1}`}, ${label}`)
+      .join('; ');
+    return `${bottomLine}. In rank order: ${ranked}. Which should we explore first?`;
+  }
   return `${bottomLine}. Which should we explore first: ${menu}?`;
 }
 
@@ -220,7 +247,7 @@ export function guardAnalysisVoiceResponse(
   const limit = analysisVoiceWordLimit(result);
   const normalized = text.trim();
   const mode = result?.presentation?.mode || (result?.artifact ? 'brief' : undefined);
-  const needsNavigationQuestion = mode === 'brief' || mode === 'menu';
+  const needsNavigationQuestion = mode === 'brief' || mode === 'menu' || mode === 'enumerate';
   const hasNavigationQuestion = /\?\s*$/.test(normalized);
   if (
     limit === undefined ||
@@ -246,6 +273,32 @@ function latestUserText(messages: Message[]): string | undefined {
     .filter((message) => message.role === 'user' && message.content.trim())
     .at(-1)
     ?.content.trim();
+}
+
+/**
+ * List-shaped deep asks ("enumerate", "rank", "list the principles") get the full
+ * ranked enumeration spoken, not the three-topic teaser. Exported for 060's corpus.
+ */
+export const ENUMERATE_INTENT_RE =
+  /\b(enumerate|list (?:them|all|the)|rank(?:ing)? them|rank(?:ed)? (?:list|order)|name (?:them|all|each)|all (?:of )?the (?:core |key |main )?(?:principles|topics|findings|risks)|what are (?:all )?the (?:core |key |main )?(?:principles|topics))\b/i;
+
+/**
+ * Upgrade a fresh artifact result to the enumerate presentation when the goal
+ * asked for the full list. No-op for non-artifact or non-list results.
+ */
+export function applyEnumerateIntent(
+  result: DeepReasoningResult,
+  goal: string
+): DeepReasoningResult {
+  if (!result.artifact || !result.presentation || !ENUMERATE_INTENT_RE.test(goal)) return result;
+  return {
+    ...result,
+    presentation: {
+      mode: 'enumerate',
+      selectedTopicIds: result.artifact.topics.map((topic) => topic.topicId),
+      reason: 'enumerate_request',
+    },
+  };
 }
 
 /** Explicit fresh-analysis requests always bypass artifact reuse. Exported for 060's corpus. */
@@ -426,16 +479,22 @@ export async function resolveRegistryAnalysisTurn(
     const style =
       record.data?.analysis_style === 'principle_graph' ? 'principle_graph' : 'topic_map';
     const state = createAnalysisConversationState(artifact, artifact.taskId, style);
-    let decision: AnalysisNavigationDecision | undefined = ANALYSIS_GAPS_RE.test(
-      userText.toLowerCase()
-    )
+    const lowered = userText.toLowerCase();
+    let decision: AnalysisNavigationDecision | undefined = ENUMERATE_INTENT_RE.test(userText)
       ? {
-          action: 'show_gaps',
-          selectedTopicIds: gapRelatedTopicIds(artifact),
+          action: 'list_topics',
+          selectedTopicIds: artifact.topics.map((topic) => topic.topicId),
           confidence: best.score,
-          reason: 'registry_artifact_gaps',
+          reason: 'registry_artifact_enumerate',
         }
-      : analysisSearchDecision(search.data, state);
+      : ANALYSIS_GAPS_RE.test(lowered)
+        ? {
+            action: 'show_gaps',
+            selectedTopicIds: gapRelatedTopicIds(artifact),
+            confidence: best.score,
+            reason: 'registry_artifact_gaps',
+          }
+        : analysisSearchDecision(search.data, state);
     if (!decision) {
       decision = {
         action: 'list_topics',
@@ -446,10 +505,14 @@ export async function resolveRegistryAnalysisTurn(
     }
     decision = { ...decision, artifactId: artifact.artifactId };
     const nextState = applyAnalysisNavigation(state, decision);
+    const projected = resultForAnalysisNavigation(nextState, decision);
     return {
       decision,
       state: nextState,
-      result: resultForAnalysisNavigation(nextState, decision),
+      result:
+        decision.reason === 'registry_artifact_enumerate'
+          ? applyEnumerateIntent(projected, userText)
+          : projected,
     };
   } catch (error) {
     logger.warn(
@@ -1149,7 +1212,10 @@ export async function* streamDeepReasoning(
         terminal = true;
         yield {
           type: 'result',
-          result: parseResult(submitted.data, started, intelligence.tenantId),
+          result: applyEnumerateIntent(
+            parseResult(submitted.data, started, intelligence.tenantId),
+            goal
+          ),
         };
         return;
       }
@@ -1278,7 +1344,12 @@ export function analysisStateFromResult(
   analysisStyle = DEFAULT_DEEP_REASONING_CONFIG.analysisStyle
 ): AnalysisConversationState | undefined {
   if (result.status !== 'succeeded' || !result.taskId || !result.artifact) return undefined;
-  return createAnalysisConversationState(result.artifact, result.taskId, analysisStyle);
+  return createAnalysisConversationState(
+    result.artifact,
+    result.taskId,
+    analysisStyle,
+    result.presentation?.mode === 'enumerate' ? result.presentation.selectedTopicIds : undefined
+  );
 }
 
 /** Re-fetch one authorized completed result when a follow-up explicitly requests source evidence. */
