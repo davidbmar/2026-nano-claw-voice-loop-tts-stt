@@ -202,15 +202,18 @@ def test_declick_leaves_short_pcm_untouched():
     assert tts._declick_edges(tiny) == tiny
 
 
-def test_declick_fade_out_is_longer_than_fade_in():
-    # The trailing fade masks Lux's abrupt truncation, so it must span more
-    # samples than the onset fade (which stays short to preserve attack).
-    assert tts._DECLICK_OUT_SAMPLES > tts._DECLICK_IN_SAMPLES
+def test_declick_fades_both_edges_from_and_to_zero():
+    # Both edges ramp between zero and full scale; the fade-out is at least as
+    # long as the fade-in (it also masks Lux's abrupt truncation).
+    assert tts._DECLICK_OUT_SAMPLES >= tts._DECLICK_IN_SAMPLES
     n = tts.TARGET_RATE // 5  # 200 ms
     tone = np.full(n, 10000, dtype=np.int16).tobytes()
     s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16).astype(np.int32)
-    # A sample just inside the fade-in window is already near full scale, while
-    # the mirror-position sample inside the longer fade-out window is not.
-    probe = tts._DECLICK_IN_SAMPLES + 1
-    assert abs(int(s[probe])) > 8000, "onset recovers to near full scale quickly"
-    assert abs(int(s[-probe])) < 8000, "release is still ramping down at the mirror point"
+    assert abs(int(s[0])) < 200, "onset starts at ~zero"
+    assert abs(int(s[-1])) < 200, "release ends at ~zero"
+    # Interior (well past both fades) is untouched full scale.
+    assert int(s[n // 2]) == 10000
+    # The onset ramp is gradual enough to smooth a hard engine onset (Lux):
+    # no single step in the fade-in window exceeds a small fraction of scale.
+    fin = tts._DECLICK_IN_SAMPLES
+    assert int(np.abs(np.diff(s[:fin])).max()) < 60, "onset ramp has no hard step"

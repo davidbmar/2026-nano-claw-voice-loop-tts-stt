@@ -38,7 +38,12 @@ def _declick_ms(name: str, default: int) -> int:
         return default
 
 
-_DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 5) // 1000
+# Lux (voice cloning) starts every chunk at full amplitude — measured first
+# sample ~850-1000 — a hard step from silence heard as a tick at the start of
+# each sentence. Piper/Kokoro start at zero, so a longer fade-in is a no-op for
+# them and only smooths Lux's hard onset. 15ms makes the attack gradual enough
+# to stop reading as a click.
+_DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 15) // 1000
 _DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 18) // 1000
 
 
