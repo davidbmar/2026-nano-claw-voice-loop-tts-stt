@@ -174,6 +174,24 @@ def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
+# Lux (voice cloning) prepends a short voiced onset burst to every synthesis —
+# ~15-25ms of energy that a listener hears as a spurious syllable ("ow"/"now")
+# at the start of each sentence. Fading only quiets it; the samples must be
+# removed. Whisper is not a detector here — its language model corrects the
+# stray syllable away even when it is audible. Trim the leading burst outright.
+# 22ms clears the burst on the samples measured without eating the first word
+# (words still transcribe correctly after the trim). Env-tunable; 0 disables.
+_LUX_ONSET_TRIM_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_LUX_TRIM_MS", 22) // 1000
+
+
+def _trim_lux_onset(pcm: bytes) -> bytes:
+    """Drop Lux's leading onset burst so it isn't heard as a stray syllable."""
+    if _LUX_ONSET_TRIM_SAMPLES <= 0:
+        return pcm
+    cut = _LUX_ONSET_TRIM_SAMPLES * 2  # bytes (int16)
+    return pcm[cut:] if len(pcm) > cut else pcm
+
+
 def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
     """LuxTTS path: fetch from the native cloning service, resample if needed.
 
@@ -184,7 +202,7 @@ def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
 
     try:
         pcm, rate = lux_client.synthesize(text, voice_id, speed)
-        return _resample_to_48k(pcm, rate)
+        return _trim_lux_onset(_resample_to_48k(pcm, rate))
     except (lux_client.LuxUnavailable, ValueError) as exc:
         log.warning("LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
                     voice_id, exc, DEFAULT_VOICE)

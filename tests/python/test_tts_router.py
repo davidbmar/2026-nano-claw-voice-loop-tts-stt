@@ -65,13 +65,33 @@ def test_unknown_voice_uses_piper_default(monkeypatch):
     assert called["voice_id"] == tts.DEFAULT_VOICE
 
 
-def test_lux_voice_48k_passes_through(monkeypatch):
-    # LuxTTS already returns 48kHz — no resampling, byte length preserved.
+def test_lux_voice_48k_is_onset_trimmed(monkeypatch):
+    # LuxTTS already returns 48kHz (no resampling), but its leading onset burst
+    # is trimmed so it isn't heard as a stray syllable. The "hello" text has no
+    # sentence-final punctuation, so no gap is appended — the output is exactly
+    # the input minus the onset trim.
     monkeypatch.setattr(
         lux_client, "synthesize", lambda text, voice, speed: (_pcm(4800, 48000), 48000)
     )
     out = tts.synthesize("hello", "lux_heart", 1.0)
-    assert len(out) // 2 == 4800
+    assert len(out) // 2 == 4800 - tts._LUX_ONSET_TRIM_SAMPLES
+
+
+def test_lux_onset_trim_disabled_preserves_length(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_LUX_TRIM_MS", "0")
+    import importlib
+
+    importlib.reload(tts)
+    try:
+        monkeypatch.setattr(
+            tts.lux_client if hasattr(tts, "lux_client") else lux_client,
+            "synthesize",
+            lambda text, voice, speed: (_pcm(4800, 48000), 48000),
+        )
+        assert tts._trim_lux_onset(_pcm(4800, 48000)) == _pcm(4800, 48000)
+    finally:
+        monkeypatch.delenv("NANO_CLAW_LUX_TRIM_MS", raising=False)
+        importlib.reload(tts)
 
 
 def test_lux_failure_falls_back_to_piper(monkeypatch):
