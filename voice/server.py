@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("voice-server")
 client_log = logging.getLogger("client")
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 DEEP_PROCESSING_CUE_INTERVAL_S = 2.6
 
 
