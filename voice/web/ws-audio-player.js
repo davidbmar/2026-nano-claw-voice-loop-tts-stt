@@ -5,12 +5,15 @@
 export const DEFAULT_INITIAL_LEAD_SECONDS = 0.15;
 const MAX_INITIAL_LEAD_SECONDS = 0.18;
 const PLAYER_PROCESSOR_NAME = "nano-claw-pcm-player";
-// AudioWorklet modules cache aggressively and the browser will keep an old copy
-// forever without a changing URL. Bump this whenever the worklet changes so a
-// plain reload always fetches the current player (no hard-refresh required).
-const WORKLET_VERSION = "0.4.0";
+// AudioWorklet modules cache aggressively and the browser keeps an old copy
+// forever unless the URL changes — a repeated source of "the fix didn't load".
+// Append a per-page-load nonce so every fresh page always fetches the current
+// worklet, without relying on remembering to bump a version. The static file is
+// tiny; re-fetching it per load is free. WORKLET_VERSION is kept only as a
+// human-readable marker in the URL and logs.
+const WORKLET_VERSION = "0.4.1";
 const DEFAULT_WORKLET_MODULE_URL = new URL(
-    "./pcm-player-worklet.js?v=" + WORKLET_VERSION,
+    "./pcm-player-worklet.js?v=" + WORKLET_VERSION + "&t=" + Date.now(),
     import.meta.url,
 ).href;
 
