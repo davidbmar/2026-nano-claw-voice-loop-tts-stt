@@ -133,7 +133,9 @@ def test_sentence_final_chunk_has_configured_silence_gap(monkeypatch):
     out = tts.synthesize("A complete sentence.", "en_US-lessac-medium", 1.0)
     gap_bytes = tts.TARGET_RATE * tts.SENTENCE_GAP_MS // 1000 * 2
 
-    assert out[:-gap_bytes] == speech
+    # The speech portion keeps its length (edges are declicked, not trimmed) and
+    # the configured silence gap is appended as pure zeros.
+    assert len(out) == len(speech) + gap_bytes
     assert out[-gap_bytes:] == bytes(gap_bytes)
 
 
@@ -141,20 +143,60 @@ def test_unpunctuated_final_fragment_has_no_extra_gap(monkeypatch):
     speech = np.ones(4800, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
-    assert tts.synthesize("final fragment", "en_US-lessac-medium", 1.0) == speech
+    out = tts.synthesize("final fragment", "en_US-lessac-medium", 1.0)
+    # No sentence gap is appended, so the length is unchanged; the edges are
+    # now declicked, so assert length rather than byte-identity.
+    assert len(out) == len(speech)
 
 
 def test_compiler_pause_overrides_legacy_sentence_gap(monkeypatch):
     speech = np.ones(4800, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
-    assert tts.synthesize(
+    zero_pause = tts.synthesize(
         "A final question?", "en_US-lessac-medium", 1.0, pause_after_ms=0
-    ) == speech
+    )
+    assert len(zero_pause) == len(speech)
 
     out = tts.synthesize(
         "A continuing phrase", "en_US-lessac-medium", 1.0, pause_after_ms=120
     )
     gap_bytes = tts.TARGET_RATE * 120 // 1000 * 2
-    assert out[:-gap_bytes] == speech
+    assert len(out) == len(speech) + gap_bytes
     assert out[-gap_bytes:] == bytes(gap_bytes)
+
+
+def _max_abs_step(pcm: bytes) -> int:
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.int32)
+    if samples.size < 2:
+        return 0
+    return int(np.abs(np.diff(samples)).max())
+
+
+def test_declick_ramps_chunk_edges_to_zero():
+    # A loud tone that neither starts nor ends near a zero sample: butting it
+    # against a silence gap would otherwise be a step of ~full scale.
+    n = tts.TARGET_RATE // 10  # 100 ms
+    tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
+    declicked = tts._declick_edges(tone)
+    samples = np.frombuffer(declicked, dtype=np.int16)
+    assert abs(int(samples[0])) < 400, "leading edge must ramp up from ~0"
+    assert abs(int(samples[-1])) < 400, "trailing edge must ramp down to ~0"
+    # The interior is untouched.
+    assert int(samples[n // 2]) == 12000
+
+
+def test_sentence_gap_seam_has_no_step_discontinuity():
+    n = tts.TARGET_RATE // 10
+    tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
+    with_gap = tts._with_sentence_gap("A full sentence.", tone)
+    # The speech->silence seam and the ramp itself must never jump by more than
+    # a small fraction of full scale; without declicking the seam step is 12000.
+    assert _max_abs_step(with_gap) < 800
+    # The gap really was appended (output longer than the speech alone).
+    assert len(with_gap) > len(tone)
+
+
+def test_declick_leaves_short_pcm_untouched():
+    tiny = np.array([5000, -5000], dtype=np.int16).tobytes()
+    assert tts._declick_edges(tiny) == tiny

@@ -24,6 +24,33 @@ except ValueError:
     SENTENCE_GAP_MS = 240
 _SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
 
+# Speech chunks are butted directly against inserted silence gaps (and, on a
+# stalled playback buffer, against zero-fill). A sentence rarely ends or begins
+# exactly on a zero sample, so those seams are step discontinuities in the PCM
+# and are heard as a click/tick at every sentence boundary. Ramping the first
+# and last few milliseconds of each whole-sentence chunk to zero removes the
+# step. 5 ms is inaudible as a fade on speech but long enough to kill the click.
+_DECLICK_FADE_SAMPLES = TARGET_RATE * 5 // 1000
+
+
+def _declick_edges(pcm: bytes) -> bytes:
+    """Ramp the leading and trailing few milliseconds of a speech chunk to zero.
+
+    Chunks arrive as whole sentences (the text chunker only flushes on sentence
+    punctuation), so both edges sit at a natural pause; attenuating them cannot
+    dip mid-word. Returns the PCM unchanged when it is too short to fade.
+    """
+    if not pcm:
+        return pcm
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    if samples.shape[0] < _DECLICK_FADE_SAMPLES:
+        return pcm
+    fade = _DECLICK_FADE_SAMPLES
+    ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+    samples[:fade] *= ramp
+    samples[-fade:] *= ramp[::-1]
+    return np.clip(np.rint(samples), -32768, 32767).astype(np.int16).tobytes()
+
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 
 # Voice catalog — each entry maps to a HuggingFace Piper voice model
@@ -160,6 +187,7 @@ def _with_sentence_gap(
     """
     if not pcm:
         return pcm
+    pcm = _declick_edges(pcm)
     if pause_after_ms is not None:
         try:
             bounded_ms = max(0, min(1000, int(pause_after_ms)))
