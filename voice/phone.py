@@ -42,6 +42,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Callable
@@ -321,7 +322,13 @@ class PhoneCall:
         self.ws = ws
         self.call_id = call_id
         _active_calls.add(call_id)
-        self.session_id = f"phone-{call_id[:24]}"
+        # The agent API validates session ids against ^[A-Za-z0-9_-]{1,64}$.
+        # Telnyx call ids now carry a "v3:" prefix, and the colon (plus any
+        # other punctuation) makes the id fail validation, so /api/chat returns
+        # 400 and the caller hears only the fallback line. Strip to the safe
+        # alphabet before slicing so the phone session id is always accepted.
+        safe_call_id = re.sub(r"[^A-Za-z0-9_-]", "", call_id)
+        self.session_id = f"phone-{safe_call_id[:24]}"
         codec = phone_codec()
         rate = 16000 if codec == "l16" else 8000
         self.tap = CallTap.create(call_id, codec, rate, rate)

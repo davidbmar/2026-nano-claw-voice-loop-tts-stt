@@ -546,3 +546,20 @@ def test_flow_create_failure_falls_back_and_does_not_retry(monkeypatch):
             await asyncio.sleep(0)
 
     run(_run())
+
+
+def test_phone_session_id_is_valid_for_the_agent_api():
+    # Telnyx call ids carry a "v3:" prefix; the colon must not leak into the
+    # session id or the agent API rejects it with 400 and the caller hears only
+    # the fallback line. The id must match ^[A-Za-z0-9_-]{1,64}$.
+    import re as _re
+
+    async def _run():
+        call = phone.PhoneCall(object(), "v3:LzPQWbMd0r-Xp-CcMbKxk9CrBFyosMFapVcnD8GG")
+        try:
+            assert _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.session_id), call.session_id
+            assert ":" not in call.session_id
+        finally:
+            await call.close()
+
+    run(_run())

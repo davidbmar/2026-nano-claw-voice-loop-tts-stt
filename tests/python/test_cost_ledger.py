@@ -234,3 +234,40 @@ def test_empty_database_api_and_cost_page_render(monkeypatch):
     assert "Voice AI Cost Console" in html
     assert 'fetch("/api/costs"' in html
     assert "Awaiting call data" in html
+
+
+def test_prepared_speechchunk_is_billed_without_crashing(monkeypatch):
+    # Regression: in prepared-speech mode the synthesis unit is a SpeechChunk,
+    # not a str. The billing wrapper called len(sentence) and crashed with
+    # "object of type 'SpeechChunk' has no len()", killing phone TTS -> silence.
+    import types
+    import asyncio
+    from voice import cost_ledger
+    from voice.speech_preparer import SpeechChunk
+
+    billed = []
+    monkeypatch.setattr(cost_ledger, "add_units",
+                        lambda call_id, kind, amount, unit: billed.append((kind, amount)))
+
+    class BasePhoneCall:
+        async def _synthesize_sentence(self, sentence):
+            return b"pcm"
+
+    fake_phone = types.SimpleNamespace(
+        PhoneCall=BasePhoneCall,
+        PROCESSING_CUE_SENTINEL="\0cue\0",
+        phone_rate=lambda: 8000,
+    )
+    cost_ledger._phone_conn_getter = None
+    cost_ledger.install_phone_tracking(fake_phone, lambda: None)
+
+    # Build the tracked call without its network-touching __init__.
+    call = fake_phone.PhoneCall.__new__(fake_phone.PhoneCall)
+    call.call_id = "cc-bill"
+
+    chunk = SpeechChunk(chunk_id="c1", sequence=0, text="Hello there.",
+                        kind="statement", estimated_duration_ms=500,
+                        pause_after_ms=140, is_final=True)
+    result = asyncio.new_event_loop().run_until_complete(call._synthesize_sentence(chunk))
+    assert result == b"pcm"
+    assert billed == [(cost_ledger.TTS, len("Hello there."))]

@@ -797,12 +797,15 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
                 )
             return await super()._transcribe(pcm)
 
-        async def _synthesize_sentence(self, sentence: str):
+        async def _synthesize_sentence(self, sentence):
             speech = await super()._synthesize_sentence(sentence)
             # Generated processing earcons use the sentence pipeline for ordered
             # playback but do not invoke TTS and must not be billed as characters.
             if sentence != getattr(phone_module, "PROCESSING_CUE_SENTINEL", None):
-                add_units(self.call_id, TTS, len(sentence), "characters")
+                # In prepared-speech mode the unit is a SpeechChunk, not a str;
+                # bill on its rendered text length rather than crashing on len().
+                billable_text = getattr(sentence, "text", sentence)
+                add_units(self.call_id, TTS, len(billable_text), "characters")
             return speech
 
         async def _run_turn(self, pcm: bytes) -> None:
