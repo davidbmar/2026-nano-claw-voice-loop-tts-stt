@@ -563,3 +563,53 @@ def test_phone_session_id_is_valid_for_the_agent_api():
             await call.close()
 
     run(_run())
+
+
+def test_phone_chat_payload_carries_selected_mode_profile(monkeypatch):
+    # The console MODE selector sets the shared flow mode. The phone must send
+    # the matching profile per turn, or a switch to riff/nano-claw/intelligence
+    # is ignored and the agent answers with the default Space Channel persona.
+    from contextlib import asynccontextmanager
+    from voice.flow_session import set_flow_mode, get_flow_profile
+
+    captured = {}
+
+    class FakeResp:
+        headers = {"content-type": "application/json"}
+        async def aread(self):
+            return b'{"response": "ok"}'
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            captured["payload"] = json
+            yield FakeResp()
+
+    async def _run(mode, expected_profile):
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.session_id = "phone-test"
+        call.tap = None
+        call._http = FakeHttp()
+        # Minimal attributes _stream_reply touches before the reply returns.
+        call.barge = type("B", (), {"reset": lambda self: None})()
+        call.speaking = False
+        call.interrupted = False
+        call._playback_flush_sent = False
+        call.endpointer = type("E", (), {"reset": lambda self: None})()
+        assert set_flow_mode(mode) is True
+
+        async def fake_speak_sentences(units):
+            captured["spoke"] = True
+
+        call._speak_sentences = fake_speak_sentences
+        # We only need the outbound payload; the rest of _stream_reply touches
+        # far more call state than this unit builds, so ignore any later error.
+        try:
+            await call._stream_reply("hello")
+        except Exception:
+            pass
+        assert captured["payload"]["profile"] == expected_profile
+
+    run(_run("riff", get_flow_profile("riff")))
+    run(_run("intelligence", get_flow_profile("intelligence")))
+    set_flow_mode("spacechannel")

@@ -53,7 +53,7 @@ import numpy as np
 from aiohttp import web
 
 from voice import metrics_db, silero_vad
-from voice.flow_session import FlowSession, get_flow_mode
+from voice.flow_session import FlowSession, get_flow_mode, get_flow_profile
 from voice.phone_audio import (
     FRAME_MS,
     BargeInDetector,
@@ -700,6 +700,11 @@ class PhoneCall:
                 "message": text,
                 "sessionId": self.session_id,
                 "responseMode": "voice",
+                # The console MODE selector sets the shared flow mode; the phone
+                # must pass its profile per turn so a switch to riff/nano-claw/
+                # intelligence takes effect on the phone too. Without this the
+                # agent falls back to the default persona (Space Channel).
+                "profile": get_flow_profile(),
             }
             model = _cfg("NANO_CLAW_PHONE_MODEL")
             if model:
