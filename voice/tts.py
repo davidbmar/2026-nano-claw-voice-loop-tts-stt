@@ -25,30 +25,42 @@ except ValueError:
 _SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
 
 # Speech chunks are butted directly against inserted silence gaps (and, on a
-# stalled playback buffer, against zero-fill). A sentence rarely ends or begins
-# exactly on a zero sample, so those seams are step discontinuities in the PCM
-# and are heard as a click/tick at every sentence boundary. Ramping the first
-# and last few milliseconds of each whole-sentence chunk to zero removes the
-# step. 5 ms is inaudible as a fade on speech but long enough to kill the click.
-_DECLICK_FADE_SAMPLES = TARGET_RATE * 5 // 1000
+# stalled playback buffer, against zero-fill). Lux ends most chunks at full
+# energy with no natural decay (measured ~2000-6000 RMS on the last sample), so
+# a chunk boundary is both a step discontinuity (a click) and an audibly chopped
+# word. A short fade-in preserves the consonant attack at the onset; a longer
+# fade-out ramps the truncated ending down so the cut is heard as a natural
+# release rather than a hard chop. Both are env-tunable for live A/B.
+def _declick_ms(name: str, default: int) -> int:
+    try:
+        return max(0, min(60, int(os.environ.get(name, str(default)))))
+    except ValueError:
+        return default
+
+
+_DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 5) // 1000
+_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 18) // 1000
 
 
 def _declick_edges(pcm: bytes) -> bytes:
-    """Ramp the leading and trailing few milliseconds of a speech chunk to zero.
+    """Fade a speech chunk's onset in and its truncated ending out.
 
     Chunks arrive as whole sentences (the text chunker only flushes on sentence
     punctuation), so both edges sit at a natural pause; attenuating them cannot
-    dip mid-word. Returns the PCM unchanged when it is too short to fade.
+    dip mid-word. The fade-out is longer than the fade-in to mask Lux's abrupt
+    high-energy truncation. Returns the PCM unchanged when it is too short.
     """
     if not pcm:
         return pcm
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    if samples.shape[0] < _DECLICK_FADE_SAMPLES:
+    fade_in = _DECLICK_IN_SAMPLES
+    fade_out = _DECLICK_OUT_SAMPLES
+    if samples.shape[0] < fade_in + fade_out:
         return pcm
-    fade = _DECLICK_FADE_SAMPLES
-    ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
-    samples[:fade] *= ramp
-    samples[-fade:] *= ramp[::-1]
+    if fade_in:
+        samples[:fade_in] *= np.linspace(0.0, 1.0, fade_in, endpoint=False, dtype=np.float32)
+    if fade_out:
+        samples[-fade_out:] *= np.linspace(1.0, 0.0, fade_out, endpoint=False, dtype=np.float32)
     return np.clip(np.rint(samples), -32768, 32767).astype(np.int16).tobytes()
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"

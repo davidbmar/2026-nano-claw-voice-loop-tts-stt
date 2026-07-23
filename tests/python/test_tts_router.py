@@ -200,3 +200,17 @@ def test_sentence_gap_seam_has_no_step_discontinuity():
 def test_declick_leaves_short_pcm_untouched():
     tiny = np.array([5000, -5000], dtype=np.int16).tobytes()
     assert tts._declick_edges(tiny) == tiny
+
+
+def test_declick_fade_out_is_longer_than_fade_in():
+    # The trailing fade masks Lux's abrupt truncation, so it must span more
+    # samples than the onset fade (which stays short to preserve attack).
+    assert tts._DECLICK_OUT_SAMPLES > tts._DECLICK_IN_SAMPLES
+    n = tts.TARGET_RATE // 5  # 200 ms
+    tone = np.full(n, 10000, dtype=np.int16).tobytes()
+    s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16).astype(np.int32)
+    # A sample just inside the fade-in window is already near full scale, while
+    # the mirror-position sample inside the longer fade-out window is not.
+    probe = tts._DECLICK_IN_SAMPLES + 1
+    assert abs(int(s[probe])) > 8000, "onset recovers to near full scale quickly"
+    assert abs(int(s[-probe])) < 8000, "release is still ramping down at the mirror point"
