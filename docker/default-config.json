@@ -44,7 +44,8 @@
           "groundingMode": "strict",
           "deepReasoning": {
             "enabled": true
-          }
+          },
+          "timeoutMs": 4000
         }
       },
       "nanoclaw": {
@@ -61,7 +62,8 @@
           "groundingMode": "strict",
           "deepReasoning": {
             "enabled": true
-          }
+          },
+          "timeoutMs": 4000
         }
       },
       "intelligence-platform": {
@@ -78,7 +80,8 @@
           "groundingMode": "strict",
           "deepReasoning": {
             "enabled": true
-          }
+          },
+          "timeoutMs": 4000
         }
       }
     }
