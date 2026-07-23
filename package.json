@@ -1,6 +1,6 @@
 {
   "name": "nano-claw",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Ultra-lightweight personal AI assistant (TypeScript + Node.js)",
   "type": "module",
   "main": "./dist/index.js",

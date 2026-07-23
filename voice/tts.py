@@ -174,22 +174,53 @@ def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
         return _synthesize_piper(text, DEFAULT_VOICE)
 
 
-# Lux (voice cloning) prepends a short voiced onset burst to every synthesis —
-# ~15-25ms of energy that a listener hears as a spurious syllable ("ow"/"now")
-# at the start of each sentence. Fading only quiets it; the samples must be
-# removed. Whisper is not a detector here — its language model corrects the
-# stray syllable away even when it is audible. Trim the leading burst outright.
-# 22ms clears the burst on the samples measured without eating the first word
-# (words still transcribe correctly after the trim). Env-tunable; 0 disables.
-_LUX_ONSET_TRIM_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_LUX_TRIM_MS", 22) // 1000
+# Lux (voice cloning) prepends a voiced onset burst — plus dead air — to every
+# synthesis, heard as a stray syllable ("ow"/"now"/"how") before each sentence.
+# Its length varies per sentence (measured 70-260ms of junk before real speech),
+# so a fixed trim can't track it and fading only quiets it. Detect where real
+# speech actually begins and trim the leading junk up to it. Whisper is not a
+# detector here: its language model corrects the stray syllable away even when
+# it is audible, so this works on the energy envelope instead.
+#
+# NANO_CLAW_LUX_TRIM_MS is the MAX leading trim (a safety cap so a mis-detection
+# can never swallow a real word); 0 disables the trim entirely.
+try:
+    _LUX_TRIM_CAP_MS = max(0, min(600, int(os.environ.get("NANO_CLAW_LUX_TRIM_MS", "320"))))
+except ValueError:
+    _LUX_TRIM_CAP_MS = 320
 
 
 def _trim_lux_onset(pcm: bytes) -> bytes:
-    """Drop Lux's leading onset burst so it isn't heard as a stray syllable."""
-    if _LUX_ONSET_TRIM_SAMPLES <= 0:
+    """Trim Lux's leading onset burst up to where real speech begins.
+
+    Finds the first window that starts a sustained (30 ms) run of speech-level
+    energy and cuts everything before it, keeping a short lead-in. Bounded by
+    NANO_CLAW_LUX_TRIM_MS so a mis-detection cannot eat a word; a no-op when the
+    cap is 0 or no clear onset is found.
+    """
+    if _LUX_TRIM_CAP_MS <= 0 or not pcm:
         return pcm
-    cut = _LUX_ONSET_TRIM_SAMPLES * 2  # bytes (int16)
-    return pcm[cut:] if len(pcm) > cut else pcm
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    win = TARGET_RATE * 10 // 1000  # 10 ms windows
+    count = samples.shape[0] // win
+    if count < 5:
+        return pcm
+    rms = np.sqrt((samples[: count * win].reshape(count, win) ** 2).mean(axis=1))
+    peak = float(rms.max())
+    if peak <= 0:
+        return pcm
+    threshold = max(300.0, peak * 0.15)
+    onset = None
+    for k in range(count - 2):
+        if rms[k] >= threshold and rms[k + 1] >= threshold and rms[k + 2] >= threshold:
+            onset = k
+            break
+    if not onset:  # None or 0 → nothing to trim
+        return pcm
+    lead_windows = 2  # keep ~20 ms of natural lead-in before the onset
+    cap_windows = _LUX_TRIM_CAP_MS // 10
+    cut_windows = max(0, min(onset - lead_windows, cap_windows))
+    return pcm[cut_windows * win * 2:] if cut_windows > 0 else pcm
 
 
 def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:

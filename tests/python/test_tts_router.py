@@ -65,30 +65,47 @@ def test_unknown_voice_uses_piper_default(monkeypatch):
     assert called["voice_id"] == tts.DEFAULT_VOICE
 
 
-def test_lux_voice_48k_is_onset_trimmed(monkeypatch):
-    # LuxTTS already returns 48kHz (no resampling), but its leading onset burst
-    # is trimmed so it isn't heard as a stray syllable. The "hello" text has no
-    # sentence-final punctuation, so no gap is appended — the output is exactly
-    # the input minus the onset trim.
-    monkeypatch.setattr(
-        lux_client, "synthesize", lambda text, voice, speed: (_pcm(4800, 48000), 48000)
-    )
-    out = tts.synthesize("hello", "lux_heart", 1.0)
-    assert len(out) // 2 == 4800 - tts._LUX_ONSET_TRIM_SAMPLES
+def _burst_then_speech():
+    # A synthetic Lux-shaped signal: a loud leading burst, a silence dip, then
+    # sustained speech-level energy.
+    rate = tts.TARGET_RATE
+    # Real Lux bursts are brief (1-2 windows) then dip; that brevity is what
+    # lets the 30ms-sustained detector tell a burst from speech.
+    burst = (np.random.RandomState(1).randn(rate * 15 // 1000) * 900).astype(np.int16)
+    dip = np.zeros(rate * 55 // 1000, dtype=np.int16)
+    speech = (np.random.RandomState(2).randn(rate * 400 // 1000) * 4000).astype(np.int16)
+    return np.concatenate([burst, dip, speech]).tobytes()
 
 
-def test_lux_onset_trim_disabled_preserves_length(monkeypatch):
+def test_lux_onset_trim_removes_leading_burst():
+    signal = _burst_then_speech()
+    trimmed = tts._trim_lux_onset(signal)
+    # The loud burst is removed (a ~20ms silent lead-in before speech is kept).
+    removed_ms = (len(signal) - len(trimmed)) // 2 * 1000 // tts.TARGET_RATE
+    assert 30 <= removed_ms <= 90, removed_ms
+    # The loud leading burst is gone from the retained head...
+    head = np.frombuffer(trimmed, dtype=np.int16)[: tts.TARGET_RATE * 20 // 1000]
+    assert np.sqrt((head.astype(float) ** 2).mean()) < 300, "burst removed from head"
+    # ...and the sustained speech survives further in.
+    body = np.frombuffer(trimmed, dtype=np.int16)[tts.TARGET_RATE * 40 // 1000:]
+    assert np.sqrt((body.astype(float) ** 2).mean()) > 1500, "speech preserved"
+
+
+def test_lux_onset_trim_keeps_immediate_speech():
+    # Speech from sample zero (no burst) must not be trimmed.
+    rate = tts.TARGET_RATE
+    speech = (np.random.RandomState(3).randn(rate * 400 // 1000) * 4000).astype(np.int16).tobytes()
+    assert tts._trim_lux_onset(speech) == speech
+
+
+def test_lux_onset_trim_disabled_is_a_noop(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_LUX_TRIM_MS", "0")
     import importlib
 
     importlib.reload(tts)
     try:
-        monkeypatch.setattr(
-            tts.lux_client if hasattr(tts, "lux_client") else lux_client,
-            "synthesize",
-            lambda text, voice, speed: (_pcm(4800, 48000), 48000),
-        )
-        assert tts._trim_lux_onset(_pcm(4800, 48000)) == _pcm(4800, 48000)
+        signal = _burst_then_speech()
+        assert tts._trim_lux_onset(signal) == signal
     finally:
         monkeypatch.delenv("NANO_CLAW_LUX_TRIM_MS", raising=False)
         importlib.reload(tts)
