@@ -198,7 +198,17 @@ assert.ok(
 );
 
 const drained = node.render(8000)[0];
-assert.ok(drained.subarray(0, 7552).every((sample) => sample === 0.5));
+// The steady body plays at full amplitude; only the last ~1ms before the
+// underrun ramps down so the drop into the zero-filled remainder is not a
+// step (a click). The remainder stays clean zero — no repeated garbage.
+assert.ok(
+    drained.subarray(0, 7552 - 48).every((sample) => sample === 0.5),
+    "the body before an underrun plays unaltered",
+);
+assert.ok(
+    drained[7552 - 1] < 0.5 && drained[7552 - 1] >= 0,
+    "the underrun edge ramps down instead of stepping to silence",
+);
 assert.ok(
     drained.subarray(7552).every((sample) => sample === 0),
     "an underrun zero-fills the rest of the output instead of repeating samples",
@@ -209,9 +219,13 @@ assert.ok(
 );
 
 player.enqueue(frame);
+// The first block after an underrun ramps its head up from zero (declicking
+// the resume tick heard right before the next word), then plays at full level.
+const resumed = node.render(128)[0];
+assert.ok(resumed[0] < 0.5, "the resume edge ramps up instead of stepping from silence");
 assert.ok(
-    node.render(128)[0].every((sample) => sample === 0.5),
-    "an already-started stream resumes as soon as the next frame arrives",
+    resumed.subarray(48).every((sample) => sample === 0.5),
+    "an already-started stream resumes at full level after the short fade-in",
 );
 player.enqueue(frame);
 player.stop();
