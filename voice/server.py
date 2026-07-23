@@ -553,6 +553,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     "bargeIn": BARGE_IN_ENABLED,
                     "wsAudio": ws_audio_selected,
                     "conversationId": conversation_id,
+                    # Loaded knowledge scope shown in the console Context panel.
+                    # Static (env-configured) until session scoping lands (task 065).
+                    "contextCollections": [
+                        item.strip()
+                        for item in os.environ.get(
+                            "NANO_CLAW_INTELLIGENCE_COLLECTIONS", ""
+                        ).split(",")
+                        if item.strip()
+                    ],
                     "speechPreparation": {
                         "available": True,
                         "version": SPEECH_COMPILER_VERSION,

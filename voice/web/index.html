@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#050606" />
     <meta name="description" content="HYPERRIFF realtime voice agent console" />
     <title>HYPERRIFF voice console</title>
-    <link rel="stylesheet" href="styles.css?v=0.2.1" />
+    <link rel="stylesheet" href="styles.css?v=0.3.0" />
     <link rel="modulepreload" href="talking-cube.js" />
   </head>
   <body>
@@ -83,23 +83,39 @@
 
         <div id="pipeline-panel">
           <section
-            id="benchmarks-panel"
+            id="context-panel"
             class="console-section"
-            aria-labelledby="benchmarks-heading"
+            aria-labelledby="context-heading"
           >
-            <h2 id="benchmarks-heading" class="console-section-title">Benchmarks</h2>
-            <div class="metric-row">
-              <span class="metric-key">LAST SUPERVISOR</span>
-              <span id="benchmark-supervisor" class="metric-value">–</span>
+            <h2 id="context-heading" class="console-section-title">Context</h2>
+            <div class="pipe-row">
+              <label
+                for="flow-select"
+                title="Assistant mode shared by the phone line and browser sessions"
+                >MODE</label
+              >
+              <span class="pipe-control-stack">
+                <select id="flow-select" aria-label="Assistant mode" disabled>
+                  <option value="none">None</option>
+                  <option value="spacechannel" selected>HYPERRIFF</option>
+                  <option value="intelligence">Document Intelligence</option>
+                  <option value="replicantpm">Replicant PM</option>
+                  <option value="scheduler">Plumber Scheduler</option>
+                </select>
+                <span id="flow-warning" class="pipe-warning hidden"
+                  >Scheduler availability is unavailable</span
+                >
+              </span>
             </div>
             <div class="metric-row">
-              <span class="metric-key">SESSION P50</span>
-              <span id="benchmark-p50" class="metric-value">–</span>
+              <span class="metric-key">LOADED</span>
+              <span id="context-collections" class="metric-value">–</span>
             </div>
-            <div class="metric-row">
-              <span class="metric-key">TURNS</span>
-              <span id="benchmark-turns" class="metric-value">0 / 0</span>
-            </div>
+            <p id="context-hint" class="context-hint">
+              The agent answers from the loaded knowledge. Switching by voice —
+              “load the riff design”, “switch to the nano-claw code”, “what’s
+              loaded?” — arrives with session scoping (task 065).
+            </p>
           </section>
 
           <section
@@ -217,28 +233,6 @@
                   >MODEL</label
                 >
                 <select id="region-model-select" aria-label="Scheduler model"></select>
-              </div>
-            </div>
-
-            <div class="config-stage config-stage-single">
-              <div class="pipe-row">
-                <label
-                  for="flow-select"
-                  title="Assistant mode shared by the phone line and browser sessions"
-                  >MODE</label
-                >
-                <span class="pipe-control-stack">
-                  <select id="flow-select" aria-label="Assistant mode" disabled>
-                    <option value="none">None</option>
-                    <option value="spacechannel" selected>HYPERRIFF</option>
-                    <option value="intelligence">Document Intelligence</option>
-                    <option value="replicantpm">Replicant PM</option>
-                    <option value="scheduler">Plumber Scheduler</option>
-                  </select>
-                  <span id="flow-warning" class="pipe-warning hidden"
-                    >Scheduler availability is unavailable</span
-                  >
-                </span>
               </div>
             </div>
 

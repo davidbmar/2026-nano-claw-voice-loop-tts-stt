@@ -177,6 +177,7 @@ const flowRejectionsList = document.getElementById('flow-rejections-list');
 const benchmarkSupervisor = document.getElementById('benchmark-supervisor');
 const benchmarkP50 = document.getElementById('benchmark-p50');
 const benchmarkTurns = document.getElementById('benchmark-turns');
+const contextCollections = document.getElementById('context-collections');
 const latencyStt = document.getElementById('latency-stt');
 const latencyLlm = document.getElementById('latency-llm');
 const latencyTts = document.getElementById('latency-tts');
@@ -1870,13 +1871,13 @@ function updateFlowBenchmarks(state) {
       : null;
   if (supervisorMs !== null) {
     supervisorSamples.push(supervisorMs);
-    benchmarkSupervisor.textContent = formatLatency(supervisorMs);
-    benchmarkP50.textContent = formatLatency(median(supervisorSamples));
+    if (benchmarkSupervisor) benchmarkSupervisor.textContent = formatLatency(supervisorMs);
+    if (benchmarkP50) benchmarkP50.textContent = formatLatency(median(supervisorSamples));
     latencyLlm.textContent = formatLatency(supervisorMs);
   }
   var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
   var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
-  benchmarkTurns.textContent = turnsUsed + ' / ' + maxTurns;
+  if (benchmarkTurns) benchmarkTurns.textContent = turnsUsed + ' / ' + maxTurns;
 }
 
 function appendFlowTranscriptEvents(state, slots, rejected, outcome) {
@@ -2712,6 +2713,11 @@ function reconnectForIdentityChange() {
 function handleMessage(msg, generation) {
   switch (msg.type) {
     case 'hello_ack':
+      if (contextCollections && Array.isArray(msg.contextCollections)) {
+        contextCollections.textContent = msg.contextCollections.length
+          ? msg.contextCollections.join(', ')
+          : 'none';
+      }
       if (appVersionBadge && typeof msg.appVersion === 'string' && msg.appVersion.trim()) {
         var appVersion = msg.appVersion.trim();
         appVersionBadge.textContent = 'v' + appVersion;

@@ -2379,3 +2379,15 @@ input[type="range"]::-moz-range-thumb {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Context panel (task 065 groundwork): loaded corpora + switching hint */
+.context-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim, #8a93a6);
+}
+#context-collections {
+  text-transform: none;
+  letter-spacing: normal;
+}

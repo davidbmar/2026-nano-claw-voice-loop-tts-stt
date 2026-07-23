@@ -34,13 +34,18 @@ const appSource = await readFile(new URL('../voice/web/app.js', import.meta.url)
 assert.match(voiceHtml, /talking-cube\.js/, 'voice UI must reference the Talking Cube module');
 assert.match(voiceHtml, /id="configuration-sidebar"/, 'configuration must live in the left rail');
 assert.match(voiceHtml, /id="transcription-panel"/, 'transcription must live in the right rail');
-assert.match(voiceHtml, /id="benchmark-p50"/, 'sidebar must expose scheduler benchmarks');
+assert.match(voiceHtml, /id="context-panel"/, 'sidebar must expose the context panel');
+assert.match(
+  voiceHtml,
+  /id="context-collections"/,
+  'context panel must show the loaded knowledge collections'
+);
 assert.match(voiceHtml, /id="latency-overall"/, 'sidebar must expose pipeline latency');
 assert.doesNotMatch(voiceHtml, /id="settings-btn"/, 'the settings popover trigger must be removed');
 assert.match(voiceHtml, /<strong>HYPERRIFF<\/strong>/, 'the masthead must use HYPERRIFF');
 assert.match(
   voiceHtml,
-  /id="app-version"[^>]*>v0\.2\.1<\/small>/,
+  /id="app-version"[^>]*>v\d+\.\d+\.\d+<\/small>/,
   'the current release must remain visibly versioned in the masthead'
 );
 assert.match(
