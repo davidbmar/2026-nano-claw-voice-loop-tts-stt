@@ -178,6 +178,7 @@ const benchmarkSupervisor = document.getElementById('benchmark-supervisor');
 const benchmarkP50 = document.getElementById('benchmark-p50');
 const benchmarkTurns = document.getElementById('benchmark-turns');
 const contextCollections = document.getElementById('context-collections');
+const speechModeSelect = document.getElementById('speech-mode-select');
 const modeAbstract = document.getElementById('mode-abstract');
 var flowModeAbstracts = {};
 const latencyStt = document.getElementById('latency-stt');
@@ -995,7 +996,7 @@ function applyPhoneConfig(cfg) {
   // Don't yank a control out from under the user mid-edit (the 5s poll
   // would otherwise snap an open dropdown back); the lamp always updates.
   var editing =
-    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider].indexOf(
+    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider, speechModeSelect].indexOf(
       document.activeElement
     ) >= 0;
   if (!editing) {
@@ -1008,6 +1009,9 @@ function applyPhoneConfig(cfg) {
     phoneSttSelect.value = cfg.stt_size;
     phoneSpeedSlider.value = String(cfg.speed);
     phoneSpeedValue.textContent = cfg.speed.toFixed(1) + '×';
+    if (speechModeSelect && cfg.speech_mode) {
+      speechModeSelect.value = cfg.speech_mode;
+    }
   }
   phoneCallStatus.classList.remove('offline');
   if (cfg.active_calls > 0) {
@@ -1072,6 +1076,11 @@ phoneModelSelect.addEventListener('change', function () {
 phoneSttSelect.addEventListener('change', function () {
   pushPhoneConfig({ stt_size: phoneSttSelect.value });
 });
+if (speechModeSelect) {
+  speechModeSelect.addEventListener('change', function () {
+    pushPhoneConfig({ speech_mode: speechModeSelect.value });
+  });
+}
 phoneSpeedSlider.addEventListener('input', function () {
   phoneSpeedValue.textContent = parseFloat(phoneSpeedSlider.value).toFixed(1) + '×';
 });

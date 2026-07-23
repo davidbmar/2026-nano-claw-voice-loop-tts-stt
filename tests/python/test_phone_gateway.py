@@ -613,3 +613,21 @@ def test_phone_chat_payload_carries_selected_mode_profile(monkeypatch):
     run(_run("riff", get_flow_profile("riff")))
     run(_run("intelligence", get_flow_profile("intelligence")))
     set_flow_mode("spacechannel")
+
+
+def test_phone_config_toggles_speech_mode_live(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", raising=False)
+    monkeypatch.delenv("NANO_CLAW_SPEECH_PREPARATION", raising=False)
+    # Default is prepared.
+    _, body = _config_roundtrip("get")
+    assert body["speech_mode"] == "prepared"
+    # Flip to raw (whole sentences) live.
+    status, body = _config_roundtrip("post", payload={"speech_mode": "raw"})
+    assert status == 200
+    assert body["speech_mode"] == "raw"
+    # And back.
+    _, body = _config_roundtrip("post", payload={"speech_mode": "prepared"})
+    assert body["speech_mode"] == "prepared"
+    # Reject nonsense.
+    status, _ = _config_roundtrip("post", payload={"speech_mode": "bogus"})
+    assert status == 400

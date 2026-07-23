@@ -1276,6 +1276,16 @@ async def config_set_handler(request: web.Request) -> web.Response:
         # Read per transcription request, so this applies to the caller's
         # next utterance even mid-call.
         _overrides["NANO_CLAW_PHONE_STT_SIZE"] = size
+    if "speech_mode" in body:
+        mode = str(body["speech_mode"]).strip().lower()
+        if mode not in ("prepared", "raw"):
+            return web.Response(status=400, text=f"unknown speech mode: {mode}")
+        # "raw" speaks whole sentences (no clause fragmentation); "prepared"
+        # runs the speech compiler. Read per response, so it applies to the
+        # next agent turn even mid-call. Lets the console A/B the two live.
+        _overrides["NANO_CLAW_PHONE_SPEECH_PREPARATION"] = (
+            "1" if mode == "prepared" else "raw"
+        )
 
     log.info("phone config updated: voice=%s model=%s speed=%s (%d active call(s))",
              _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),

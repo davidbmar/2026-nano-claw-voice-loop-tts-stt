@@ -111,6 +111,17 @@
               </span>
             </div>
             <p id="mode-abstract" class="context-hint"></p>
+            <div class="pipe-row">
+              <label
+                for="speech-mode-select"
+                title="Phone delivery: raw speaks whole sentences; prepared runs the speech compiler"
+                >SPEECH</label
+              >
+              <select id="speech-mode-select" aria-label="Phone speech delivery mode">
+                <option value="prepared">Prepared (compiled)</option>
+                <option value="raw">Raw (whole sentences)</option>
+              </select>
+            </div>
             <div class="metric-row">
               <span class="metric-key">LOADED</span>
               <span id="context-collections" class="metric-value">–</span>
