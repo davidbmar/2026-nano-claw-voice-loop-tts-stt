@@ -42,6 +42,9 @@ describe('assistant profile selection', () => {
       'spacechannel',
       'intelligence',
       'replicantpm',
+      'riff',
+      'nanoclaw',
+      'intelligence-platform',
     ]);
     expect(seeded.agents.profiles?.spacechannel.knowledgeFiles).toEqual([
       '/app/sites/spacechannel/knowledge.md',
