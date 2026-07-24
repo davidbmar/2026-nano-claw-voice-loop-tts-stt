@@ -11,7 +11,7 @@ const PLAYER_PROCESSOR_NAME = "nano-claw-pcm-player";
 // worklet, without relying on remembering to bump a version. The static file is
 // tiny; re-fetching it per load is free. WORKLET_VERSION is kept only as a
 // human-readable marker in the URL and logs.
-const WORKLET_VERSION = "0.4.5";
+const WORKLET_VERSION = "0.4.6";
 const DEFAULT_WORKLET_MODULE_URL = new URL(
     "./pcm-player-worklet.js?v=" + WORKLET_VERSION + "&t=" + Date.now(),
     import.meta.url,
@@ -181,7 +181,15 @@ export class Pcm16AudioPlayer {
         if (this.closed) return;
         this.stop();
         this.acceptingFrames = true;
+        // Track how much speech audio this utterance enqueues, so its duration
+        // is known for timing (logged on end()). PCM is at this.sampleRate.
+        this._enqueuedSamples = 0;
         this.resume().catch(function () {});
+    }
+
+    /** Duration of speech audio enqueued for the current utterance, in ms. */
+    playedDurationMs() {
+        return Math.round((this._enqueuedSamples || 0) / this.sampleRate * 1000);
     }
 
     enqueue(arrayBuffer) {
@@ -199,6 +207,7 @@ export class Pcm16AudioPlayer {
         for (let index = 0; index < samples.length; index += 1) {
             samples[index] = view.getInt16(index * 2, true) / 32768;
         }
+        this._enqueuedSamples = (this._enqueuedSamples || 0) + samples.length;
         // Diagnostic: a tick is a large discontinuity. Report the biggest step
         // between consecutive samples of this frame AND the seam step from the
         // previous frame's last sample to this frame's first, so a
@@ -248,6 +257,9 @@ export class Pcm16AudioPlayer {
         // already scheduled. Cancellation uses pause(); normal completion
         // uses end() so the final buffered phonemes can finish naturally.
         this.acceptingFrames = false;
+        if (typeof console !== "undefined" && console.info) {
+            console.info("[nano-claw] utterance audio length: " + this.playedDurationMs() + " ms");
+        }
     }
 
     unpause() {

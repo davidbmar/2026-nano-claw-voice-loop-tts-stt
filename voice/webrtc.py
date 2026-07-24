@@ -359,13 +359,14 @@ class Session:
                 self._active_playback = None
             log.info(
                 "Playback receipt: utterance=%s generation=%d status=%s "
-                "reason=%s confirmed_bytes=%d enqueued_bytes=%d",
+                "reason=%s confirmed_bytes=%d enqueued_bytes=%d duration_ms=%d",
                 token.utterance_id,
                 token.generation,
                 receipt["status"],
                 reason,
                 self._playback_confirmed_bytes,
                 self._playback_enqueued_bytes,
+                self._playback_enqueued_bytes // 2 * 1000 // 48000,
             )
             return receipt
 
@@ -384,13 +385,14 @@ class Session:
                 self._last_playback_receipt = receipt
                 log.info(
                     "Playback receipt: utterance=%s generation=%d status=%s "
-                    "reason=%s confirmed_bytes=%d enqueued_bytes=%d",
+                    "reason=%s confirmed_bytes=%d enqueued_bytes=%d duration_ms=%d",
                     token.utterance_id,
                     token.generation,
                     receipt["status"],
                     reason,
                     self._playback_confirmed_bytes,
                     self._playback_enqueued_bytes,
+                    self._playback_enqueued_bytes // 2 * 1000 // 48000,
                 )
             # Advancing even on a stop with no active token makes cancellation
             # a tombstone that any racing producer necessarily fails.
