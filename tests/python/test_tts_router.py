@@ -210,28 +210,30 @@ def _max_abs_step(pcm: bytes) -> int:
     return int(np.abs(np.diff(samples)).max())
 
 
-def test_declick_ramps_chunk_edges_to_zero():
-    # A loud tone that neither starts nor ends near a zero sample: butting it
-    # against a silence gap would otherwise be a step of ~full scale.
+def test_declick_ramps_onset_to_zero():
+    # The onset ramps up from ~0 (declicks a hard engine onset). The trailing
+    # edge is NOT faded by default — that fade is off (env-enableable), since a
+    # chunk ends near zero and the pop was a beginning-of-chunk artifact.
     n = tts.TARGET_RATE // 10  # 100 ms
     tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
     declicked = tts._declick_edges(tone)
     samples = np.frombuffer(declicked, dtype=np.int16)
     assert abs(int(samples[0])) < 400, "leading edge must ramp up from ~0"
-    assert abs(int(samples[-1])) < 400, "trailing edge must ramp down to ~0"
-    # The interior is untouched.
+    assert int(samples[-1]) == 12000, "trailing edge is untouched by default"
     assert int(samples[n // 2]) == 12000
 
 
-def test_sentence_gap_seam_has_no_step_discontinuity():
+def test_sentence_gap_is_appended_and_onset_declicked():
     n = tts.TARGET_RATE // 10
     tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
     with_gap = tts._with_sentence_gap("A full sentence.", tone)
-    # The speech->silence seam and the ramp itself must never jump by more than
-    # a small fraction of full scale; without declicking the seam step is 12000.
-    assert _max_abs_step(with_gap) < 800
-    # The gap really was appended (output longer than the speech alone).
+    s = np.frombuffer(with_gap, dtype=np.int16)
+    # The onset is declicked to ~0...
+    assert abs(int(s[0])) < 400
+    # ...and the configured silence gap is appended as pure zeros.
+    gap = tts.TARGET_RATE * tts.SENTENCE_GAP_MS // 1000
     assert len(with_gap) > len(tone)
+    assert bytes(with_gap[-gap * 2:]) == bytes(gap * 2)
 
 
 def test_declick_leaves_short_pcm_untouched():
@@ -239,18 +241,30 @@ def test_declick_leaves_short_pcm_untouched():
     assert tts._declick_edges(tiny) == tiny
 
 
-def test_declick_fades_both_edges_from_and_to_zero():
-    # Both edges ramp between zero and full scale; the fade-out is at least as
-    # long as the fade-in (it also masks Lux's abrupt truncation).
-    assert tts._DECLICK_OUT_SAMPLES >= tts._DECLICK_IN_SAMPLES
+def test_declick_onset_ramp_is_gradual_and_tail_off_by_default():
+    # The fade-out is off by default; the onset ramp is gradual enough to smooth
+    # a hard engine onset (Lux) with no hard step.
+    assert tts._DECLICK_OUT_SAMPLES == 0
+    assert tts._DECLICK_IN_SAMPLES > 0
     n = tts.TARGET_RATE // 5  # 200 ms
     tone = np.full(n, 10000, dtype=np.int16).tobytes()
     s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16).astype(np.int32)
     assert abs(int(s[0])) < 200, "onset starts at ~zero"
-    assert abs(int(s[-1])) < 200, "release ends at ~zero"
-    # Interior (well past both fades) is untouched full scale.
-    assert int(s[n // 2]) == 10000
-    # The onset ramp is gradual enough to smooth a hard engine onset (Lux):
-    # no single step in the fade-in window exceeds a small fraction of scale.
+    assert int(s[-1]) == 10000, "tail untouched by default"
     fin = tts._DECLICK_IN_SAMPLES
     assert int(np.abs(np.diff(s[:fin])).max()) < 60, "onset ramp has no hard step"
+
+
+def test_declick_tail_fade_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_DECLICK_OUT_MS", "18")
+    import importlib
+
+    importlib.reload(tts)
+    try:
+        n = tts.TARGET_RATE // 5
+        tone = np.full(n, 10000, dtype=np.int16).tobytes()
+        s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16)
+        assert abs(int(s[-1])) < 200, "enabling the env fades the tail to ~zero"
+    finally:
+        monkeypatch.delenv("NANO_CLAW_DECLICK_OUT_MS", raising=False)
+        importlib.reload(tts)

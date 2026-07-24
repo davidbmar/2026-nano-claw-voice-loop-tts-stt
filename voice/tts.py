@@ -44,7 +44,12 @@ def _declick_ms(name: str, default: int) -> int:
 # them and only smooths Lux's hard onset. 15ms makes the attack gradual enough
 # to stop reading as a click.
 _DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 15) // 1000
-_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 18) // 1000
+# No trailing fade by default: the pop was a beginning-of-chunk artifact (the
+# adaptive onset trim handles it), and a Lux chunk ends within a few hundred of
+# zero, so the seam into the silence gap is inaudible. Confirmed clean on Lux in
+# testing. Re-enable with NANO_CLAW_DECLICK_OUT_MS if a voice ever clicks at
+# word ends.
+_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 0) // 1000
 
 
 def _declick_edges(pcm: bytes) -> bytes:
