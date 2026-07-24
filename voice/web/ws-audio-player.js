@@ -11,7 +11,7 @@ const PLAYER_PROCESSOR_NAME = "nano-claw-pcm-player";
 // worklet, without relying on remembering to bump a version. The static file is
 // tiny; re-fetching it per load is free. WORKLET_VERSION is kept only as a
 // human-readable marker in the URL and logs.
-const WORKLET_VERSION = "0.4.6";
+const WORKLET_VERSION = "0.4.7";
 const DEFAULT_WORKLET_MODULE_URL = new URL(
     "./pcm-player-worklet.js?v=" + WORKLET_VERSION + "&t=" + Date.now(),
     import.meta.url,

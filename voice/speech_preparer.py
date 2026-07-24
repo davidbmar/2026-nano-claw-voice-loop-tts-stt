@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import html
+import os
 import re
 from typing import Callable, Literal
 
@@ -24,6 +25,31 @@ NORMALIZER_VERSION = "en-us-rules-v1"
 DEFAULT_MAX_WORDS = 18
 DEFAULT_MAX_CHUNK_DURATION_MS = 2_500
 FINAL_TAIL_PAD_MS = 140
+
+
+def _pause_ms(name: str, default: int) -> int:
+    try:
+        return max(0, min(2000, int(os.environ.get(name, str(default)))))
+    except ValueError:
+        return default
+
+
+# Cadence table: how long to pause after each boundary, by the strength of the
+# punctuation. Natural reading scales the pause with boundary strength — a
+# sentence-final pause runs ~2x a comma so speech reads grouped, not run-on
+# (see prosody research; values are typical human reading pauses). Each is
+# env-tunable so cadence can be adjusted by ear without a rebuild. The pitch
+# move noted alongside (fall/rise) is rendered by the TTS from the punctuation
+# itself, not by this table.
+_PAUSE_AFTER_MS = {
+    "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 450),        # fall
+    "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 450),    # rise
+    "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 450),  # fall, energetic
+    "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 300),  # level/slight fall
+    "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 300),          # level
+    "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 200),          # slight rise, "more coming"
+    "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 200),        # mid-clause split
+}
 
 ChunkKind = Literal["statement", "question", "list_item", "heading", "continuation"]
 
@@ -570,15 +596,27 @@ def _pause_after(
         # recognizers from losing that last word; there is no following phrase
         # for the listener to perceive this as conversational hesitation.
         return FINAL_TAIL_PAD_MS
-    if text.endswith((",", ":")):
-        return 140
+    # Pause by the strength of the boundary this chunk ends on (the cadence
+    # table). Read the actual terminal punctuation first, then fall back to the
+    # chunk kind for splits that carry no punctuation of their own.
+    last = text.rstrip()[-1:] if text.rstrip() else ""
+    if last == ",":
+        return _PAUSE_AFTER_MS["comma"]
+    if last == ";":
+        return _PAUSE_AFTER_MS["semicolon"]
+    if last == ":":
+        return _PAUSE_AFTER_MS["colon"]
+    if last == "?":
+        return _PAUSE_AFTER_MS["question"]
+    if last == "!":
+        return _PAUSE_AFTER_MS["exclamation"]
+    if last == ".":
+        return _PAUSE_AFTER_MS["period"]
+    # No terminal punctuation: a heading/list item reads like a full stop; any
+    # other mid-clause split gets the short clause pause.
     if kind in ("heading", "list_item") or next_kind == "list_item":
-        return 320
-    if next_kind == "question":
-        return 320
-    if kind == "question":
-        return 280
-    return 280
+        return _PAUSE_AFTER_MS["period"]
+    return _PAUSE_AFTER_MS["clause"]
 
 
 def compile_speech(

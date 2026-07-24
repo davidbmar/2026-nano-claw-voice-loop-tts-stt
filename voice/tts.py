@@ -18,10 +18,14 @@ TARGET_RATE = 48000  # WebRTC Opus expects 48kHz
 # Lux and Kokoro already shape sentence-final prosody, but streamed sentences
 # otherwise meet with almost no breathing room. A quarter-second boundary is
 # long enough to sound deliberate without making a voice turn feel sluggish.
+# Raw-mode sentence pause. The raw chunker only breaks on . ! ?, so every raw
+# chunk is sentence-final; this matches the cadence table's period value (450ms)
+# for a natural, unhurried sentence boundary. Prepared mode uses the full
+# per-punctuation table in speech_preparer instead.
 try:
-    SENTENCE_GAP_MS = max(0, min(1000, int(os.environ.get("NANO_CLAW_SENTENCE_GAP_MS", "240"))))
+    SENTENCE_GAP_MS = max(0, min(1000, int(os.environ.get("NANO_CLAW_SENTENCE_GAP_MS", "450"))))
 except ValueError:
-    SENTENCE_GAP_MS = 240
+    SENTENCE_GAP_MS = 450
 _SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
 
 # Speech chunks are butted directly against inserted silence gaps (and, on a
