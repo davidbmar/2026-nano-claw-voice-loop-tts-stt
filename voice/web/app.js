@@ -2316,7 +2316,27 @@ function sendMsg(type, payload) {
 // ── Voice picker ─────────────────────────────────────────────
 var LS_VOICE = 'nanoclaw.voiceId';
 var LS_SPEED = 'nanoclaw.speed';
-var currentVoiceId = localStorage.getItem(LS_VOICE) || 'lux_heart';
+// Default voice for new users. The catalog `default` only applies when a
+// stored voice is unavailable, so a returning user keeps whatever they picked;
+// this constant is what a first-time visitor hears.
+var DEFAULT_VOICE_ID = 'lux_sky';         // Sky (48k) — LuxTTS clone, most natural read
+var PREV_DEFAULT_VOICE_ID = 'lux_heart';  // the voice this replaced
+// One-time default migration: move anyone still sitting on the previous
+// default onto the new one, without disturbing a deliberate choice of some
+// other voice. Bump VOICE_DEFAULT_GEN whenever DEFAULT_VOICE_ID changes.
+var LS_VOICE_DEFAULT_GEN = 'nanoclaw.voiceDefaultGen';
+var VOICE_DEFAULT_GEN = '2';
+(function migrateVoiceDefault() {
+  try {
+    if (localStorage.getItem(LS_VOICE_DEFAULT_GEN) === VOICE_DEFAULT_GEN) return;
+    var stored = localStorage.getItem(LS_VOICE);
+    if (!stored || stored === PREV_DEFAULT_VOICE_ID) {
+      localStorage.setItem(LS_VOICE, DEFAULT_VOICE_ID);
+    }
+    localStorage.setItem(LS_VOICE_DEFAULT_GEN, VOICE_DEFAULT_GEN);
+  } catch (_e) { /* private mode / storage disabled — fall through to default */ }
+})();
+var currentVoiceId = localStorage.getItem(LS_VOICE) || DEFAULT_VOICE_ID;
 var currentSpeed = parseFloat(localStorage.getItem(LS_SPEED) || '1') || 1;
 var previewAudio = new Audio();
 

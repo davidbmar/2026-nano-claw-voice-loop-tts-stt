@@ -66,7 +66,7 @@ _LUX_ENTRIES = [
 _ALL = _KOKORO_ENTRIES + _PIPER_ENTRIES + _LUX_ENTRIES
 _BY_ID = {v["id"]: v for v in _ALL}
 
-DEFAULT_VOICE = "lux_heart"
+DEFAULT_VOICE = "lux_sky"
 
 
 def combined_catalog() -> list[dict]:

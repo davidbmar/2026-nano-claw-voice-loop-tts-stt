@@ -100,8 +100,9 @@ class Session:
         if audio_transport is not None:
             audio_transport.attach_session(self)
 
-        # Selected voice for this session (browser default: Kokoro af_heart).
-        self.voice_id = "af_heart"
+        # Selected voice for this session before the browser announces its
+        # stored choice (default: Sky 48k, LuxTTS clone — most natural read).
+        self.voice_id = "lux_sky"
         self.speed = 1.0
 
         # Pipeline settings: model + STT (Whisper) size for this session.

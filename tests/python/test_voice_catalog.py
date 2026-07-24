@@ -13,7 +13,7 @@ def test_grouped_for_ui_order_and_default():
     labels = [g["label"] for g in ui["groups"]]
     assert labels == ["American English", "British English", "Spanish",
                       "LuxTTS — cloned", "Piper — fast"]
-    assert ui["default"] == voice_catalog.DEFAULT_VOICE == "lux_heart"
+    assert ui["default"] == voice_catalog.DEFAULT_VOICE == "lux_sky"
 
 
 def test_lux_group_populated():
