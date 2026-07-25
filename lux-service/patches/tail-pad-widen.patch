@@ -1,0 +1,59 @@
+diff --git a/zipvoice/modeling_utils.py b/zipvoice/modeling_utils.py
+index f4e621d..63f6c50 100644
+--- a/zipvoice/modeling_utils.py
++++ b/zipvoice/modeling_utils.py
+@@ -61,7 +61,7 @@ def process_audio(audio, transcriber, tokenizer, feature_extractor, device, targ
+     prompt_tokens = tokenizer.texts_to_token_ids([prompt_text])
+     return prompt_tokens, prompt_features_lens, prompt_features, prompt_rms
+ 
+-def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, model, vocoder, tokenizer, num_step=4, guidance_scale=3.0, speed=1.0, t_shift=0.5, target_rms=0.1):
++def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, model, vocoder, tokenizer, num_step=4, guidance_scale=3.0, speed=1.0, t_shift=0.5, target_rms=0.1, tail_pad_frames=0):
+     tokens = tokenizer.texts_to_token_ids([text])
+     device = next(model.parameters()).device  # Auto-detect device
+ 
+@@ -78,6 +78,7 @@ def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, t
+             duration='predict',
+             num_step=num_step,
+             guidance_scale=guidance_scale,
++            tail_pad_frames=tail_pad_frames,
+         )
+ 
+     # Convert to waveform
+diff --git a/zipvoice/models/zipvoice.py b/zipvoice/models/zipvoice.py
+index 24cbd24..661603f 100644
+--- a/zipvoice/models/zipvoice.py
++++ b/zipvoice/models/zipvoice.py
+@@ -397,6 +397,7 @@ class ZipVoice(nn.Module):
+         duration: str = "predict",
+         num_step: int = 5,
+         guidance_scale: float = 0.5,
++        tail_pad_frames: int = 0,
+     ) -> torch.Tensor:
+         """
+         Generate acoustic features, given text tokens, prompts feature
+@@ -436,6 +437,25 @@ class ZipVoice(nn.Module):
+                 prompt_tokens=prompt_tokens,
+                 prompt_features_lens=prompt_features_lens,
+             )
++
++        # Widen the tail: the ratio duration predictor starves the final token of
++        # frames, so the last word's release gets clipped. Append `tail_pad_frames`
++        # frames that repeat the final frame's text condition (which maps to the
++        # last token via forward_text_condition's gather), giving the last word
++        # room to finish WITHOUT slowing anything before it. Extra frames are
++        # marked non-padding so the solver generates them and they survive
++        # extraction. batch_size == 1 here, so padding_mask is all-valid.
++        if tail_pad_frames > 0 and text_condition.size(1) > 0:
++            last = text_condition[:, -1:, :]
++            text_condition = torch.cat(
++                [text_condition, last.expand(-1, tail_pad_frames, -1)], dim=1
++            )
++            pad_ext = torch.zeros(
++                padding_mask.size(0), tail_pad_frames,
++                dtype=padding_mask.dtype, device=padding_mask.device,
++            )
++            padding_mask = torch.cat([padding_mask, pad_ext], dim=1)
++
+         batch_size, num_frames, _ = text_condition.shape
+ 
+         speech_condition = torch.nn.functional.pad(
