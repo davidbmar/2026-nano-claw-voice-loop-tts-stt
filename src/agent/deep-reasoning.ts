@@ -103,8 +103,18 @@ export interface ExistingAnalysisTurn {
 
 export interface DeepEvidence {
   evidenceId: string;
+  citationId?: string;
   title: string;
   sectionPath: string[];
+  sourceId?: string;
+  documentId?: string;
+  sourceRef?: string;
+  charStart?: number;
+  charEnd?: number;
+  pageStart?: number;
+  pageEnd?: number;
+  lineStart?: number;
+  lineEnd?: number;
   text: string;
 }
 
@@ -393,6 +403,10 @@ async function searchActiveAnalysis(
           principal_id: intelligence.principalId,
           permissions: ['knowledge:reason'],
         },
+        scope: {
+          tenant_id: intelligence.tenantId,
+          collection_ids: intelligence.collectionIds,
+        },
         limit: 3,
       },
       { timeout: settings(intelligence).requestTimeoutMs, signal }
@@ -455,6 +469,10 @@ export async function resolveRegistryAnalysisTurn(
           tenant_id: intelligence.tenantId,
           principal_id: intelligence.principalId,
           permissions: ['knowledge:reason'],
+        },
+        scope: {
+          tenant_id: intelligence.tenantId,
+          collection_ids: intelligence.collectionIds,
         },
         limit: 5,
       },
@@ -1031,10 +1049,23 @@ function parseResult(view: TaskView, started: number, tenantId: string): DeepRea
       if (!evidenceId || !title || !text) continue;
       evidence.push({
         evidenceId,
+        citationId: nonempty(raw.citation.citation_id),
         title,
         sectionPath: Array.isArray(locator.section_path)
           ? locator.section_path.filter((value): value is string => typeof value === 'string')
           : [],
+        sourceId: nonempty(raw.citation.source_id),
+        documentId: nonempty(raw.citation.document_id),
+        sourceRef: nonempty(raw.citation.source_ref),
+        charStart:
+          typeof locator.char_start === 'number' ? finiteNumber(locator.char_start) : undefined,
+        charEnd: typeof locator.char_end === 'number' ? finiteNumber(locator.char_end) : undefined,
+        pageStart:
+          typeof locator.page_start === 'number' ? finiteNumber(locator.page_start) : undefined,
+        pageEnd: typeof locator.page_end === 'number' ? finiteNumber(locator.page_end) : undefined,
+        lineStart:
+          typeof locator.line_start === 'number' ? finiteNumber(locator.line_start) : undefined,
+        lineEnd: typeof locator.line_end === 'number' ? finiteNumber(locator.line_end) : undefined,
         text,
       });
     }

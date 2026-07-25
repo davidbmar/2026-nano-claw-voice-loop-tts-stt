@@ -65,6 +65,8 @@ export interface AgentConfig {
   systemPrompt?: string;
   knowledgeFiles?: string[];
   intelligence?: IntelligenceConfig;
+  /** Tenant/profile key used to isolate persisted collection and analysis state. */
+  intelligenceScopeKey?: string;
   /** Render the answer for a screen or for immediate spoken delivery. */
   responseMode?: 'text' | 'voice';
 }

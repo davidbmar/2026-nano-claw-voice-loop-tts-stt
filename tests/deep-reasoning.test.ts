@@ -508,6 +508,9 @@ describe('deep reasoning task client', () => {
       expect.objectContaining({
         artifact_id: artifact.artifactId,
         policy: expect.objectContaining({ permissions: ['knowledge:reason'] }),
+        scope: expect.objectContaining({
+          collection_ids: intelligence.collectionIds,
+        }),
       }),
       expect.objectContaining({ timeout: 1000 })
     );
@@ -818,6 +821,7 @@ describe('registry artifact routing', () => {
     expect(turn!.result?.presentation?.mode).toBe('topic');
     expect(turn!.state.artifact.artifactId).toBe('analysis_task_1');
     expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post.mock.calls[0][1].scope.collection_ids).toEqual(intelligence.collectionIds);
     expect(http.get).toHaveBeenCalledTimes(1);
   });
 
@@ -1071,6 +1075,7 @@ describe('reflect-hydrate-affirm gate', () => {
     }
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0][1].goal).toBe('Hydrated goal.');
+    expect(post.mock.calls[0][1].scope.collection_ids).toEqual(intelligence.collectionIds);
   });
 });
 

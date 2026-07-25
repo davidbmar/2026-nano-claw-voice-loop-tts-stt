@@ -8,7 +8,12 @@ import {
 } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
-import { __setProviderManagerForTest, stepLoopStream, getAgentConfig } from '../src/api/server';
+import {
+  __setProviderManagerForTest,
+  stepLoopStream,
+  getAgentConfig,
+  isEvalTraceEnabled,
+} from '../src/api/server';
 import { Memory } from '../src/agent/memory';
 import {
   createAnalysisConversationState,
@@ -171,6 +176,19 @@ describe('OpenAIProvider.formatModelName', () => {
 });
 
 describe('stepLoopStream', () => {
+  it('keeps evaluation traces opt-in at the process boundary', () => {
+    const original = process.env.NANO_CLAW_EVAL_TRACE;
+    try {
+      delete process.env.NANO_CLAW_EVAL_TRACE;
+      expect(isEvalTraceEnabled()).toBe(false);
+      process.env.NANO_CLAW_EVAL_TRACE = 'yes';
+      expect(isEvalTraceEnabled()).toBe(true);
+    } finally {
+      if (original === undefined) delete process.env.NANO_CLAW_EVAL_TRACE;
+      else process.env.NANO_CLAW_EVAL_TRACE = original;
+    }
+  });
+
   it('forwards text deltas then a final event when there are no tool calls', async () => {
     __setProviderManagerForTest({
       async *completeStream() {
@@ -197,6 +215,75 @@ describe('stepLoopStream', () => {
     expect(texts).toBe('Part one. Part two.');
     const final = events.find((e) => e.type === 'final');
     expect(final.response).toBe('Part one. Part two.');
+  });
+
+  it('emits the gated machine-readable evaluation trace on the terminal event', async () => {
+    __setProviderManagerForTest({
+      async *completeStream() {
+        yield { type: 'text', delta: 'A grounded evaluation answer.' };
+        yield { type: 'done', finishReason: 'stop', usage: undefined };
+      },
+    } as any);
+
+    const mem = new Memory('test-eval-trace');
+    mem.addMessage({ role: 'user', content: 'Explain the route.' });
+    const events = await collect(
+      stepLoopStream(
+        mem,
+        { model: 'anthropic/x', temperature: 0.7, maxTokens: 100 } as any,
+        0,
+        undefined,
+        true
+      )
+    );
+    const final: any = events.find((event: any) => event.type === 'final');
+
+    expect(final.debug.evalTrace).toMatchObject({
+      version: 'cross-source-eval-v1',
+      route: 'fast',
+      outcome: 'answered',
+      evidence: [],
+      config: {
+        collectionIds: [],
+        affirmationPolicy: 'always',
+      },
+    });
+  });
+
+  it('answers scope reads before the model and records the active set in debug', async () => {
+    const mem = new Memory('test-scope-debug');
+    mem.addMessage({ role: 'user', content: "what's loaded" });
+    const events: any[] = [];
+    for await (const event of stepLoopStream(
+      mem,
+      {
+        model: 'anthropic/x',
+        intelligenceScopeKey: 'tenant-profile',
+        intelligence: {
+          enabled: true,
+          apiUrl: 'http://127.0.0.1:8000',
+          tenantId: 'personal',
+          principalId: 'test',
+          collectionIds: ['owning-the-demand'],
+          limit: 5,
+          candidatePool: 40,
+          maxChars: 16000,
+          timeoutMs: 750,
+          groundingMode: 'strict',
+        },
+      },
+      0
+    )) {
+      events.push(event);
+    }
+
+    const final = events.find((event) => event.type === 'final');
+    expect(final.response).toBe('Loaded: Owning The Demand.');
+    expect(final.debug.knowledgeScope).toEqual({
+      mode: 'default',
+      collectionIds: ['owning-the-demand'],
+    });
+    expect(final.debug.finishReason).toBe('knowledge_scope_loaded');
   });
 
   it('emits deep lifecycle events before naturalizing a completed task result', async () => {

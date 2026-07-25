@@ -80,6 +80,100 @@ The conversational model may phrase evidence naturally. It is instructed not
 to add factual claims and not to read internal citation identifiers aloud unless
 the user requests citations.
 
+### Session collection scope
+
+The configured `NANO_CLAW_INTELLIGENCE_COLLECTIONS` value is the default for a
+fresh session. A caller can change only that session's active set with
+deterministic commands that resolve before retrieval or model routing:
+
+- “What can we talk about?” or “What's available?” lists the authorized
+  collections returned by `GET /v1/collections`.
+- “Load/open/talk about X and Y” replaces the active set.
+- “Add X” and “drop X” mutate it.
+- “What's loaded?” reads it back.
+
+Collection names are matched against the platform's stable ID and display name.
+The catalog publishes the shared match threshold (`0.68`) and ambiguity margin
+(`0.08`); ambiguous or unknown names leave the current set unchanged and return
+the available names. Scope state is persisted in a transcript-free
+`<session>.scope.json` sidecar, isolated by tenant and assistant profile.
+Changing it invalidates that profile's active analysis map and any pending deep
+confirmation. It never changes environment configuration.
+
+Scope has three distinct states: deployment default, an explicit non-empty set,
+and explicitly none. Dropping the last collection enters explicitly-none mode;
+NanoClaw says that nothing is loaded and refuses retrieval instead of sending
+the platform an empty set (whose legacy meaning is tenant-wide/unfiltered).
+Every normal API response records the active mode and collection IDs in
+`debug.knowledgeScope`.
+
+Fast retrieval, deep `TaskRequest.scope`, active-analysis node search, and fresh
+registry adoption all receive the same active set. Registry reuse is also
+filtered server-side: an artifact is eligible only if every collection it used
+is still loaded. An exact-scope artifact ranks ahead of a safe proper subset;
+mere overlap is never enough.
+
+## Cross-source milestone evaluation
+
+The checked-in live-provider evaluation is
+`scripts/cross_source_eval/corpus.json`. Its `_meta` object is the format
+contract: five document cases, five code cases, three cross-source cases,
+top-five retrieval, one repetition, sentence-level fast-claim segmentation,
+expected fast/deep/registry routes, anchor any/all rules, and baseline
+selection. Expected evidence is matched against structured citation fields and
+passages, never against model-output prose.
+
+Run the full suite from this repository:
+
+```bash
+python3 scripts/cross_source_eval/run_eval.py
+```
+
+By default the runner reads the design source at
+`~/.claude/plans/riff-nanoqa-unified-knowledge.md` and the adjacent
+`../intelligence-platform` repository. Override those with `--design-doc` and
+`--platform-root`. `--dry-run` validates the corpus and prints source digests
+without starting providers. `--case CASE_ID` is useful while developing one
+case, but only an unfiltered run is a milestone scoreboard.
+
+Every run:
+
+1. records both repository commits/dirty state plus every source-file digest;
+2. creates a fresh temporary SQLite database and unique tenant;
+3. ingests only the corpus source manifest, so the analysis registry starts
+   empty and controlled;
+4. starts a dedicated NanoClaw API, loads each case's session scope through the
+   same conversational verbs users invoke, and requests the opt-in structured
+   trace;
+5. scores expected-evidence hit rate, citation presence per segmented claim,
+   route correctness, required per-source citations, and coverage-disclaimer
+   behavior; and
+6. injects a deterministic malformed strategy artifact through a local stub,
+   separately asserting `invalid_analysis_artifact` and the spoken graceful
+   fallback.
+
+Dated JSON scoreboards go to
+`scripts/cross_source_eval/scoreboards/`. The runner prints metric deltas only
+against the latest result with the same corpus digest, model, selected cases,
+source fingerprint, repository revisions, and scoring config. A delivered run
+requires all five document cases, the deterministic failure case, and every
+non-known-failure case to pass. Code and cross-source entries may remain
+explicit known failures when the scoreboard names the missing capability—for
+example, the current plain-text code index has no symbol/call graph.
+
+The API trace is deliberately off in normal service. The runner enables
+`NANO_CLAW_EVAL_TRACE=1` in its isolated process and sends
+`"evalTrace": true`; otherwise that request fails with
+`eval_trace_disabled`. The terminal `debug.evalTrace` contains route/outcome,
+active collection IDs and pinned retrieval config, sentence or validated deep
+claims, evidence IDs, source refs, document IDs, and available
+character/page/line locators. Evidence text is exposed only in this opt-in
+trace.
+
+Absence answers use coverage semantics rather than retrieval semantics. A miss
+must be phrased as “I didn't find evidence about that in what's loaded”; it is
+never proof that a document omits a topic or a component is unimplemented.
+
 ## Deep reasoning turns
 
 Enable the deep path after the intelligence API has a reasoning provider configured:

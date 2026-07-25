@@ -20,7 +20,7 @@ import {
   isValidSessionId,
   sweepEphemeralMemory,
 } from '../agent/memory';
-import { ContextBuilder } from '../agent/context';
+import { ContextBuilder, guardCoverageDisclaimer, isCoverageQuestion } from '../agent/context';
 import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
 import { ToolRegistry } from '../agent/tools/registry';
@@ -32,8 +32,19 @@ import { logger } from '../utils/logger';
 import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 import { retrieveTurnEvidence } from '../agent/intelligence';
 import {
+  collectionScopeKey,
+  prepareCollectionScopeTurn,
+  type PreparedCollectionScope,
+} from '../agent/knowledge-scope';
+import {
+  buildCrossSourceEvalTrace,
+  type BuildEvalTraceInput,
+  type CrossSourceEvalTrace,
+} from '../agent/eval-trace';
+import {
   analysisStateFromResult,
   deepAcknowledgement,
+  deepConfirmPolicy,
   DeepReasoningResult,
   DeepRouteDecision,
   detectDeepQuestion,
@@ -95,7 +106,15 @@ interface DebugInfo {
     limit: number;
     replaced: boolean;
   };
+  coverageDisclaimer?: {
+    inserted: boolean;
+  };
   deepGoalGate?: DeepGateDebug;
+  knowledgeScope?: {
+    mode: 'default' | 'selected' | 'none';
+    collectionIds: string[];
+  };
+  evalTrace?: CrossSourceEvalTrace;
 }
 
 interface PendingToolState {
@@ -105,6 +124,7 @@ interface PendingToolState {
   assistantContent: string;
   iteration: number;
   agentConfig: AgentConfig;
+  evalTrace: boolean;
 }
 
 type ApiResponse =
@@ -285,14 +305,53 @@ export function getAgentConfig(
           },
         }
       : profile.intelligence;
+  const knownProfile =
+    profileId !== undefined &&
+    profileId !== 'none' &&
+    config.agents?.profiles !== undefined &&
+    Object.prototype.hasOwnProperty.call(config.agents.profiles, profileId)
+      ? profileId
+      : 'default';
   return {
     model: valid ? modelOverride : config.agents?.defaults?.model || DEFAULT_MODEL,
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     ...profile,
     ...(intelligence && { intelligence }),
+    ...(intelligence && {
+      intelligenceScopeKey: collectionScopeKey(intelligence, knownProfile),
+    }),
     ...(responseMode && { responseMode }),
   };
+}
+
+function knowledgeScopeDebug(
+  prepared: PreparedCollectionScope | undefined
+): DebugInfo['knowledgeScope'] {
+  return prepared
+    ? {
+        mode: prepared.scope.mode,
+        collectionIds: [...prepared.scope.collectionIds],
+      }
+    : undefined;
+}
+
+export function isEvalTraceEnabled(): boolean {
+  return ['1', 'true', 'yes'].includes(
+    (process.env.NANO_CLAW_EVAL_TRACE || '').trim().toLowerCase()
+  );
+}
+
+function evalTraceDebug(
+  enabled: boolean,
+  input: Omit<BuildEvalTraceInput, 'affirmationPolicy'>
+): DebugInfo['evalTrace'] {
+  return enabled
+    ? buildCrossSourceEvalTrace({
+        ...input,
+        affirmationPolicy: deepConfirmPolicy(),
+      })
+    : undefined;
 }
 
 // ── Stepped agent loop ───────────────────────────────────────
@@ -332,7 +391,8 @@ function deepDebug(
 async function stepLoop(
   memory: Memory,
   agentConfig: AgentConfig,
-  iteration: number
+  iteration: number,
+  evalTrace = false
 ): Promise<ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -345,27 +405,53 @@ async function stepLoop(
     const skills = skillsLoader.getSkills();
     const tools = toolRegistry.getDefinitions();
     const messages = memory.getMessages();
-    const analysisState = iteration === 1 ? memory.getAnalysisState() : undefined;
+    const preparedScope = await prepareCollectionScopeTurn(messages, memory, agentConfig);
+    const turnConfig = preparedScope
+      ? { ...agentConfig, intelligence: preparedScope.intelligence }
+      : agentConfig;
+    const scopeKey = preparedScope?.scopeKey || agentConfig.intelligenceScopeKey || 'default';
+    if (iteration === 1 && preparedScope?.reply) {
+      memory.addMessage({ role: 'assistant', content: preparedScope.reply });
+      return {
+        type: 'final',
+        response: preparedScope.reply,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: `knowledge_scope_${preparedScope.action}`,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'scope',
+            outcome: 'scope_reply',
+            response: preparedScope.reply,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+    }
+    const analysisState = iteration === 1 ? memory.getAnalysisState(scopeKey) : undefined;
     const analysisTurn =
-      analysisState && agentConfig.intelligence
-        ? await resolveExistingAnalysisTurn(messages, analysisState, agentConfig.intelligence)
-        : iteration === 1 && agentConfig.intelligence
-          ? await resolveRegistryAnalysisTurn(messages, agentConfig.intelligence)
+      analysisState && turnConfig.intelligence
+        ? await resolveExistingAnalysisTurn(messages, analysisState, turnConfig.intelligence)
+        : iteration === 1 && turnConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, turnConfig.intelligence)
           : undefined;
-    if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
+    if (analysisTurn) memory.setAnalysisState(analysisTurn.state, scopeKey);
     const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
-        ? detectDeepQuestion(messages, agentConfig.intelligence)
+        ? detectDeepQuestion(messages, turnConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
     const gate =
-      iteration === 1 && agentConfig.intelligence && !analysisTurn?.result
+      iteration === 1 && turnConfig.intelligence && !analysisTurn?.result
         ? await resolveDeepGate(
-            memory,
+            memory.pendingDeepStore(scopeKey),
             messages,
             routed,
-            agentConfig.intelligence,
-            hydrationCompleter(agentConfig)
+            turnConfig.intelligence,
+            hydrationCompleter(turnConfig)
           )
         : routed.deep && !analysisTurn?.result
           ? { kind: 'run' as const, route: routed }
@@ -378,10 +464,17 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
-          model: agentConfig.model,
+          model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: 'deep_affirmation_requested',
           deepGoalGate: gate.gateDebug,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'deep',
+            outcome: 'affirmation_required',
+            response: gate.utterance,
+            intelligence: turnConfig.intelligence,
+          }),
         },
       };
     }
@@ -389,10 +482,10 @@ async function stepLoop(
     const ranDeepTask = gate.kind === 'run';
     const deepResult =
       analysisTurn?.result ||
-      (ranDeepTask && agentConfig.intelligence
+      (ranDeepTask && turnConfig.intelligence
         ? await runDeepReasoning(
             messages,
-            agentConfig.intelligence,
+            turnConfig.intelligence,
             undefined,
             undefined,
             deepRoute,
@@ -407,10 +500,19 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
-          model: agentConfig.model,
+          model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: deepResult.errorCode || deepResult.status,
           ...(ranDeepTask && { deepReasoning: deepDebug(deepRoute, deepResult) }),
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: ranDeepTask ? 'deep' : 'registry',
+            outcome: 'fallback',
+            response: DEEP_FAILURE_RESPONSE,
+            intelligence: turnConfig.intelligence,
+            deepResult,
+            errorCode: deepResult.errorCode || deepResult.status,
+          }),
           ...(analysisTurn && {
             analysisNavigation: {
               action: analysisTurn.decision.action,
@@ -424,17 +526,14 @@ async function stepLoop(
     }
     const completedAnalysisState =
       ranDeepTask && deepResult
-        ? analysisStateFromResult(
-            deepResult,
-            agentConfig.intelligence?.deepReasoning?.analysisStyle
-          )
+        ? analysisStateFromResult(deepResult, turnConfig.intelligence?.deepReasoning?.analysisStyle)
         : undefined;
-    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState);
+    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState, scopeKey);
     const turnEvidence = deepResult
       ? undefined
-      : await retrieveTurnEvidence(messages, agentConfig.intelligence);
+      : await retrieveTurnEvidence(messages, turnConfig.intelligence);
     const modelTools = deepResult ? [] : tools;
-    const contextBuilder = new ContextBuilder(agentConfig);
+    const contextBuilder = new ContextBuilder(turnConfig);
     const contextMessages = contextBuilder.buildContextMessages(
       messages,
       skills,
@@ -445,19 +544,22 @@ async function stepLoop(
 
     const response = await providerManager.complete(
       contextMessages,
-      agentConfig.model,
-      agentConfig.temperature,
-      agentConfig.maxTokens,
+      turnConfig.model,
+      turnConfig.temperature,
+      turnConfig.maxTokens,
       modelTools
     );
     const voiceGuard = guardAnalysisVoiceResponse(response.content, deepResult);
+    const coverageGuard = turnConfig.intelligence?.enabled
+      ? guardCoverageDisclaimer(messages, voiceGuard.text)
+      : { text: voiceGuard.text, inserted: false };
 
     const durationMs = Date.now() - startTime;
 
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: agentConfig.model,
+      model: turnConfig.model,
       tokenUsage: response.usage
         ? {
             prompt: response.usage.promptTokens,
@@ -491,13 +593,28 @@ async function stepLoop(
           replaced: voiceGuard.replaced,
         },
       }),
+      ...(turnConfig.intelligence?.enabled &&
+        isCoverageQuestion(messages) && {
+          coverageDisclaimer: {
+            inserted: coverageGuard.inserted,
+          },
+        }),
+      knowledgeScope: knowledgeScopeDebug(preparedScope),
+      evalTrace: evalTraceDebug(evalTrace, {
+        route: ranDeepTask ? 'deep' : analysisTurn?.result ? 'registry' : 'fast',
+        outcome: 'answered',
+        response: coverageGuard.text,
+        intelligence: turnConfig.intelligence,
+        turnEvidence,
+        deepResult,
+      }),
     };
 
     logger.info(
       {
         iteration,
         messageCount,
-        model: agentConfig.model,
+        model: turnConfig.model,
         tokenUsage: debug.tokenUsage,
         durationMs,
         finishReason: response.finishReason,
@@ -522,7 +639,8 @@ async function stepLoop(
         toolCalls: response.toolCalls,
         assistantContent: response.content || '',
         iteration,
-        agentConfig,
+        agentConfig: turnConfig,
+        evalTrace,
       });
       pendingTimestamps.set(requestId, Date.now());
 
@@ -540,10 +658,10 @@ async function stepLoop(
     // No tool calls — final response
     memory.addMessage({
       role: 'assistant',
-      content: voiceGuard.text,
+      content: coverageGuard.text,
     });
 
-    return { type: 'final', response: voiceGuard.text, debug };
+    return { type: 'final', response: coverageGuard.text, debug };
   }
 
   return {
@@ -567,7 +685,8 @@ export async function* stepLoopStream(
   memory: Memory,
   agentConfig: AgentConfig,
   iteration: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  evalTrace = false
 ): AsyncGenerator<StreamEvent | ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -579,32 +698,60 @@ export async function* stepLoopStream(
     const skills = skillsLoader.getSkills();
     const tools = toolRegistry.getDefinitions();
     const messages = memory.getMessages();
-    const analysisState = iteration === 1 ? memory.getAnalysisState() : undefined;
+    const preparedScope = await prepareCollectionScopeTurn(messages, memory, agentConfig, signal);
+    const turnConfig = preparedScope
+      ? { ...agentConfig, intelligence: preparedScope.intelligence }
+      : agentConfig;
+    const scopeKey = preparedScope?.scopeKey || agentConfig.intelligenceScopeKey || 'default';
+    if (iteration === 1 && preparedScope?.reply) {
+      memory.addMessage({ role: 'assistant', content: preparedScope.reply });
+      yield { type: 'text', delta: preparedScope.reply };
+      yield {
+        type: 'final',
+        response: preparedScope.reply,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: `knowledge_scope_${preparedScope.action}`,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'scope',
+            outcome: 'scope_reply',
+            response: preparedScope.reply,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+      return;
+    }
+    const analysisState = iteration === 1 ? memory.getAnalysisState(scopeKey) : undefined;
     const analysisTurn =
-      analysisState && agentConfig.intelligence
+      analysisState && turnConfig.intelligence
         ? await resolveExistingAnalysisTurn(
             messages,
             analysisState,
-            agentConfig.intelligence,
+            turnConfig.intelligence,
             signal
           )
-        : iteration === 1 && agentConfig.intelligence
-          ? await resolveRegistryAnalysisTurn(messages, agentConfig.intelligence, signal)
+        : iteration === 1 && turnConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, turnConfig.intelligence, signal)
           : undefined;
-    if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
+    if (analysisTurn) memory.setAnalysisState(analysisTurn.state, scopeKey);
     const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
-        ? detectDeepQuestion(messages, agentConfig.intelligence)
+        ? detectDeepQuestion(messages, turnConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
     const gate =
-      iteration === 1 && agentConfig.intelligence && !analysisTurn?.result
+      iteration === 1 && turnConfig.intelligence && !analysisTurn?.result
         ? await resolveDeepGate(
-            memory,
+            memory.pendingDeepStore(scopeKey),
             messages,
             routed,
-            agentConfig.intelligence,
-            hydrationCompleter(agentConfig)
+            turnConfig.intelligence,
+            hydrationCompleter(turnConfig)
           )
         : routed.deep && !analysisTurn?.result
           ? { kind: 'run' as const, route: routed }
@@ -618,10 +765,17 @@ export async function* stepLoopStream(
         debug: {
           iteration,
           messageCount,
-          model: agentConfig.model,
+          model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: 'deep_affirmation_requested',
           deepGoalGate: gate.gateDebug,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'deep',
+            outcome: 'affirmation_required',
+            response: gate.utterance,
+            intelligence: turnConfig.intelligence,
+          }),
         },
       };
       return;
@@ -629,16 +783,16 @@ export async function* stepLoopStream(
     const deepRoute = gate.kind === 'run' ? gate.route : routed;
     const ranDeepTask = gate.kind === 'run';
     let deepResult: DeepReasoningResult | undefined = analysisTurn?.result;
-    if (ranDeepTask && agentConfig.intelligence) {
+    if (ranDeepTask && turnConfig.intelligence) {
       yield {
         type: 'deep_started',
-        acknowledgement: deepAcknowledgement(agentConfig.intelligence),
+        acknowledgement: deepAcknowledgement(turnConfig.intelligence),
         score: deepRoute.score,
         reasons: deepRoute.reasons,
       };
       for await (const event of streamDeepReasoning(
         messages,
-        agentConfig.intelligence,
+        turnConfig.intelligence,
         signal,
         undefined,
         deepRoute,
@@ -690,10 +844,19 @@ export async function* stepLoopStream(
           debug: {
             iteration,
             messageCount,
-            model: agentConfig.model,
+            model: turnConfig.model,
             durationMs: Date.now() - startTime,
             finishReason: failed.errorCode || failed.status,
             deepReasoning: deepDebug(deepRoute, failed),
+            knowledgeScope: knowledgeScopeDebug(preparedScope),
+            evalTrace: evalTraceDebug(evalTrace, {
+              route: 'deep',
+              outcome: 'fallback',
+              response: DEEP_FAILURE_RESPONSE,
+              intelligence: turnConfig.intelligence,
+              deepResult: failed,
+              errorCode: failed.errorCode || failed.status,
+            }),
           },
         };
         return;
@@ -701,17 +864,14 @@ export async function* stepLoopStream(
     }
     const completedAnalysisState =
       ranDeepTask && deepResult
-        ? analysisStateFromResult(
-            deepResult,
-            agentConfig.intelligence?.deepReasoning?.analysisStyle
-          )
+        ? analysisStateFromResult(deepResult, turnConfig.intelligence?.deepReasoning?.analysisStyle)
         : undefined;
-    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState);
+    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState, scopeKey);
     const turnEvidence = deepResult
       ? undefined
-      : await retrieveTurnEvidence(messages, agentConfig.intelligence);
+      : await retrieveTurnEvidence(messages, turnConfig.intelligence);
     const modelTools = deepResult ? [] : tools;
-    const contextBuilder = new ContextBuilder(agentConfig);
+    const contextBuilder = new ContextBuilder(turnConfig);
     const contextMessages = contextBuilder.buildContextMessages(
       messages,
       skills,
@@ -725,18 +885,20 @@ export async function* stepLoopStream(
     let finishReason: string | undefined;
     let usage: LLMResponse['usage'];
     let firstTokenAt: number | undefined;
-    const holdBoundedVoice = analysisVoiceWordLimit(deepResult) !== undefined;
+    const holdResponse =
+      analysisVoiceWordLimit(deepResult) !== undefined ||
+      (!!turnConfig.intelligence?.enabled && isCoverageQuestion(messages));
 
     for await (const ev of providerManager.completeStream(
       contextMessages,
-      agentConfig.model,
-      agentConfig.temperature,
-      agentConfig.maxTokens,
+      turnConfig.model,
+      turnConfig.temperature,
+      turnConfig.maxTokens,
       modelTools
     )) {
       if (ev.type === 'text') {
         text += ev.delta;
-        if (!holdBoundedVoice) {
+        if (!holdResponse) {
           if (firstTokenAt === undefined) firstTokenAt = Date.now();
           yield ev; // forward unbounded projections as they arrive
         }
@@ -748,8 +910,11 @@ export async function* stepLoopStream(
       }
     }
     const voiceGuard = guardAnalysisVoiceResponse(text, deepResult);
-    text = voiceGuard.text;
-    if (holdBoundedVoice && text) {
+    const coverageGuard = turnConfig.intelligence?.enabled
+      ? guardCoverageDisclaimer(messages, voiceGuard.text)
+      : { text: voiceGuard.text, inserted: false };
+    text = coverageGuard.text;
+    if (holdResponse && text) {
       firstTokenAt = Date.now();
       yield { type: 'text', delta: text };
     }
@@ -758,7 +923,7 @@ export async function* stepLoopStream(
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: agentConfig.model,
+      model: turnConfig.model,
       tokenUsage: usage
         ? {
             prompt: usage.promptTokens,
@@ -793,6 +958,21 @@ export async function* stepLoopStream(
           replaced: voiceGuard.replaced,
         },
       }),
+      ...(turnConfig.intelligence?.enabled &&
+        isCoverageQuestion(messages) && {
+          coverageDisclaimer: {
+            inserted: coverageGuard.inserted,
+          },
+        }),
+      knowledgeScope: knowledgeScopeDebug(preparedScope),
+      evalTrace: evalTraceDebug(evalTrace, {
+        route: ranDeepTask ? 'deep' : analysisTurn?.result ? 'registry' : 'fast',
+        outcome: 'answered',
+        response: text,
+        intelligence: turnConfig.intelligence,
+        turnEvidence,
+        deepResult,
+      }),
     };
 
     if (toolCalls && toolCalls.length > 0) {
@@ -804,7 +984,8 @@ export async function* stepLoopStream(
         toolCalls,
         assistantContent: text,
         iteration,
-        agentConfig,
+        agentConfig: turnConfig,
+        evalTrace,
       });
       pendingTimestamps.set(requestId, Date.now());
       yield {
@@ -975,6 +1156,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     profile?: unknown;
     analysisStyle?: unknown;
     responseMode?: unknown;
+    evalTrace?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -1000,6 +1182,17 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sendJson(res, 400, { error: 'Invalid "responseMode" field' });
     return;
   }
+  if (body.evalTrace !== undefined && typeof body.evalTrace !== 'boolean') {
+    sendJson(res, 400, { error: 'Invalid "evalTrace" field' });
+    return;
+  }
+  if (body.evalTrace === true && !isEvalTraceEnabled()) {
+    sendJson(res, 403, {
+      error: 'Evaluation trace is disabled',
+      code: 'eval_trace_disabled',
+    });
+    return;
+  }
   const sessionId = body.sessionId ?? 'default';
   const memory = getMemory(sessionId);
 
@@ -1015,10 +1208,13 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
   if (wantsStream(req)) {
     const controller = new AbortController();
     res.once('close', () => controller.abort());
-    await streamLoopToSSE(res, stepLoopStream(memory, agentConfig, 0, controller.signal));
+    await streamLoopToSSE(
+      res,
+      stepLoopStream(memory, agentConfig, 0, controller.signal, body.evalTrace === true)
+    );
     return;
   }
-  const result = await stepLoop(memory, agentConfig, 0);
+  const result = await stepLoop(memory, agentConfig, 0, body.evalTrace === true);
   sendJson(res, 200, result);
 }
 
@@ -1076,11 +1272,22 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
   if (wantsStream(req)) {
     await streamLoopToSSE(
       res,
-      stepLoopStream(pending.memory, pending.agentConfig, pending.iteration)
+      stepLoopStream(
+        pending.memory,
+        pending.agentConfig,
+        pending.iteration,
+        undefined,
+        pending.evalTrace
+      )
     );
     return;
   }
-  const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
+  const result = await stepLoop(
+    pending.memory,
+    pending.agentConfig,
+    pending.iteration,
+    pending.evalTrace
+  );
   sendJson(res, 200, result);
 }
 
@@ -1120,11 +1327,22 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
   if (wantsStream(req)) {
     await streamLoopToSSE(
       res,
-      stepLoopStream(pending.memory, pending.agentConfig, pending.iteration)
+      stepLoopStream(
+        pending.memory,
+        pending.agentConfig,
+        pending.iteration,
+        undefined,
+        pending.evalTrace
+      )
     );
     return;
   }
-  const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
+  const result = await stepLoop(
+    pending.memory,
+    pending.agentConfig,
+    pending.iteration,
+    pending.evalTrace
+  );
   sendJson(res, 200, result);
 }
 

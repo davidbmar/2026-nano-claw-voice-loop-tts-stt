@@ -10,6 +10,7 @@ import { ReadFileTool, WriteFileTool } from './tools/file';
 import { Config } from '../config/schema';
 import { logger } from '../utils/logger';
 import { retrieveTurnEvidence } from './intelligence';
+import { collectionScopeKey, prepareCollectionScopeTurn } from './knowledge-scope';
 import {
   analysisStateFromResult,
   detectDeepQuestion,
@@ -35,7 +36,6 @@ export class AgentLoop {
   private config: AgentConfig;
   private providerManager: ProviderManager;
   private memory: Memory;
-  private contextBuilder: ContextBuilder;
   private skillsLoader: SkillsLoader;
   private toolRegistry: ToolRegistry;
   private maxIterations: number;
@@ -56,10 +56,12 @@ export class AgentLoop {
       intelligence: config.agents?.defaults?.intelligence,
       ...agentConfig,
     };
+    if (this.config.intelligence && !this.config.intelligenceScopeKey) {
+      this.config.intelligenceScopeKey = collectionScopeKey(this.config.intelligence);
+    }
 
     this.providerManager = new ProviderManager(config);
     this.memory = new Memory(sessionId);
-    this.contextBuilder = new ContextBuilder(this.config);
     this.skillsLoader = new SkillsLoader();
     this.toolRegistry = new ToolRegistry();
     this.maxIterations = maxIterations;
@@ -111,30 +113,46 @@ export class AgentLoop {
         const skills = this.skillsLoader.getSkills();
         const tools = this.toolRegistry.getDefinitions();
         const conversationMessages = this.memory.getMessages();
-        const analysisState = iteration === 1 ? this.memory.getAnalysisState() : undefined;
+        const preparedScope = await prepareCollectionScopeTurn(
+          conversationMessages,
+          this.memory,
+          this.config
+        );
+        const turnConfig = preparedScope
+          ? { ...this.config, intelligence: preparedScope.intelligence }
+          : this.config;
+        const scopeKey = preparedScope?.scopeKey || this.config.intelligenceScopeKey || 'default';
+        if (iteration === 1 && preparedScope?.reply) {
+          this.memory.addMessage({ role: 'assistant', content: preparedScope.reply });
+          return {
+            content: preparedScope.reply,
+            finishReason: `knowledge_scope_${preparedScope.action}`,
+          };
+        }
+        const analysisState = iteration === 1 ? this.memory.getAnalysisState(scopeKey) : undefined;
         const analysisTurn =
-          analysisState && this.config.intelligence
+          analysisState && turnConfig.intelligence
             ? await resolveExistingAnalysisTurn(
                 conversationMessages,
                 analysisState,
-                this.config.intelligence
+                turnConfig.intelligence
               )
-            : iteration === 1 && this.config.intelligence
-              ? await resolveRegistryAnalysisTurn(conversationMessages, this.config.intelligence)
+            : iteration === 1 && turnConfig.intelligence
+              ? await resolveRegistryAnalysisTurn(conversationMessages, turnConfig.intelligence)
               : undefined;
-        if (analysisTurn) this.memory.setAnalysisState(analysisTurn.state);
+        if (analysisTurn) this.memory.setAnalysisState(analysisTurn.state, scopeKey);
         const deepRoute =
           analysisTurn?.deepRoute ||
           (iteration === 1
-            ? detectDeepQuestion(conversationMessages, this.config.intelligence)
+            ? detectDeepQuestion(conversationMessages, turnConfig.intelligence)
             : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
         const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
         const deepResult =
           analysisTurn?.result ||
-          (ranDeepTask && this.config.intelligence
+          (ranDeepTask && turnConfig.intelligence
             ? await runDeepReasoning(
                 conversationMessages,
-                this.config.intelligence,
+                turnConfig.intelligence,
                 undefined,
                 undefined,
                 deepRoute
@@ -148,12 +166,14 @@ export class AgentLoop {
         }
         const completedAnalysisState =
           ranDeepTask && deepResult ? analysisStateFromResult(deepResult) : undefined;
-        if (completedAnalysisState) this.memory.setAnalysisState(completedAnalysisState);
+        if (completedAnalysisState) {
+          this.memory.setAnalysisState(completedAnalysisState, scopeKey);
+        }
         const turnEvidence = deepResult
           ? undefined
-          : await retrieveTurnEvidence(conversationMessages, this.config.intelligence);
+          : await retrieveTurnEvidence(conversationMessages, turnConfig.intelligence);
         const modelTools = deepResult ? [] : tools;
-        const contextMessages = this.contextBuilder.buildContextMessages(
+        const contextMessages = new ContextBuilder(turnConfig).buildContextMessages(
           conversationMessages,
           skills,
           modelTools,
@@ -164,9 +184,9 @@ export class AgentLoop {
         // Call LLM
         const response = await this.providerManager.complete(
           contextMessages,
-          this.config.model,
-          this.config.temperature,
-          this.config.maxTokens,
+          turnConfig.model,
+          turnConfig.temperature,
+          turnConfig.maxTokens,
           modelTools
         );
         const voiceGuard = guardAnalysisVoiceResponse(response.content, deepResult);

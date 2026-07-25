@@ -4,6 +4,44 @@ import { loadKnowledge } from './knowledge';
 import { TurnEvidence } from './intelligence';
 import { DeepReasoningResult } from './deep-reasoning';
 
+const COVERAGE_QUESTION_RE =
+  /\b(absent|absence|missing|ambiguous|ambiguity|unimplemented|not implemented|no implementation evidence|implementation gap|coverage gap|what (?:is|are|does it) lack)\b/i;
+const COVERAGE_DISCLAIMER_RE =
+  /\b(?:didn't|did not) find (?:complete )?evidence\b.*\b(?:loaded|indexed)\b|\bretrieval miss\b.*\bnot proof\b|\bloaded (?:evidence|sources?|code)\b.*\b(?:does|do) not establish\b/i;
+
+export interface CoverageDisclaimerGuard {
+  text: string;
+  inserted: boolean;
+}
+
+/** Whether an evidence-grounded answer could be mistaken for proof of absence. */
+export function isCoverageQuestion(messages: Message[]): boolean {
+  const latest = messages
+    .filter((message) => message.role === 'user' && message.content.trim())
+    .at(-1)?.content;
+  return !!latest && COVERAGE_QUESTION_RE.test(latest);
+}
+
+/**
+ * Make the ADR-001 coverage hedge deterministic. Prompting remains useful, but
+ * a streamed/provider variation must never turn retrieval silence into a claim
+ * that a source omits a topic or code is unimplemented.
+ */
+export function guardCoverageDisclaimer(
+  messages: Message[],
+  response: string
+): CoverageDisclaimerGuard {
+  if (!isCoverageQuestion(messages) || COVERAGE_DISCLAIMER_RE.test(response)) {
+    return { text: response, inserted: false };
+  }
+  return {
+    text:
+      "I didn't find complete evidence about that in what's loaded, so these gaps are not " +
+      `proof that a source omits the topic or that a component is unimplemented. ${response}`,
+    inserted: true,
+  };
+}
+
 /**
  * Context builder for constructing prompts
  */
@@ -92,7 +130,11 @@ export class ContextBuilder {
           'citation IDs aloud unless the user asks for citations. You may paraphrase, but do not ' +
           'add or alter facts. For critique, strategy, or advice, you may draw reasoned conclusions ' +
           'from the supplied facts. Clearly present those as your analysis rather than claiming ' +
-          'the document explicitly states them. If the passages are insufficient, say what is missing.'
+          'the document explicitly states them. If the passages are insufficient, say what is ' +
+          'missing. A lack of evidence in these retrieved passages is not proof that something is ' +
+          'absent or unimplemented. For an absence or implementation-coverage question, say “I ' +
+          "didn't find evidence about that in what's loaded” unless the evidence explicitly " +
+          'establishes the absence.'
       );
       for (const item of turnEvidence.items) {
         const section = item.sectionPath.length ? item.sectionPath.join(' > ') : 'Document';
@@ -103,8 +145,10 @@ export class ContextBuilder {
     } else if (turnEvidence?.groundingMode === 'strict' && turnEvidence.status === 'no_match') {
       parts.push(
         '\nDocument grounding note: no matching evidence was found for this turn. If the user ' +
-          'is asking about the document, say that the document does not appear to cover it; do ' +
-          'not answer that document question from model memory.'
+          "is asking about what's loaded, say “I didn't find evidence about that in what's " +
+          'loaded.” A retrieval miss is not proof that the source omits the topic, so never ' +
+          'claim that the document does not cover it. Do not answer that source question from ' +
+          'model memory.'
       );
     } else if (turnEvidence?.groundingMode === 'strict' && turnEvidence.status === 'unavailable') {
       parts.push(
@@ -202,8 +246,9 @@ export class ContextBuilder {
                 'covered, in concise natural spoken language of normally no more than 120 ' +
                 'words. Ground the answer in the listed missing-evidence questions and any ' +
                 'supplied topics. Never present the absence of content as something the ' +
-                'document states; say plainly these are gaps the analysis flagged. Close by ' +
-                'offering one listed topic to explore.'
+                "document states; say plainly these are gaps the analysis flagged in what's " +
+                'loaded, not proof that the source omits a topic or a component is ' +
+                'unimplemented. Close by offering one listed topic to explore.'
             );
           } else {
             parts.push(
