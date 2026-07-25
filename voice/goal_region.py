@@ -759,7 +759,7 @@ def _parse_slot_start(value) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return None  # health-ok: pure parse guard; callers validate the None
     return _local_wall_time(parsed)
 
 

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T21:58:02+00:00",
+  "generated_at": "2026-07-25T22:17:38+00:00",
   "python": [
     {
       "file": "voice/__init__.py",
@@ -73,7 +73,7 @@
     },
     {
       "file": "voice/cost_ledger.py",
-      "lines": 982,
+      "lines": 988,
       "long_functions": [
         {
           "name": "write_call",
@@ -92,33 +92,17 @@
         },
         {
           "name": "install_phone_tracking",
-          "line": 746,
+          "line": 750,
           "length": 94
         }
       ],
       "broad_excepts": 7,
-      "silent_excepts": [
-        {
-          "line": 588
-        },
-        {
-          "line": 883
-        },
-        {
-          "line": 907
-        },
-        {
-          "line": 779
-        },
-        {
-          "line": 895
-        }
-      ],
+      "silent_excepts": [],
       "debt": 0
     },
     {
       "file": "voice/flow_session.py",
-      "lines": 632,
+      "lines": 633,
       "long_functions": [
         {
           "name": "create",
@@ -127,11 +111,7 @@
         }
       ],
       "broad_excepts": 4,
-      "silent_excepts": [
-        {
-          "line": 621
-        }
-      ],
+      "silent_excepts": [],
       "debt": 0
     },
     {
@@ -150,11 +130,7 @@
         }
       ],
       "broad_excepts": 1,
-      "silent_excepts": [
-        {
-          "line": 761
-        }
-      ],
+      "silent_excepts": [],
       "debt": 0
     },
     {
@@ -1446,10 +1422,10 @@
   ],
   "totals": {
     "py_files": 38,
-    "py_lines": 14996,
+    "py_lines": 15003,
     "py_long_functions": 33,
     "py_broad_excepts": 94,
-    "py_silent_excepts": 86,
+    "py_silent_excepts": 79,
     "ts_files": 59,
     "ts_lines": 18435,
     "ts_swallowed_catches": 67,

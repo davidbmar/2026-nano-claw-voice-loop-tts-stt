@@ -619,6 +619,7 @@ def _spoken_datetime(value) -> str:
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
+        # health-ok: TTS formatter guard; the spoken fallback below is the handling
         return "the scheduled date and time"
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(BUSINESS_TIMEZONE)

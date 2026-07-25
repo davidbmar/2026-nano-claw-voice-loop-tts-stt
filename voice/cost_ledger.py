@@ -586,6 +586,10 @@ def _phone_call_metadata(conn) -> dict[str, dict]:
         ]
         return {str(row["call_id"]): row for row in normalized if row.get("call_id")}
     except Exception:
+        # An empty map here silently drops call-cost attribution for every
+        # call in the window — that must be visible in logs, not inferred
+        # from a suspiciously cheap report.
+        log.warning("Call-record normalization failed; cost attribution degraded", exc_info=True)
         return {}
 
 
@@ -777,7 +781,7 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
                     try:
                         await turn_task
                     except asyncio.CancelledError:
-                        pass
+                        pass  # health-ok: voice.phone cancels this task on purpose (see comment above)
                     except Exception:
                         log.exception("phone turn failed while finalizing cost receipt")
                 try:
@@ -881,7 +885,7 @@ class _UsageResponse:
         try:
             self._capture(json.loads(body))
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            pass
+            log.debug("Usage capture skipped: response body is not JSON")
         return body
 
     async def aiter_lines(self):
@@ -893,7 +897,9 @@ class _UsageResponse:
                     try:
                         self._capture(json.loads("\n".join(data_lines)))
                     except json.JSONDecodeError:
-                        pass
+                        # A malformed final event = this turn's cost silently
+                        # missing from the ledger.
+                        log.debug("Usage capture skipped: malformed %s event", event)
                 event = ""
                 data_lines = []
             elif line.startswith("event:"):
@@ -905,7 +911,7 @@ class _UsageResponse:
             try:
                 self._capture(json.loads("\n".join(data_lines)))
             except json.JSONDecodeError:
-                pass
+                log.debug("Usage capture skipped: malformed trailing %s event", event)
 
     def _capture(self, payload) -> None:
         if self._captured or not isinstance(payload, dict):
