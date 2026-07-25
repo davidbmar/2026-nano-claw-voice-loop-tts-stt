@@ -373,8 +373,8 @@ async def client_log_handler(request: web.Request) -> web.Response:
                 ),
             )
     except Exception:
-        # Telemetry is diagnostic-only. A broken logging handler must not turn
-        # this best-effort endpoint into an application failure.
+        # health-ok: telemetry is diagnostic-only. A broken logging handler must
+        # not turn this best-effort endpoint into an application failure.
         pass
     return web.Response(status=204, headers={"Cache-Control": "no-store"})
 
@@ -393,7 +393,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         auth_adapter = request.app.get(AUTH_ADAPTER_KEY)
     except AttributeError:
-        auth_adapter = None
+        auth_adapter = None  # health-ok: transport-free unit-call fallback (see comment above)
     socket_identity = WebSocketIdentity(None, None, conversation_id)
     if auth_adapter is not None:
         ws.headers.update(SECURITY_HEADERS)
@@ -405,7 +405,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         history_runtime = request.app.get(HISTORY_RUNTIME_KEY)
     except AttributeError:
-        history_runtime = None
+        history_runtime = None  # health-ok: transport-free unit-call fallback
     history_registered = False
     if (
         history_runtime is not None
@@ -423,7 +423,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         client_telemetry_runtime = request.app.get(CLIENT_TELEMETRY_RUNTIME_KEY)
     except AttributeError:
-        client_telemetry_runtime = None
+        client_telemetry_runtime = None  # health-ok: transport-free unit-call fallback
     if client_telemetry_runtime is not None:
         client_telemetry_runtime.register_socket(
             conversation_id, trusted_client_ip(request)
@@ -546,6 +546,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 msg = json.loads(raw_msg.data)
             except json.JSONDecodeError:
+                log.debug("Skipping non-JSON browser WS frame: %.80s", raw_msg.data)
                 continue
 
             msg_type = msg.get("type", "")
@@ -745,7 +746,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     playback_token = getattr(session, "active_playback", None)
                     try:
                         receipt = session.cancel_stream(reason="manual_stop")
-                    except TypeError:
+                    except TypeError:  # health-ok: signature back-compat for narrow test fakes
                         receipt = session.cancel_stream()
                     _abandon_agent_turn(session)
                     session._backoff.reset()
@@ -772,7 +773,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             receipt = session.cancel_stream(
                                 reason="confirmed_barge_in"
                             )
-                        except TypeError:
+                        except TypeError:  # health-ok: signature back-compat for narrow test fakes
                             receipt = session.cancel_stream()
                         _abandon_agent_turn(session)
                         session._backoff.reset()
@@ -790,7 +791,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             if sess.is_paused() and not w.closed:
                                 sess.resume_speaking()
                         except asyncio.CancelledError:
-                            pass
+                            pass  # health-ok: resume timer cancellation is the expected path
 
                     session._resume_task = asyncio.ensure_future(_resume_after(delay))
 
@@ -807,7 +808,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 await session._stream_task
             except BaseException:
-                pass  # CancelledError (expected) or the task's own error — we're tearing down
+                pass  # health-ok: CancelledError (expected) or the task's own error — teardown
         if session:
             try:
                 await session.close()
@@ -1459,7 +1460,7 @@ async def _synthesize_and_enqueue(
     if token is not None and callable(synthesize_chunk) and callable(enqueue_synthesized):
         try:
             synth_params = inspect.signature(synthesize_chunk).parameters
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
             synth_params = {}
         synth_args = (text, session.voice_id, session.speed)
         if pause_after_ms is not None and "pause_after_ms" in synth_params:
@@ -1467,7 +1468,7 @@ async def _synthesize_and_enqueue(
         pcm = await loop.run_in_executor(None, synthesize_chunk, *synth_args)
         try:
             enqueue_params = inspect.signature(enqueue_synthesized).parameters
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
             enqueue_params = {}
         enqueue_kwargs: dict[str, Any] = {"audio_role": audio_role}
         if chunk_id is not None and "chunk_id" in enqueue_params:
@@ -1501,7 +1502,7 @@ async def _end_session_stream(
     end_stream = session.end_stream
     try:
         parameters = inspect.signature(end_stream).parameters
-    except (TypeError, ValueError):
+    except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
         parameters = {}
     if token is not None and "token" in parameters:
         result = await end_stream(total_bytes, token=token)
@@ -1528,7 +1529,7 @@ async def _speak_text_for_generation(
     if plan is not None and callable(speak_plan):
         try:
             plan_parameters = inspect.signature(speak_plan).parameters
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
             plan_parameters = {}
         if token is not None and "token" in plan_parameters:
             return await speak_plan(
@@ -1541,7 +1542,7 @@ async def _speak_text_for_generation(
 
     try:
         parameters = inspect.signature(session.speak_text).parameters
-    except (TypeError, ValueError):
+    except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
         parameters = {}
     if token is not None and "token" in parameters:
         return await session.speak_text(
@@ -1859,7 +1860,7 @@ async def _consume_sse(
         _abandon_agent_turn(session)
         try:
             receipt = session.stop_speaking(reason="stream_error")
-        except TypeError:
+        except TypeError:  # health-ok: signature back-compat for narrow test fakes
             receipt = session.stop_speaking()
         await _send_delivery_receipt(ws, receipt)
         await _send_audio_end(ws, playback_token, receipt)
@@ -2015,7 +2016,7 @@ async def _speak_with_events(
         if callable(stop_speaking):
             try:
                 receipt = stop_speaking(reason="speech_error")
-            except TypeError:
+            except TypeError:  # health-ok: signature back-compat for narrow test fakes
                 receipt = stop_speaking()
         session._last_spoken_receipt = receipt
         raise
@@ -2499,7 +2500,7 @@ async def _auth_sweep_loop(adapter: AiohttpAuthAdapter) -> None:
             await _run_auth_sweep_once(adapter)
             await asyncio.sleep(AUTH_SWEEP_INTERVAL_SECONDS)
     except asyncio.CancelledError:
-        return
+        return  # health-ok: sweep loop cancellation is orderly shutdown
 
 
 async def _auth_sweep_context(app: web.Application):

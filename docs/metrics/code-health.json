@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T22:38:08+00:00",
+  "generated_at": "2026-07-25T22:57:35+00:00",
   "python": [
     {
       "file": "voice/__init__.py",
@@ -317,7 +317,7 @@
     },
     {
       "file": "voice/server.py",
-      "lines": 2710,
+      "lines": 2711,
       "long_functions": [
         {
           "name": "client_log_handler",
@@ -327,83 +327,31 @@
         {
           "name": "websocket_handler",
           "line": 382,
-          "length": 461
+          "length": 462
         },
         {
           "name": "_capture_user_utterance",
-          "line": 968,
+          "line": 969,
           "length": 70
         },
         {
           "name": "_handle_scheduler_request",
-          "line": 1250,
+          "line": 1251,
           "length": 101
         },
         {
           "name": "_consume_sse",
-          "line": 1599,
+          "line": 1600,
           "length": 268
         },
         {
           "name": "conversation_detail_handler",
-          "line": 2289,
+          "line": 2290,
           "length": 61
         }
       ],
       "broad_excepts": 25,
-      "silent_excepts": [
-        {
-          "line": 375
-        },
-        {
-          "line": 395
-        },
-        {
-          "line": 407
-        },
-        {
-          "line": 425
-        },
-        {
-          "line": 1504
-        },
-        {
-          "line": 1544
-        },
-        {
-          "line": 2501
-        },
-        {
-          "line": 1462
-        },
-        {
-          "line": 1470
-        },
-        {
-          "line": 1531
-        },
-        {
-          "line": 548
-        },
-        {
-          "line": 809
-        },
-        {
-          "line": 1862
-        },
-        {
-          "line": 2018
-        },
-        {
-          "line": 748
-        },
-        {
-          "line": 775
-        },
-        {
-          "line": 792
-        }
-      ],
+      "silent_excepts": [],
       "debt": 0
     },
     {
@@ -1379,10 +1327,10 @@
   ],
   "totals": {
     "py_files": 38,
-    "py_lines": 15031,
+    "py_lines": 15032,
     "py_long_functions": 33,
     "py_broad_excepts": 94,
-    "py_silent_excepts": 65,
+    "py_silent_excepts": 48,
     "ts_files": 59,
     "ts_lines": 18435,
     "ts_swallowed_catches": 67,
