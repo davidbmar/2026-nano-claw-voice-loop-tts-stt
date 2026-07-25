@@ -189,14 +189,34 @@ def _cfg(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+_config_fallback_warned: set[str] = set()
+
+
+def _warn_config_fallback(name: str, raw: object, default: object) -> None:
+    """Warn ONCE per setting when unparseable config falls back to a default.
+
+    Silently ignored operator config is a support trap (a typo'd .env value
+    "applies" in the operator's head but never in the process). Once per
+    name keeps hot paths (per-sentence synthesis) from spamming."""
+    if name in _config_fallback_warned:
+        return
+    _config_fallback_warned.add(name)
+    log.warning("Ignoring unparseable %s=%r; using default %r", name, raw, default)
+
+
 def _phone_pacing_value(name: str, default: float, *, allow_zero: bool) -> float:
     """Read one finite pacing value, falling back on unsafe input."""
+    raw = _cfg(name, str(default))
     try:
-        value = float(_cfg(name, str(default)))
+        value = float(raw)
     except ValueError:
+        _warn_config_fallback(name, raw, default)
         return default
     minimum_ok = value >= 0.0 if allow_zero else value > 0.0
-    return value if math.isfinite(value) and minimum_ok else default
+    if not (math.isfinite(value) and minimum_ok):
+        _warn_config_fallback(name, raw, default)
+        return default
+    return value
 
 
 def _phone_frame_pacer(*, clock: Callable[[], float] | None = None) -> FramePacer:
@@ -255,8 +275,10 @@ def _phone_gain_normalizer() -> SentencePeakNormalizer:
     try:
         target_dbfs = float(raw_target)
     except ValueError:
+        _warn_config_fallback("NANO_CLAW_PHONE_GAIN_TARGET_DB", raw_target, DEFAULT_PHONE_GAIN_TARGET_DBFS)
         target_dbfs = DEFAULT_PHONE_GAIN_TARGET_DBFS
     if not np.isfinite(target_dbfs):
+        _warn_config_fallback("NANO_CLAW_PHONE_GAIN_TARGET_DB", raw_target, DEFAULT_PHONE_GAIN_TARGET_DBFS)
         target_dbfs = DEFAULT_PHONE_GAIN_TARGET_DBFS
     return SentencePeakNormalizer(
         target_dbfs=target_dbfs,
@@ -943,10 +965,12 @@ class PhoneCall:
         try:
             max_words = int(_cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
         except ValueError:
+            _warn_config_fallback("NANO_CLAW_SPEECH_MAX_WORDS", _cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"), 18)
             max_words = 18
         try:
             max_duration = int(_cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
         except ValueError:
+            _warn_config_fallback("NANO_CLAW_SPEECH_MAX_CHUNK_MS", _cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"), 2500)
             max_duration = 2500
         try:
             plan = compile_speech(
@@ -1011,6 +1035,7 @@ class PhoneCall:
         try:
             speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
         except ValueError:
+            _warn_config_fallback("NANO_CLAW_PHONE_SPEED", _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), 1.0)
             speed = 1.0
         loop = asyncio.get_running_loop()
         synth_args = (spoken_text, voice, speed)
@@ -1267,6 +1292,7 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 msg = json.loads(raw.data)
             except json.JSONDecodeError:
+                log.debug("Skipping non-JSON telephony WS frame: %.80s", raw.data)
                 continue
             event = msg.get("event", "")
 
@@ -1295,6 +1321,7 @@ async def calls_handler(request: web.Request) -> web.Response:
     try:
         conn = metrics_db.connect()
     except Exception:
+        log.warning("Call-log request served degraded: metrics DB unavailable", exc_info=True)
         return web.json_response(
             {"node": _node(), "vad": get_vad_mode(), "calls": [], "error": "db unavailable"}
         )
@@ -1331,6 +1358,7 @@ async def config_get_handler(request: web.Request) -> web.Response:
     try:
         speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
     except ValueError:
+        _warn_config_fallback("NANO_CLAW_PHONE_SPEED", _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), 1.0)
         speed = 1.0
     return web.json_response({
         "voice": _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),

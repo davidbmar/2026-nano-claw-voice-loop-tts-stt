@@ -63,6 +63,13 @@ def handler_is_silent(handler: ast.ExceptHandler, source_lines: list[str]) -> bo
     for node in ast.walk(handler):
         if isinstance(node, ast.Raise):
             return False
+        if isinstance(node, ast.Return) and node.value is not None:
+            # Returning an HTTP error response IS surfacing the failure —
+            # the caller sees a 400/JSON error, nothing vanished. Returning
+            # a bare default value is still silent and still flagged.
+            returned = ast.unparse(node.value) if hasattr(ast, "unparse") else ""
+            if "Response" in returned or "json_response" in returned:
+                return False
         if isinstance(node, ast.Call):
             name = ast.unparse(node.func) if hasattr(ast, "unparse") else ""
             if any(tok in name for tok in ("log", "print", "warn", "error", "exception")):
