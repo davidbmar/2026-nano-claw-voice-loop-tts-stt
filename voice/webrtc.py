@@ -101,8 +101,9 @@ class Session:
             audio_transport.attach_session(self)
 
         # Selected voice for this session before the browser announces its
-        # stored choice (default: Sky 48k, LuxTTS clone — most natural read).
-        self.voice_id = "lux_sky"
+        # stored choice (default: Heart 48k — cleanest of the clones by ear:
+        # keeps final words where Sky clipped them, clean onset).
+        self.voice_id = "lux_heart"
         self.speed = 1.0
 
         # Pipeline settings: model + STT (Whisper) size for this session.

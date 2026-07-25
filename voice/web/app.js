@@ -2319,13 +2319,13 @@ var LS_SPEED = 'nanoclaw.speed';
 // Default voice for new users. The catalog `default` only applies when a
 // stored voice is unavailable, so a returning user keeps whatever they picked;
 // this constant is what a first-time visitor hears.
-var DEFAULT_VOICE_ID = 'lux_sky';         // Sky (48k) — LuxTTS clone, most natural read
-var PREV_DEFAULT_VOICE_ID = 'lux_heart';  // the voice this replaced
+var DEFAULT_VOICE_ID = 'lux_heart';    // Heart (48k) — cleanest clone by ear (keeps final words)
+var PREV_DEFAULT_VOICE_ID = 'lux_sky'; // the voice this replaced
 // One-time default migration: move anyone still sitting on the previous
 // default onto the new one, without disturbing a deliberate choice of some
 // other voice. Bump VOICE_DEFAULT_GEN whenever DEFAULT_VOICE_ID changes.
 var LS_VOICE_DEFAULT_GEN = 'nanoclaw.voiceDefaultGen';
-var VOICE_DEFAULT_GEN = '2';
+var VOICE_DEFAULT_GEN = '3';
 (function migrateVoiceDefault() {
   try {
     if (localStorage.getItem(LS_VOICE_DEFAULT_GEN) === VOICE_DEFAULT_GEN) return;
