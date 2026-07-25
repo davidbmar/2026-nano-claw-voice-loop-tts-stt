@@ -2483,7 +2483,11 @@ var LS_MODEL = 'nanoclaw.model',
   LS_STT = 'nanoclaw.stt',
   LS_ANALYSIS_STYLE = 'nanoclaw.analysisStyle',
   LS_SPEECH_PREPARATION = 'nanoclaw.speechPreparation.v1.enabled';
-var currentModel = localStorage.getItem(LS_MODEL) || 'anthropic/claude-haiku-4-5';
+// A browser with no stored choice must adopt the DEPLOYMENT default served
+// by /api/models (agents.defaults.model), not this compiled seed — the seed
+// exists only so the UI renders something before the catalog fetch resolves.
+var storedModelChoice = localStorage.getItem(LS_MODEL);
+var currentModel = storedModelChoice || 'anthropic/claude-haiku-4-5';
 var currentStt = localStorage.getItem(LS_STT) || 'base';
 // Prepared mode is now the intended default (the onset/fade artifacts that
 // once made it sound choppy are fixed). Clear a stale opt-out once so returning
@@ -2553,7 +2557,10 @@ function loadModels() {
   if (modelsLoading) return Promise.resolve(false);
   if (!currentEnabledSelectOption(modelSelect)) modelSelect.disabled = true;
   modelsLoading = true;
-  var requestedModel = currentModel;
+  // Prefer the user's explicit stored choice; a fresh browser requests the
+  // server default so the deployment's model decision actually applies.
+  // Read storage live: a mid-session user change must survive catalog reloads.
+  var requestedModel = localStorage.getItem(LS_MODEL) || '';
   return fetch('/api/models')
     .then(function (r) {
       if (!r.ok) throw new Error('model catalog unavailable');
@@ -2612,7 +2619,10 @@ function loadModels() {
       resolveEnabledSelectSelection(phoneModelSelect, stagedPhoneResolution.value, '');
       phonePendingModel = null;
       currentModel = appliedResolution.value;
-      localStorage.setItem(LS_MODEL, currentModel);
+      // Persist ONLY on explicit user change (the change handler below):
+      // writing the resolved deployment default here would freeze it as a
+      // pseudo-choice, pinning this browser when the deployment later
+      // changes its default model.
       modelSelect.disabled = false;
       sttSelect.value = currentStt;
       modelsLoaded = true;

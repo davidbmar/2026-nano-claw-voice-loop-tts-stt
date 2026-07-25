@@ -108,8 +108,8 @@ assert.match(
 );
 assert.match(
   voiceHtml,
-  /id="barge-in-hint"[\s\S]*?Off by default/,
-  'the browser control must explain its safe default and manual fallback'
+  /id="barge-in-hint"[\s\S]*?On by default/,
+  'the browser control must explain the default-on policy and manual fallback (2026-07-25)'
 );
 assert.match(
   appSource,
