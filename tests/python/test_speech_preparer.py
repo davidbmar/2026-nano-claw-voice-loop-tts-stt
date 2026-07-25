@@ -187,3 +187,26 @@ def test_short_appositive_and_word_lists_stay_whole():
     # Guard: clauses shorter than the minimum don't fragment into micro-pauses.
     assert len(compile_speech("Well, sure.").chunks) == 1
     assert len(compile_speech("Pick red, green, or blue.").chunks) == 1
+
+
+def test_dash_and_semicolon_pause_longer_than_comma(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    import importlib
+    import voice.speech_preparer as sp
+    importlib.reload(sp)
+    try:
+        # Em-dash → its own strong pause on each break.
+        dash = sp.compile_speech("It is risky — really risky — but worth it.")
+        assert dash.chunks[0].text.endswith("—")
+        assert dash.chunks[0].pause_after_ms == sp._PAUSE_AFTER_MS["dash"]
+        assert sp._PAUSE_AFTER_MS["dash"] > sp._PAUSE_AFTER_MS["comma"]
+        # A spaced hyphen is treated as a dash; an intra-word hyphen is not.
+        assert sp.compile_speech("Here is the plan - we ship Friday.").chunks[0].text.endswith("—")
+        assert len(sp.compile_speech("That is a well-known trade-off.").chunks) == 1
+        # Semicolon → semicolon pause, no stray period appended.
+        semi = sp.compile_speech("We shipped it; the numbers look good.")
+        assert semi.chunks[0].text == "We shipped it;"
+        assert semi.chunks[0].pause_after_ms == sp._PAUSE_AFTER_MS["semicolon"]
+    finally:
+        monkeypatch.delenv("NANO_CLAW_PAUSE_JITTER", raising=False)
+        importlib.reload(sp)
