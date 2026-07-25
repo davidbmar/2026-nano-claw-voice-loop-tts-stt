@@ -825,3 +825,22 @@ def test_grace_turn_exempts_expired_deadline():
 
     assert turn.exit is None
     assert len(client.messages.calls) == 1
+
+
+def test_structured_payload_tolerates_markdown_fences():
+    """Small local models fence structured output (~93% of gemma4:e2b eval
+    turns); the JSON inside is valid and must parse. Strict-first: garbage
+    still raises, and fenced garbage still raises."""
+    from voice.goal_region import _structured_payload
+
+    fenced = '```json\n{"reply": "Monday at 9 works", "exit": null}\n```'
+    assert _structured_payload(fenced) == {"reply": "Monday at 9 works", "exit": None}
+    bare_fence = '```\n{"reply": "ok"}\n```'
+    assert _structured_payload(bare_fence) == {"reply": "ok"}
+    assert _structured_payload('{"reply": "plain"}') == {"reply": "plain"}
+    import pytest
+
+    with pytest.raises(ValueError):
+        _structured_payload("no json here")
+    with pytest.raises(ValueError):
+        _structured_payload("```json\nstill not json\n```")

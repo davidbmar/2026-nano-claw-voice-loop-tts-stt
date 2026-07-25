@@ -764,7 +764,30 @@ def _parse_slot_start(value) -> datetime | None:
 
 
 def _structured_payload(raw_text: str) -> dict:
-    payload = json.loads(raw_text)
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        payload = json.loads(_strip_json_fences(raw_text))
     if isinstance(payload, dict):
         return payload
     raise ValueError("supervisor response did not contain a JSON object")
+
+
+def _strip_json_fences(text: str) -> str:
+    """Unwrap markdown-fenced JSON (```json ... ```).
+
+    Small local models habitually fence structured output even under
+    response_format json_object; the payload inside is typically valid
+    (measured on riff's eval: gemma4:e2b fenced ~93% of turns, every one
+    containing parseable JSON). Only consulted after a strict parse fails,
+    so well-behaved output never takes this path. Mirrors riff's
+    goal_region fix — keep the two in sync."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text
+    stripped = stripped[3:]
+    if stripped[:4].lower() == "json":
+        stripped = stripped[4:]
+    if stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[:-3]
+    return stripped.strip()
