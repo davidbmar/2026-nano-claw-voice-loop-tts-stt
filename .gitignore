@@ -58,8 +58,11 @@ temp/
 # OS files
 Thumbs.db
 
-# Site crawl artifacts (rebuildable via scripts/crawl_site.py)
-data/
+# Site crawl artifacts (rebuildable via scripts/crawl_site.py).
+# data/base/ is the exception: hand-written base-layer identity digest,
+# not rebuildable from a crawl — it must ship with the repo.
+data/*
+!data/base/
 .gstack/
 lux-service/.venv/
 lux-service/LuxTTS/

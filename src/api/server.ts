@@ -244,6 +244,11 @@ function createToolRegistry(): ToolRegistry {
  * Resolve the prompt and knowledge for one optional assistant profile.
  *
  * Known profiles are deliberately isolated from the global knowledge glob.
+ * When a `base` profile is registered, every other known profile composes on
+ * top of it: persona prompt first, then the base voice-identity layer, and
+ * the base self-knowledge digest beneath the persona's own knowledge. This
+ * keeps the pipeline self-awareness (STT errors, TTS delivery, capability
+ * limits) in exactly one place instead of copied into each persona.
  * `none` keeps the configured fallback prompt but has no site knowledge. An
  * absent or unknown profile preserves the pre-profile behavior, including
  * environment/config knowledge, for backward compatibility.
@@ -262,9 +267,22 @@ export function resolveAgentProfile(
       : undefined;
 
   if (knownProfile) {
+    const baseLayer =
+      profileId !== 'base' &&
+      profiles !== undefined &&
+      Object.prototype.hasOwnProperty.call(profiles, 'base')
+        ? profiles['base']
+        : undefined;
     return {
-      systemPrompt: knownProfile.systemPrompt,
-      knowledgeFiles: [...knownProfile.knowledgeFiles],
+      systemPrompt: baseLayer
+        ? `${knownProfile.systemPrompt}\n\n${baseLayer.systemPrompt}`
+        : knownProfile.systemPrompt,
+      knowledgeFiles: [
+        ...new Set([
+          ...(baseLayer?.knowledgeFiles ?? []),
+          ...knownProfile.knowledgeFiles,
+        ]),
+      ],
       ...(knownProfile.intelligence && { intelligence: knownProfile.intelligence }),
     };
   }

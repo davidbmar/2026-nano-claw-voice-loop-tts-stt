@@ -39,6 +39,7 @@ describe('assistant profile selection', () => {
     const seeded = ConfigSchema.parse(raw);
 
     expect(Object.keys(seeded.agents.profiles || {})).toEqual([
+      'base',
       'spacechannel',
       'intelligence',
       'replicantpm',
@@ -46,12 +47,29 @@ describe('assistant profile selection', () => {
       'nanoclaw',
       'intelligence-platform',
     ]);
+    // The base profile is the persona-free identity layer: scheduler modes
+    // fall back to it, every persona composes on top of it, and the global
+    // default prompt IS it (so absent/unknown/none profiles are neutral).
+    // It must never carry a site persona.
+    expect(seeded.agents.profiles?.base.knowledgeFiles).toEqual([
+      '/app/sites/base/knowledge.md',
+    ]);
+    expect(seeded.agents.profiles?.base.systemPrompt).toContain('AI voice assistant');
+    expect(seeded.agents.profiles?.base.systemPrompt).toContain('HEARING:');
+    expect(seeded.agents.profiles?.base.systemPrompt).not.toContain('Space Channel');
+    expect(seeded.agents.defaults?.systemPrompt).toBe(
+      seeded.agents.profiles?.base.systemPrompt
+    );
+    // Personas are persona-paragraph only: the voice-identity boilerplate
+    // lives in base and is composed in at resolve time, not duplicated.
     expect(seeded.agents.profiles?.spacechannel.knowledgeFiles).toEqual([
       '/app/sites/spacechannel/knowledge.md',
     ]);
-    expect(seeded.agents.profiles?.spacechannel.systemPrompt).toBe(
-      seeded.agents.defaults?.systemPrompt
+    expect(seeded.agents.profiles?.spacechannel.systemPrompt).toContain(
+      'You are the Space Channel assistant'
     );
+    expect(seeded.agents.profiles?.spacechannel.systemPrompt).not.toContain('HEARING:');
+    expect(seeded.agents.profiles?.replicantpm.systemPrompt).not.toContain('HEARING:');
     expect(seeded.agents.profiles?.intelligence).toMatchObject({
       label: 'Document Intelligence',
       knowledgeFiles: [],

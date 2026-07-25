@@ -52,6 +52,18 @@ class FlowModeConfig(TypedDict):
 
 
 FLOW_MODES: dict[str, FlowModeConfig] = {
+    # First entry = top of the dropdown. The base layer is the persona-free
+    # voice-assistant identity every other profile composes on top of;
+    # selectable here so it can be tested directly.
+    "base": {
+        "label": "Base",
+        "profile": "base",
+        "scheduler": False,
+        "abstract": (
+            "The self-aware voice-assistant identity layer under every "
+            "persona — select to test it directly."
+        ),
+    },
     "none": {
         "label": "None",
         "profile": "none",
@@ -117,7 +129,13 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
     },
     "lawyer": {
         "label": "Lawyer Scheduler",
-        "profile": "spacechannel",
+        # Non-scheduling turns (flow completed, escaped, or unavailable) fall
+        # back to the neutral base assistant — a law office must never answer
+        # as the Space Channel persona. Not "none": that keeps the configured
+        # defaults.systemPrompt, which is the Space Channel persona in the
+        # container config. Plumber above keeps its Space Channel fallback on
+        # purpose: that demo runs on the Space Channel line.
+        "profile": "base",
         "scheduler": True,
         "domain": "lawyer",
         "abstract": (

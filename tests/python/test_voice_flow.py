@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -123,6 +124,10 @@ class FakeHttpClient:
     def stream(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         return FakeStreamContext()
+
+    async def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return SimpleNamespace(status_code=200)
 
 
 def test_booked_terminal_is_speech_friendly():
@@ -712,6 +717,57 @@ def test_browser_passes_current_mode_profile_on_every_agent_request(monkeypatch)
     assert client.calls[-1][2]["json"]["profile"] == "none"
 
 
+def test_mode_switch_starts_fresh_agent_conversation(monkeypatch):
+    """Switching modes mid-session must wipe the Node-side conversation
+    memory (personas are distinct characters; history from one must not
+    leak into the next) and re-arm the per-session scheduler gate so the
+    new mode's flow can engage even after a completed earlier flow."""
+    create_calls = []
+
+    class FakeFlowSession:
+        @classmethod
+        async def create_async(cls, **kwargs):
+            create_calls.append(kwargs["domain_id"])
+            return None
+
+    monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._agent_session_id = "conv-1"
+    client = FakeHttpClient()
+
+    assert set_flow_mode("spacechannel") is True
+    run(server._handle_agent_request(ws, session, client, "tell me about the station"))
+    assert [call for call in client.calls if call[0] == "DELETE"] == []
+
+    # Leftover one-shot gate from a completed flow earlier in the session.
+    session._scheduler_flow_attempted = True
+    session._scheduler_flow = None
+    session._scheduler_flow_domain = None
+
+    assert set_flow_mode("lawyer") is True
+    run(server._handle_agent_request(ws, session, client, "I need an appointment"))
+
+    deletes = [call for call in client.calls if call[0] == "DELETE"]
+    assert len(deletes) == 1
+    assert deletes[0][2]["json"] == {"sessionId": "conv-1"}
+    # The re-armed gate let the lawyer flow attempt activation...
+    assert create_calls == ["lawyer"]
+    # ...and its failure fell through to the agent on the neutral base profile.
+    assert client.calls[-1][2]["json"]["profile"] == "base"
+
+    assert set_flow_mode("spacechannel") is True
+    run(server._handle_agent_request(ws, session, client, "back to space"))
+    deletes = [call for call in client.calls if call[0] == "DELETE"]
+    assert len(deletes) == 2
+    assert client.calls[-1][2]["json"]["profile"] == "spacechannel"
+
+    # Same mode again: no extra wipe.
+    run(server._handle_agent_request(ws, session, client, "and another question"))
+    assert len([call for call in client.calls if call[0] == "DELETE"]) == 2
+
+
 def test_browser_missing_availability_falls_back_and_logs(
     monkeypatch, tmp_path, caplog
 ):
@@ -905,7 +961,9 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
 def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     monkeypatch.delenv("NANO_CLAW_VOICE_FLOW", raising=False)
 
+    # "base" first = top of the mode dropdown, selectable for direct testing.
     assert list(FLOW_MODES) == [
+        "base",
         "none",
         "spacechannel",
         "intelligence",
@@ -916,11 +974,13 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
         "scheduler",
         "lawyer",
     ]
+    assert FLOW_MODES["base"]["profile"] == "base"
+    assert FLOW_MODES["base"]["scheduler"] is False
     assert all(mode.get("abstract") for mode in FLOW_MODES.values())
     assert FLOW_MODES["scheduler"]["domain"] == "plumber"
     assert FLOW_MODES["lawyer"] == {
         "label": "Lawyer Scheduler",
-        "profile": "spacechannel",
+        "profile": "base",
         "scheduler": True,
         "domain": "lawyer",
         "abstract": (
@@ -931,7 +991,23 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     assert get_flow_mode() == "spacechannel"
     assert get_flow_profile() == "spacechannel"
     assert get_flow_profile("scheduler") == "spacechannel"
-    assert get_flow_profile("lawyer") == "spacechannel"
+    assert get_flow_profile("lawyer") == "base"
+
+    # Every mode's profile must be registered in the container config (or be
+    # the literal "none"). An unregistered profile silently falls back to the
+    # global knowledge glob — i.e. EVERY site digest at once — on the Node
+    # side, which is exactly the cross-persona leak this registry prevents.
+    config_path = (
+        Path(__file__).resolve().parents[2] / "docker" / "default-config.json"
+    )
+    registered = set(
+        json.loads(config_path.read_text())["agents"]["profiles"]
+    )
+    for mode_id, mode in FLOW_MODES.items():
+        assert mode["profile"] == "none" or mode["profile"] in registered, (
+            f"mode {mode_id!r} points at unregistered profile "
+            f"{mode['profile']!r}"
+        )
     assert active_scheduling_domain("scheduler") == "plumber"
     assert active_scheduling_domain("lawyer") == "lawyer"
     assert active_scheduling_domain("spacechannel") is None
@@ -1007,6 +1083,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             assert payload["active"] == "scheduler"
             assert payload["availability_ok"] is True
             assert [(o["id"], o["label"]) for o in payload["options"]] == [
+                ("base", "Base"),
                 ("none", "None"),
                 ("spacechannel", "Spacechannel"),
                 ("intelligence", "Document Intelligence"),

@@ -1177,6 +1177,33 @@ async def _delete_agent_session(client: httpx.AsyncClient, session_id: str) -> N
         log.warning("nano-claw session cleanup request failed", exc_info=True)
 
 
+async def _refresh_agent_conversation_on_mode_switch(
+    session: Session, client: httpx.AsyncClient
+) -> None:
+    """Treat a runtime mode switch as the start of a fresh conversation.
+
+    Modes are distinct characters (profiles), so history from one must not
+    leak into the next: wipe this conversation's Node-side memory (the id
+    itself stays — it is the browser conversation identity used by history
+    persistence and disconnect cleanup) and re-arm the per-session scheduler
+    gate so the new mode's flow can engage even after an earlier completed
+    flow set the one-shot attempted flag.
+    """
+    mode = get_flow_mode()
+    previous = getattr(session, "_agent_flow_mode", None)
+    session._agent_flow_mode = mode
+    if previous is None or previous == mode:
+        return
+    log.info("Mode switch %s -> %s: starting fresh conversation", previous, mode)
+    session._scheduler_flow = None
+    session._scheduler_flow_domain = None
+    session._scheduler_flow_attempted = False
+    session._scheduler_flow_enabled = (
+        active_scheduling_domain(mode) is not None
+    )
+    await _delete_agent_session(client, _agent_session_id(session))
+
+
 async def _handle_agent_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1186,6 +1213,7 @@ async def _handle_agent_request(
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     _begin_agent_turn(session)
     try:
+        await _refresh_agent_conversation_on_mode_switch(session, client)
         if await _handle_scheduler_request(ws, session, text):
             return
         req_start = time.monotonic()

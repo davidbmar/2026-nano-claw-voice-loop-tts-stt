@@ -74,6 +74,7 @@ const flowOptions = [
   ...flowSelect.matchAll(/<option value="([^"]+)"(?: selected)?>([^<]+)<\/option>/g),
 ].map((match) => [match[1], match[2]]);
 assert.deepEqual(flowOptions, [
+  ['base', 'Base'],
   ['none', 'None'],
   ['spacechannel', 'Spacechannel'],
   ['intelligence', 'Document Intelligence'],
@@ -82,6 +83,7 @@ assert.deepEqual(flowOptions, [
   ['intelligence-platform', 'intelligence-platform'],
   ['replicantpm', 'Replicant PM'],
   ['scheduler', 'Plumber Scheduler'],
+  ['lawyer', 'Lawyer Scheduler'],
 ]);
 assert.match(
   flowSelect,
