@@ -75,8 +75,10 @@ export class ContextBuilder {
           'sentence length so the rhythm never turns flat or clipped, and let a little warmth ' +
           'or a natural aside through when it fits. Use at most two or three main points unless ' +
           'the listener asks for more, and connect them with spoken transitions such as “first” ' +
-          'and “the bigger issue is.” Do not use markdown, headings, bullet characters, URLs, ' +
-          'tables, citation syntax, parenthetical asides, or visual labels. Preserve exact ' +
+          'and “the bigger issue is.” Do not join clauses with dashes or hyphens — use a ' +
+          'comma or a fresh sentence instead, since a dash is a writing device that reads as ' +
+          'an awkward stop when spoken. Do not use markdown, headings, bullet characters, ' +
+          'URLs, tables, citation syntax, parenthetical asides, or visual labels. Preserve exact ' +
           'facts, names, numbers, negation, uncertainty, and tool results. Ask one primary ' +
           'question at a time. Do not add filler or narrate these delivery instructions.'
       );

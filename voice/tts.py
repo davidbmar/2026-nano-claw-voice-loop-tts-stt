@@ -48,12 +48,13 @@ def _declick_ms(name: str, default: int) -> int:
 # them and only smooths Lux's hard onset. 15ms makes the attack gradual enough
 # to stop reading as a click.
 _DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 15) // 1000
-# Trailing fade of 30ms: prepared mode splits replies into many clause chunks
-# (comma/dash), and Lux ends each one on a moderate-energy clip, so butting that
-# straight against the pause silence is a hard step — an audible abrupt halt at
-# every boundary. A short fade ramps each chunk end to zero so it settles into
-# the pause. Set NANO_CLAW_DECLICK_OUT_MS=0 to disable.
-_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 30) // 1000
+# Trailing fade of 20ms: prepared mode splits replies into clause chunks, and
+# Lux ends each on a moderate-energy clip, so butting that straight against the
+# pause silence is a hard step — an audible abrupt halt. A short fade ramps each
+# chunk end to zero so it settles into the pause. Kept to 20ms (not longer) so it
+# smooths the seam without swallowing a short boundary word's tail. Set
+# NANO_CLAW_DECLICK_OUT_MS=0 to disable.
+_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 20) // 1000
 
 
 def _declick_edges(pcm: bytes) -> bytes:

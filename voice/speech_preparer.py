@@ -69,7 +69,6 @@ _PAUSE_AFTER_MS = {
     "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 600),        # fall
     "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 600),    # rise
     "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 600),  # fall, energetic
-    "dash": _pause_ms("NANO_CLAW_PAUSE_DASH_MS", 470),            # em-dash: strong break
     "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 400),  # level/slight fall
     "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 400),          # level
     "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 270),          # slight rise, "more coming"
@@ -526,12 +525,13 @@ def normalize_spoken_forms(text: str) -> tuple[str, tuple[NormalizationRecord, .
             records,
         )
 
-    # Em/en-dash and a spaced hyphen are prosodic breaks stronger than a comma.
-    # Normalize both to a spaced em-dash so the chunker splits on them and the
-    # cadence table gives the dash its own, longer pause. Intra-word hyphens
-    # ("well-known") have no surrounding spaces and are left intact.
-    text = re.sub(r"\s*[–—]\s*", " — ", text)
-    text = re.sub(r"(?<=[A-Za-z]) - (?=[A-Za-z])", " — ", text)
+    # Models use em-dashes (and spaced hyphens) as light connectors, the way a
+    # writer uses a comma — not as dramatic breaks. Treating them as their own
+    # long pause chopped speech into staccato, so normalize both to a comma and
+    # let the comma logic (with its list/appositive guard) handle them. Intra-
+    # word hyphens ("well-known") have no surrounding spaces and are left intact.
+    text = re.sub(r"\s*[–—]\s*", ", ", text)
+    text = re.sub(r"(?<=[A-Za-z]) - (?=[A-Za-z])", ", ", text)
     text = text.replace("…", ".")
     text = re.sub(r"\s*&\s*", " and ", text)
     text = text.replace("#", " ")
@@ -606,13 +606,13 @@ def _split_clauses(text: str) -> list[str]:
         return [text]
     pieces: list[str] = []
     last_cut = 0
-    for match in re.finditer(r"[,;—–]", text):
+    for match in re.finditer(r"[,;]", text):
         cut = match.end()  # keep the punctuation with the left clause
         left = text[last_cut:cut].strip()
         right = text[cut:].strip()
-        # Commas need the list/appositive guard; a dash or semicolon is always a
+        # Commas need the list/appositive guard; a semicolon is always a
         # deliberate break, so it splits whenever both sides are non-empty.
-        min_words = _CLAUSE_MIN_WORDS if match.group() == "," else 1
+        min_words = 1 if match.group() == ";" else _CLAUSE_MIN_WORDS
         if _word_count(left) >= min_words and _word_count(right) >= min_words:
             pieces.append(left)
             last_cut = cut
@@ -663,7 +663,7 @@ def _ensure_terminal(text: str) -> str:
     # A clause that already ends on any boundary punctuation is complete — do
     # not append a stray period (that is what produced "We shipped it;." and
     # gave semicolons a period-length pause).
-    if text and not text.endswith((".", "!", "?", ",", ":", ";", "—", "–")):
+    if text and not text.endswith((".", "!", "?", ",", ":", ";")):
         return text + "."
     return text
 
@@ -695,8 +695,6 @@ def _boundary_pause(
     # Read the actual terminal punctuation first, then fall back to the chunk
     # kind for splits that carry no punctuation of their own.
     last = text.rstrip()[-1:] if text.rstrip() else ""
-    if last in ("—", "–"):
-        return _PAUSE_AFTER_MS["dash"]
     if last == ",":
         return _PAUSE_AFTER_MS["comma"]
     if last == ";":
