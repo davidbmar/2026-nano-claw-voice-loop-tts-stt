@@ -45,6 +45,7 @@ class ScriptedRunner:
     _matches_escape = GoalRegionRunner._matches_escape
     remove_free_window_overlap = GoalRegionRunner.remove_free_window_overlap
     clear_slot = GoalRegionRunner.clear_slot
+    grant_grace_turn = GoalRegionRunner.grant_grace_turn
 
     def __init__(
         self,
@@ -54,6 +55,7 @@ class ScriptedRunner:
     ) -> None:
         self._turns = deque(turns)
         self._slots: dict = {}
+        self._grace_turns = 0
         self.inputs: list[str] = []
         self.free_windows = list(
             windows
@@ -351,3 +353,20 @@ def test_escape_phrase_wins_over_affirmation_while_confirming():
     assert runner.inputs == ["Monday works"]
     assert calendar.checked == []
     assert calendar.inserted == []
+
+
+def test_ambiguous_confirmation_answer_grants_budget_grace():
+    runner = ScriptedRunner([
+        region_turn(exit="booked", slots=LAWYER_SLOTS),
+        region_turn(exit=None, reply="Would another day work?", slots=LAWYER_SLOTS),
+    ])
+    flow = BookingFlow(runner, DOMAINS["lawyer"], FakeCalendar())
+
+    flow.turn("An initial consultation Monday at ten.")
+    reply = flow.turn("hmm, let me think about that")
+
+    # The answer went back into the region with one budget-exempt turn granted,
+    # so a caller mid-confirmation can never be swallowed by the session cap.
+    assert runner._grace_turns == 1
+    assert reply.done is False
+    assert runner.inputs[-1] == "hmm, let me think about that"

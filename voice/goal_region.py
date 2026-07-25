@@ -183,6 +183,7 @@ class GoalRegionRunner:
         self._slots: dict = {}
         self._transcript: list[dict[str, str]] = []
         self._consecutive_provider_failures = 0
+        self._grace_turns = 0
 
     @property
     def slots(self) -> dict:
@@ -224,6 +225,16 @@ class GoalRegionRunner:
 
         self._slots.pop(name, None)
 
+    def grant_grace_turn(self) -> None:
+        """Exempt the next turn from budget/deadline enforcement.
+
+        A caller answering the scripted booking confirmation must never be
+        preempted by the session budget: the budget bounds open-ended
+        negotiation, not an imminent commit.
+        """
+
+        self._grace_turns += 1
+
     def turn(self, caller_text: str) -> RegionTurn:
         if self._matches_escape(caller_text):
             return self._short_circuit("escape")
@@ -231,7 +242,10 @@ class GoalRegionRunner:
             self.clock() - self._entered_at >= self.config.deadline_s
             or self._completed_turns >= self.config.max_turns
         ):
-            return self._short_circuit("budget")
+            if self._grace_turns > 0:
+                self._grace_turns -= 1
+            else:
+                return self._short_circuit("budget")
 
         messages = [*self._transcript, {"role": "user", "content": caller_text}]
         started = self.clock()

@@ -794,3 +794,34 @@ def test_clear_slot_drops_existing_slot_and_ignores_missing_slot():
     runner.clear_slot("not_present")
 
     assert runner.slots == {"duration_minutes": 60}
+
+
+def test_grace_turn_exempts_exhausted_turn_budget_once():
+    client = FakeClient([
+        response(reply="What day do you prefer?"),
+        response(reply="How about Monday at ten?"),
+    ])
+    runner = GoalRegionRunner(config(max_turns=1), [], client=client)
+
+    first = runner.turn("I need a plumber.")
+    runner.grant_grace_turn()
+    graced = runner.turn("Wait — not that time after all.")
+    exhausted = runner.turn("Hmm, let me think.")
+
+    assert first.exit is None
+    assert graced.exit is None
+    assert exhausted.exit == "budget"
+    assert len(client.messages.calls) == 2
+
+
+def test_grace_turn_exempts_expired_deadline():
+    clock = FrozenClock(100)
+    client = FakeClient([response(reply="Sure — what works instead?")])
+    runner = GoalRegionRunner(config(deadline_s=5), [], clock=clock, client=client)
+    clock.value = 105
+
+    runner.grant_grace_turn()
+    turn = runner.turn("Can we look at another day?")
+
+    assert turn.exit is None
+    assert len(client.messages.calls) == 1

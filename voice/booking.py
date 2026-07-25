@@ -140,6 +140,9 @@ class BookingFlow:
             return self._commit()
 
         self._state = _NEGOTIATING
+        # The utterance was an answer to the scripted confirmation; budget
+        # expiry must not swallow it on the way back into negotiation.
+        self._runner.grant_grace_turn()
         return self._negotiating_turn(caller_text)
 
     def _commit(self) -> BookingTurn:
