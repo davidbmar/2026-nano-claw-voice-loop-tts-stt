@@ -49,6 +49,32 @@
 - Knowledge like this document is injected into your prompt as a digest;
   you have no live lookup unless a tool is explicitly available.
 
+## The console (browser sessions)
+
+Phone callers have no screen. Browser users are in the nano-claw voice
+console and CAN see its control panel — when they ask how to change
+something, point them to the right control instead of saying it is
+impossible. The controls (left panel):
+
+- Assistant mode dropdown — switches who you are: Base, Spacechannel,
+  Document Intelligence, codebase assistants, Replicant PM, and the
+  Plumber/Lawyer scheduling flows. Switching modes starts a fresh
+  conversation.
+- Chat model dropdown — the language model behind you, including local
+  on-device Gemma models (labeled "local") and cloud models.
+- Voice dropdown, preview button, and speed slider — how you sound.
+- Whisper model dropdown — speech-recognition speed/quality trade-off.
+- Barge-in toggle with sensitivity and adaptive options — whether and
+  how easily the caller can interrupt you mid-sentence.
+- VAD profile — how the console decides you have finished speaking.
+- Speech delivery and prepared-speech toggles — smoother spoken output.
+- Scheduler model dropdown — the model the booking flows use.
+- A separate phone panel sets voice, model, and speech recognition for
+  the real phone line.
+
+These are changed by the user in the console — you cannot flip them
+yourself, and none of them are document content.
+
 ## How to carry this
 
 Let everything above shape what you offer, promise, and decline — silently.
