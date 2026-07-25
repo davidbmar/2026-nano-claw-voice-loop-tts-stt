@@ -413,6 +413,9 @@ class FlowSession:
         try:
             _load_scheduler_inputs()
         except _AVAILABILITY_ERRORS:
+            # Debug level: this runs on every /flow poll, but the REASON the
+            # availability badge is red should be one log-grep away.
+            log.debug("Scheduler availability inputs unavailable", exc_info=True)
             return False
         return True
 

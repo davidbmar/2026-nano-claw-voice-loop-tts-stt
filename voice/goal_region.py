@@ -19,6 +19,7 @@ deterministically when their source enum validates.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -27,6 +28,8 @@ from datetime import datetime, time as wall_time, timedelta
 from zoneinfo import ZoneInfo
 
 from voice.region_providers import AnthropicProvider, resolve_supervisor
+
+log = logging.getLogger("nano-claw.region")
 
 BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_START = wall_time(8, 0)
@@ -263,13 +266,27 @@ class GoalRegionRunner:
                     max_tokens=4096,
                 )
             except Exception as exc:
+                # Kept for outcome handling below, but log per attempt too:
+                # which provider call failed and why is exactly what booking
+                # post-mortems need and never had.
                 provider_failure = exc
+                log.warning(
+                    "Supervisor attempt %d/2 provider failure: %s: %s",
+                    _attempt + 1, type(exc).__name__, exc,
+                )
                 continue
             if stop_reason == "max_tokens":
+                log.warning(
+                    "Supervisor attempt %d/2 hit max_tokens; retrying", _attempt + 1
+                )
                 continue
             try:
                 payload = _structured_payload(raw_text)
             except ValueError:
+                log.warning(
+                    "Supervisor attempt %d/2 returned unparseable payload: %.120s",
+                    _attempt + 1, raw_text,
+                )
                 continue
             break
         supervisor_ms = max(0.0, (self.clock() - started) * 1000)
