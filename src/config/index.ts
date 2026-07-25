@@ -134,6 +134,15 @@ export function mergeEnvConfig(config: Config): Config {
     : intelligenceUrl
       ? true
       : undefined;
+  // Retrieval timeout: the schema default (750ms) is tuned for snappy voice
+  // turns, but under GPU contention (local LLM generating while the platform
+  // embeds the query) retrieval routinely exceeds it and the document-
+  // intelligence mode silently answers without evidence. Deployments that
+  // prioritize document access set this higher (voice pays the wait).
+  const intelligenceTimeoutValue = Number(process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS);
+  const intelligenceTimeoutMs = Number.isInteger(intelligenceTimeoutValue)
+    ? intelligenceTimeoutValue
+    : undefined;
   const intelligenceCollections = process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS?.split(',')
     .map((value) => value.trim())
     .filter(Boolean);
@@ -171,6 +180,7 @@ export function mergeEnvConfig(config: Config): Config {
     process.env.NANO_CLAW_INTELLIGENCE_TENANT !== undefined ||
     intelligenceCollections !== undefined ||
     process.env.NANO_CLAW_INTELLIGENCE_GROUNDING !== undefined ||
+    intelligenceTimeoutMs !== undefined ||
     hasDeepOverride;
   const intelligence = hasIntelligenceOverride
     ? {
@@ -184,6 +194,7 @@ export function mergeEnvConfig(config: Config): Config {
         ...(process.env.NANO_CLAW_INTELLIGENCE_GROUNDING && {
           groundingMode: process.env.NANO_CLAW_INTELLIGENCE_GROUNDING,
         }),
+        ...(intelligenceTimeoutMs !== undefined && { timeoutMs: intelligenceTimeoutMs }),
         ...(deepReasoning && { deepReasoning }),
       }
     : existingIntelligence;

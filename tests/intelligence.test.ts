@@ -31,6 +31,7 @@ afterEach(() => {
   delete process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS;
   delete process.env.NANO_CLAW_INTELLIGENCE_PROFILE;
   delete process.env.NANO_CLAW_INTELLIGENCE_GROUNDING;
+  delete process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS;
   delete process.env.NANO_CLAW_DEEP_REASONING;
   delete process.env.NANO_CLAW_DEEP_ROUTING;
   delete process.env.NANO_CLAW_DEEP_THRESHOLD;
@@ -210,6 +211,9 @@ describe('intelligence environment configuration', () => {
     process.env.NANO_CLAW_INTELLIGENCE_TENANT = 'personal';
     process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS = 'owning-the-demand, notes';
     process.env.NANO_CLAW_INTELLIGENCE_GROUNDING = 'strict';
+    // Retrieval timeout override: the 750ms schema default drops evidence
+    // under GPU contention with a local LLM (timeouts observed at 1.4-1.6s).
+    process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS = '2500';
 
     const merged = mergeEnvConfig(createDefaultConfig());
 
@@ -218,6 +222,7 @@ describe('intelligence environment configuration', () => {
       tenantId: 'personal',
       collectionIds: ['owning-the-demand', 'notes'],
       groundingMode: 'strict',
+      timeoutMs: 2500,
     });
   });
 
