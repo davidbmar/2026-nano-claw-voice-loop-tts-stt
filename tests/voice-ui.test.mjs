@@ -98,8 +98,8 @@ assert.match(
 );
 assert.match(
   appSource,
-  /localStorage\.getItem\(LS_BARGE_IN_ENABLED\) === 'true'/,
-  'experimental browser barge-in must require an explicit listener opt-in'
+  /localStorage\.getItem\(LS_BARGE_IN_ENABLED\) !== 'false'/,
+  'browser barge-in defaults ON for new browsers; an explicit user off is respected (policy change 2026-07-25)'
 );
 assert.match(
   appSource,

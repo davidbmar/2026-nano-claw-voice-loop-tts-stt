@@ -103,11 +103,23 @@ start_tunnel() {
     >> "$LOG_DIR/cloudflared.log" 2>&1 &
 }
 
+# Keep the default local LLM resident in Ollama. Ollama unloads idle models
+# after 5 min, which costs the next caller a 4-9s first turn; a load-only
+# request (no prompt) every ensure cycle (120s) resets that timer. Non-fatal
+# when Ollama is down — the agent's cloud fallbackModels cover the turn.
+warm_local_model() {
+  local model="${NANO_CLAW_WARM_MODEL:-gemma4:e2b}"
+  [ "$model" = "none" ] && return 0
+  curl -s --max-time 10 http://localhost:11434/api/generate \
+    -d "{\"model\":\"$model\",\"keep_alive\":\"30m\"}" >/dev/null 2>&1 || true
+}
+
 ensure() {
   if [ -f "$DRAIN_FLAG" ]; then
     log "DRAINED — not ensuring (use --undrain to resume)"
     return 0
   fi
+  warm_local_model
   if ! docker_up; then
     # Docker Desktop does not start at login, so after a reboot the whole
     # node stays down until a human launches it (real outage: 75 min on

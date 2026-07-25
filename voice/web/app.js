@@ -1434,7 +1434,10 @@ const BARGE_IN_LEVELS = window.BargeInSensitivityLevels || {
 // Server availability only exposes the experimental capability. A listener
 // must opt in explicitly because open-speaker echo can look exactly like user
 // speech to the current RMS detector and would otherwise cancel replies.
-let bargeInUserEnabled = localStorage.getItem(LS_BARGE_IN_ENABLED) === 'true';
+// Default ON for new browsers (explicit user off is respected) — matches the
+// server-side NANO_CLAW_BARGE_IN=1 posture; open-speaker users can turn it
+// off and use the Stop audio button instead.
+let bargeInUserEnabled = localStorage.getItem(LS_BARGE_IN_ENABLED) !== 'false';
 let bargeInSensitivity = localStorage.getItem(LS_BARGE_IN_SENSITIVITY) || 'low';
 let bargeInAdaptiveEnabled = localStorage.getItem(LS_BARGE_IN_ADAPTIVE) !== 'false';
 if (!Object.prototype.hasOwnProperty.call(BARGE_IN_LEVELS, bargeInSensitivity)) {
