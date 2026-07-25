@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T22:57:35+00:00",
+  "generated_at": "2026-07-25T23:17:49+00:00",
   "python": [
     {
       "file": "voice/__init__.py",
@@ -317,7 +317,7 @@
     },
     {
       "file": "voice/server.py",
-      "lines": 2711,
+      "lines": 2717,
       "long_functions": [
         {
           "name": "client_log_handler",
@@ -327,26 +327,26 @@
         {
           "name": "websocket_handler",
           "line": 382,
-          "length": 462
+          "length": 456
         },
         {
           "name": "_capture_user_utterance",
-          "line": 969,
+          "line": 963,
           "length": 70
         },
         {
           "name": "_handle_scheduler_request",
-          "line": 1251,
+          "line": 1263,
           "length": 101
         },
         {
           "name": "_consume_sse",
-          "line": 1600,
-          "length": 268
+          "line": 1612,
+          "length": 265
         },
         {
           "name": "conversation_detail_handler",
-          "line": 2290,
+          "line": 2296,
           "length": 61
         }
       ],
@@ -1327,7 +1327,7 @@
   ],
   "totals": {
     "py_files": 38,
-    "py_lines": 15032,
+    "py_lines": 15038,
     "py_long_functions": 33,
     "py_broad_excepts": 94,
     "py_silent_excepts": 48,

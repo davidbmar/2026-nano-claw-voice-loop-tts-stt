@@ -744,10 +744,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     # queue leaves the reply task synthesizing more audio and
                     # allows later playback state changes to revive it.
                     playback_token = getattr(session, "active_playback", None)
-                    try:
-                        receipt = session.cancel_stream(reason="manual_stop")
-                    except TypeError:  # health-ok: signature back-compat for narrow test fakes
-                        receipt = session.cancel_stream()
+                    receipt = _call_compat(session.cancel_stream, reason="manual_stop")
                     _abandon_agent_turn(session)
                     session._backoff.reset()
                     await _send_delivery_receipt(ws, receipt)
@@ -769,12 +766,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             session._resume_task.cancel()
                             session._resume_task = None
                         playback_token = getattr(session, "active_playback", None)
-                        try:
-                            receipt = session.cancel_stream(
-                                reason="confirmed_barge_in"
-                            )
-                        except TypeError:  # health-ok: signature back-compat for narrow test fakes
-                            receipt = session.cancel_stream()
+                        receipt = _call_compat(
+                            session.cancel_stream, reason="confirmed_barge_in"
+                        )
                         _abandon_agent_turn(session)
                         session._backoff.reset()
                         await _send_delivery_receipt(ws, receipt)
@@ -1054,6 +1048,24 @@ def _append_agent_delta(session: Any, text: Any) -> None:
         return
     _ensure_agent_turn(session)
     session._history_agent_parts.append(text)
+
+
+def _call_compat(fn, /, *args, **optional_kwargs):
+    """Call ``fn``, passing each optional kwarg only if its signature takes it.
+
+    Session doubles in the unit suite implement narrow subsets of the real
+    Session API; production code keeps passing newer optional kwargs
+    (``reason=``, ``token=``) without breaking them. Centralizes the
+    try-with-kwarg/retry-without shim that used to be copy-pasted per site.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # health-ok: some doubles defeat introspection
+        return fn(*args, **optional_kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(*args, **optional_kwargs)
+    accepted = {k: v for k, v in optional_kwargs.items() if k in params}
+    return fn(*args, **accepted)
 
 
 def _abandon_agent_turn(session: Any) -> None:
@@ -1858,10 +1870,7 @@ async def _consume_sse(
     except Exception:
         session._deep_projection_pending = False
         _abandon_agent_turn(session)
-        try:
-            receipt = session.stop_speaking(reason="stream_error")
-        except TypeError:  # health-ok: signature back-compat for narrow test fakes
-            receipt = session.stop_speaking()
+        receipt = _call_compat(session.stop_speaking, reason="stream_error")
         await _send_delivery_receipt(ws, receipt)
         await _send_audio_end(ws, playback_token, receipt)
         raise
@@ -2014,10 +2023,7 @@ async def _speak_with_events(
     except BaseException:
         stop_speaking = getattr(session, "stop_speaking", None)
         if callable(stop_speaking):
-            try:
-                receipt = stop_speaking(reason="speech_error")
-            except TypeError:  # health-ok: signature back-compat for narrow test fakes
-                receipt = stop_speaking()
+            receipt = _call_compat(stop_speaking, reason="speech_error")
         session._last_spoken_receipt = receipt
         raise
     finally:
