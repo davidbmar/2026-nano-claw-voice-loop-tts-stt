@@ -1713,8 +1713,13 @@ function appendAgentDelta(text) {
   if (!streamingBubble) {
     streamingBubble = addBubble('', 'agent');
   }
-  // addBubble returns the bubble element; append text with a leading space if needed
-  streamingBubble.textContent = (streamingBubble.textContent + ' ' + text).trim();
+  // Concatenate model deltas as they stream — they already carry their own
+  // spacing. Only bridge a space when two word-characters would otherwise
+  // collide (space-less deltas); NEVER before punctuation, which is what the
+  // old unconditional space produced ("word ." / "word ,").
+  var prev = streamingBubble.textContent;
+  var needSpace = prev && /\w$/.test(prev) && /^\w/.test(text);
+  streamingBubble.textContent = prev + (needSpace ? ' ' : '') + text;
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
