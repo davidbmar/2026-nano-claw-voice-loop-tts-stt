@@ -31,6 +31,14 @@ Outputs (both git-tracked so trends survive across sessions):
    and `npx vitest run`), then re-run this analyzer and confirm the totals
    moved the right way before committing.
 
+## Intentional silence
+
+A handler whose silence is deliberate (best-effort cleanup, pure parse
+guard) gets an inline `health-ok: <reason>` comment — the analyzer then
+skips it. The reason is mandatory: a bare `health-ok` with no justification
+should be rejected in review. This converts "repeat finding" into
+"audited intent" one site at a time.
+
 ## Reading caveats
 
 - TS/JS analysis is heuristic (regex catch-block scan); Python analysis is

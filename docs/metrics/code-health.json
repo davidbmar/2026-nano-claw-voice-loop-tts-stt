@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T21:47:06+00:00",
+  "generated_at": "2026-07-25T21:58:02+00:00",
   "python": [
     {
       "file": "voice/__init__.py",
@@ -1079,31 +1079,17 @@
     },
     {
       "file": "src/providers/base.ts",
-      "lines": 659,
+      "lines": 671,
       "catches": 8,
-      "swallowed_catches": [
-        {
-          "line": 99
-        },
-        {
-          "line": 163
-        },
-        {
-          "line": 363
-        }
-      ],
+      "swallowed_catches": [],
       "any_types": 2,
       "debt": 0
     },
     {
       "file": "src/providers/fallback.ts",
-      "lines": 145,
+      "lines": 146,
       "catches": 3,
-      "swallowed_catches": [
-        {
-          "line": 137
-        }
-      ],
+      "swallowed_catches": [],
       "any_types": 0,
       "debt": 0
     },
@@ -1465,8 +1451,8 @@
     "py_broad_excepts": 94,
     "py_silent_excepts": 86,
     "ts_files": 59,
-    "ts_lines": 18422,
-    "ts_swallowed_catches": 71,
+    "ts_lines": 18435,
+    "ts_swallowed_catches": 67,
     "ts_any_types": 4,
     "debt_markers": 0
   }

@@ -46,9 +46,20 @@ def iter_files(targets: list[str], suffixes: tuple[str, ...]) -> list[Path]:
     return files
 
 
-def handler_is_silent(handler: ast.ExceptHandler) -> bool:
+# An explicit `health-ok: <reason>` comment inside a handler declares the
+# silence intentional (e.g. best-effort cleanup); the analyzer then treats it
+# as audited intent rather than a finding. The reason is mandatory culture,
+# not syntax — reviewers should reject bare markers.
+HEALTH_OK_MARKER = "health-ok"
+
+
+def handler_is_silent(handler: ast.ExceptHandler, source_lines: list[str]) -> bool:
     """A handler is silent when nothing in its body logs, re-raises, or
     otherwise surfaces the failure. `pass`-only bodies are the classic case."""
+    start = handler.lineno - 1
+    end = handler.end_lineno or handler.lineno
+    if any(HEALTH_OK_MARKER in line for line in source_lines[start:end]):
+        return False
     for node in ast.walk(handler):
         if isinstance(node, ast.Raise):
             return False
@@ -75,6 +86,7 @@ def analyze_python(path: Path) -> dict:
     except SyntaxError as error:
         out["parse_error"] = str(error)
         return out
+    source_lines = text.splitlines()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             length = (node.end_lineno or node.lineno) - node.lineno + 1
@@ -88,7 +100,7 @@ def analyze_python(path: Path) -> dict:
             )
             if is_broad:
                 out["broad_excepts"] += 1
-            if handler_is_silent(node):
+            if handler_is_silent(node, source_lines):
                 out["silent_excepts"].append({"line": node.lineno})
     return out
 
@@ -114,6 +126,8 @@ def analyze_ts(path: Path) -> dict:
     swallowed = []
     for match in CATCH_RE.finditer(text):
         body = catch_block_body(text, match.end() - 1)
+        if HEALTH_OK_MARKER in body:
+            continue
         if not re.search(r"\b(log|logger|console|throw|reject|warn|error)\b", body):
             swallowed.append({"line": text[: match.start()].count("\n") + 1})
     return {

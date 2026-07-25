@@ -135,7 +135,8 @@ export async function* streamWithFallback(
         try {
           await gen.return(undefined as unknown as StreamEvent);
         } catch {
-          /* ignore cleanup errors */
+          /* health-ok: best-effort close of an abandoned stream; the failed
+             attempt itself was already logged above */
         }
       }
     }

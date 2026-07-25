@@ -97,6 +97,7 @@ export async function* parseAnthropicEvents(stream: Readable): AsyncGenerator<St
     try {
       evt = JSON.parse(data);
     } catch {
+      logger.debug({ frame: data.slice(0, 120) }, 'Skipping unparseable SSE frame');
       continue;
     }
     switch (evt.type) {
@@ -160,7 +161,10 @@ export async function* parseOpenAIEvents(stream: Readable): AsyncGenerator<Strea
   for await (const { data } of readSSEFrames(stream)) {
     if (data === '[DONE]') break;
     let evt: any;
-    try { evt = JSON.parse(data); } catch { continue; }
+    try { evt = JSON.parse(data); } catch {
+      logger.debug({ frame: data.slice(0, 120) }, 'Skipping unparseable SSE frame');
+      continue;
+    }
     const choice = evt.choices?.[0];
     if (evt.usage) {
       usage = { promptTokens: evt.usage.prompt_tokens, completionTokens: evt.usage.completion_tokens, totalTokens: evt.usage.total_tokens };
@@ -360,7 +364,15 @@ export class AnthropicProvider extends BaseProvider {
           const toolName = fn.name || (tcAny.name as string) || 'unknown';
           let toolInput: unknown;
           if (fn.arguments) {
-            try { toolInput = JSON.parse(fn.arguments); } catch { toolInput = {}; }
+            try { toolInput = JSON.parse(fn.arguments); } catch {
+              // Empty input is a materially different tool call than the
+              // model requested — that substitution must never be invisible.
+              logger.warn(
+                { toolName, args: String(fn.arguments).slice(0, 120) },
+                'Unparseable tool arguments; substituting empty input'
+              );
+              toolInput = {};
+            }
           } else if (tcAny.input) {
             toolInput = tcAny.input;
           } else {
