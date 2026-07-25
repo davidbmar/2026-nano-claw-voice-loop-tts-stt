@@ -28,6 +28,29 @@ DEFAULT_MAX_CHUNK_DURATION_MS = 2_500
 FINAL_TAIL_PAD_MS = 140
 
 
+def _clause_pauses_enabled() -> bool:
+    # Split sentences at internal , and ; so each clause becomes its own chunk
+    # and the cadence table can pause after it. Without this the comma/semicolon
+    # rows never fire — chunks only ever end at sentence terminals. On by default.
+    return os.environ.get("NANO_CLAW_CLAUSE_PAUSES", "1").strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+def _clause_min_words() -> int:
+    # A comma only becomes a pause when the clause before it AND the remainder
+    # after it are both at least this many words. Keeps "Well, sure" and lists
+    # of one-word items whole instead of turning them staccato.
+    try:
+        return max(1, min(8, int(os.environ.get("NANO_CLAW_CLAUSE_MIN_WORDS", "3"))))
+    except ValueError:
+        return 3
+
+
+_CLAUSE_PAUSES_ON = _clause_pauses_enabled()
+_CLAUSE_MIN_WORDS = _clause_min_words()
+
+
 def _pause_ms(name: str, default: int) -> int:
     try:
         return max(0, min(2000, int(os.environ.get(name, str(default)))))
@@ -565,6 +588,31 @@ def _split_sentences(text: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def _split_clauses(text: str) -> list[str]:
+    """Split a sentence at internal ``,`` and ``;`` boundaries into clause
+    pieces, each keeping its boundary punctuation so ``_pause_after`` reads it
+    and the cadence table pauses after it. A boundary only splits when both the
+    clause before it and the remainder after it have at least
+    ``_CLAUSE_MIN_WORDS`` words, so short appositives ("Well, sure") and lists of
+    one-word items stay whole instead of turning staccato. Joining the pieces
+    back with a single space reproduces the original text exactly."""
+    if not _CLAUSE_PAUSES_ON:
+        return [text]
+    pieces: list[str] = []
+    last_cut = 0
+    for match in re.finditer(r"[,;]", text):
+        cut = match.end()  # keep the punctuation with the left clause
+        left = text[last_cut:cut].strip()
+        right = text[cut:].strip()
+        if _word_count(left) >= _CLAUSE_MIN_WORDS and _word_count(right) >= _CLAUSE_MIN_WORDS:
+            pieces.append(left)
+            last_cut = cut
+    tail = text[last_cut:].strip()
+    if tail:
+        pieces.append(tail)
+    return pieces or [text]
+
+
 def _split_long_sentence(text: str, max_words: int) -> list[str]:
     """Split at audible clause boundaries; never cut at an arbitrary word."""
 
@@ -683,10 +731,18 @@ def compile_speech(
             sentence_kind = segment.kind
             if sentence_index and segment.kind in ("heading", "list_item"):
                 sentence_kind = "continuation"
-            for piece in _split_long_sentence(sentence, max_words):
-                piece = _ensure_terminal(piece)
-                if piece:
-                    units.append((piece, _sentence_kind(piece, sentence_kind)))
+            # Break prose sentences at commas/semicolons so each clause gets its
+            # cadence pause. Headings and list items keep their structure whole.
+            clauses = (
+                _split_clauses(sentence)
+                if sentence_kind in ("statement", "question", "continuation")
+                else [sentence]
+            )
+            for clause in clauses:
+                for piece in _split_long_sentence(clause, max_words):
+                    piece = _ensure_terminal(piece)
+                    if piece:
+                        units.append((piece, _sentence_kind(piece, sentence_kind)))
 
     chunks: list[SpeechChunk] = []
     for sequence, (text, kind) in enumerate(units):

@@ -159,3 +159,31 @@ def test_pause_jitter_varies_within_bounds(monkeypatch):
     finally:
         monkeypatch.delenv("NANO_CLAW_PAUSE_JITTER", raising=False)
         importlib.reload(sp)
+
+
+def test_commas_split_into_paused_clauses_without_changing_words(monkeypatch):
+    # Jitter off so the comma pause equals the table value exactly.
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    import importlib
+    import voice.speech_preparer as sp
+    importlib.reload(sp)
+    try:
+        src = "The strategy is risky, the timeline is tight, and the budget is thin."
+        plan = sp.compile_speech(src)
+        # Three clauses; the first two end on a comma and carry the comma pause.
+        assert len(plan.chunks) == 3
+        assert plan.chunks[0].text.endswith(",")
+        assert plan.chunks[1].text.endswith(",")
+        assert plan.chunks[0].pause_after_ms == sp._PAUSE_AFTER_MS["comma"]
+        assert plan.chunks[1].pause_after_ms == sp._PAUSE_AFTER_MS["comma"]
+        # Splitting changes pause placement, never the words.
+        assert plan.spoken_text == src
+    finally:
+        monkeypatch.delenv("NANO_CLAW_PAUSE_JITTER", raising=False)
+        importlib.reload(sp)
+
+
+def test_short_appositive_and_word_lists_stay_whole():
+    # Guard: clauses shorter than the minimum don't fragment into micro-pauses.
+    assert len(compile_speech("Well, sure.").chunks) == 1
+    assert len(compile_speech("Pick red, green, or blue.").chunks) == 1
