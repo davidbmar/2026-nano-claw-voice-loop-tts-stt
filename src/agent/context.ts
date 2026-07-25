@@ -69,9 +69,12 @@ export class ContextBuilder {
     if (this.config.responseMode === 'voice') {
       parts.push('\n## Spoken response contract');
       parts.push(
-        'This answer will be heard, not read. Lead with the conclusion and write natural ' +
-          'spoken prose in short sentences. Use at most two or three main points unless the ' +
-          'listener asks for more, and connect them with spoken transitions such as “first” ' +
+        'This answer will be heard, not read. Lead with the conclusion and write the way a ' +
+          'person actually talks, not an essay read aloud: short sentences, everyday words ' +
+          'over formal ones, and contractions like you\'re, it\'s, and we\'ll. Vary your ' +
+          'sentence length so the rhythm never turns flat or clipped, and let a little warmth ' +
+          'or a natural aside through when it fits. Use at most two or three main points unless ' +
+          'the listener asks for more, and connect them with spoken transitions such as “first” ' +
           'and “the bigger issue is.” Do not use markdown, headings, bullet characters, URLs, ' +
           'tables, citation syntax, parenthetical asides, or visual labels. Preserve exact ' +
           'facts, names, numbers, negation, uncertainty, and tool results. Ask one primary ' +

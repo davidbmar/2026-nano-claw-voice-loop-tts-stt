@@ -122,3 +122,40 @@ def test_empty_text_produces_a_complete_empty_plan():
     assert plan.chunks == ()
     assert plan.spoken_text == ""
     assert plan.public_metadata()["chunkCount"] == 0
+
+
+def test_pause_jitter_disabled_matches_table_and_never_touches_final_pad(monkeypatch):
+    import importlib
+    import voice.speech_preparer as sp
+
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    importlib.reload(sp)
+    try:
+        # Jitter off → boundary pauses equal the cadence table exactly.
+        assert sp._jitter_pause(450) == 450
+        assert sp._boundary_pause("A full stop.", "statement", None) == sp._PAUSE_AFTER_MS["period"]
+        assert sp._boundary_pause("a clause,", "statement", None) == sp._PAUSE_AFTER_MS["comma"]
+        # The final transport tail is a fixed guard — never jittered.
+        assert sp._pause_after("last words", "statement", None, None) == sp.FINAL_TAIL_PAD_MS
+    finally:
+        monkeypatch.delenv("NANO_CLAW_PAUSE_JITTER", raising=False)
+        importlib.reload(sp)
+
+
+def test_pause_jitter_varies_within_bounds(monkeypatch):
+    import importlib
+    import voice.speech_preparer as sp
+
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0.15")
+    importlib.reload(sp)
+    try:
+        base = sp._PAUSE_AFTER_MS["period"]
+        vals = [sp._jitter_pause(base) for _ in range(300)]
+        # Stays within ±15% (allow 1ms rounding slack) and actually varies.
+        assert all(base * 0.85 - 1 <= v <= base * 1.15 + 1 for v in vals)
+        assert len(set(vals)) > 5
+        # Final pad is still exempt even with jitter enabled.
+        assert sp._pause_after("last", "statement", None, None) == sp.FINAL_TAIL_PAD_MS
+    finally:
+        monkeypatch.delenv("NANO_CLAW_PAUSE_JITTER", raising=False)
+        importlib.reload(sp)

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 import html
 import os
+import random
 import re
 from typing import Callable, Literal
 
@@ -50,6 +51,29 @@ _PAUSE_AFTER_MS = {
     "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 200),          # slight rise, "more coming"
     "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 200),        # mid-clause split
 }
+
+
+def _jitter_fraction() -> float:
+    # Humans are not metronomes: real reading pauses vary a little around their
+    # nominal length. A small random wobble (default ±15%) on each cadence pause
+    # keeps the rhythm from sounding mechanically regular. Set to 0 to disable.
+    try:
+        pct = float(os.environ.get("NANO_CLAW_PAUSE_JITTER", "0.15"))
+    except ValueError:
+        return 0.15
+    return max(0.0, min(0.5, pct))
+
+
+_PAUSE_JITTER = _jitter_fraction()
+
+
+def _jitter_pause(ms: int) -> int:
+    """Apply the anti-metronome wobble to one cadence pause. Never touches the
+    final transport tail (that is a fixed guard, not conversational cadence)."""
+    if _PAUSE_JITTER <= 0 or ms <= 0:
+        return ms
+    factor = 1.0 + random.uniform(-_PAUSE_JITTER, _PAUSE_JITTER)
+    return max(0, int(round(ms * factor)))
 
 ChunkKind = Literal["statement", "question", "list_item", "heading", "continuation"]
 
@@ -594,11 +618,22 @@ def _pause_after(
         # Lux can end on the final phoneme with no measurable trailing PCM.
         # A tiny transport tail prevents browsers, carriers, and downstream
         # recognizers from losing that last word; there is no following phrase
-        # for the listener to perceive this as conversational hesitation.
+        # for the listener to perceive this as conversational hesitation. This
+        # is a fixed transport guard, so it is never jittered.
         return FINAL_TAIL_PAD_MS
-    # Pause by the strength of the boundary this chunk ends on (the cadence
-    # table). Read the actual terminal punctuation first, then fall back to the
-    # chunk kind for splits that carry no punctuation of their own.
+    # Pause by the strength of the boundary, then apply the anti-metronome
+    # wobble so successive same-strength boundaries don't land on an identical,
+    # mechanical-sounding duration.
+    return _jitter_pause(_boundary_pause(text, kind, next_kind))
+
+
+def _boundary_pause(
+    text: str,
+    kind: ChunkKind,
+    next_kind: ChunkKind | None,
+) -> int:
+    # Read the actual terminal punctuation first, then fall back to the chunk
+    # kind for splits that carry no punctuation of their own.
     last = text.rstrip()[-1:] if text.rstrip() else ""
     if last == ",":
         return _PAUSE_AFTER_MS["comma"]

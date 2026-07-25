@@ -2472,6 +2472,19 @@ var LS_MODEL = 'nanoclaw.model',
   LS_SPEECH_PREPARATION = 'nanoclaw.speechPreparation.v1.enabled';
 var currentModel = localStorage.getItem(LS_MODEL) || 'anthropic/claude-haiku-4-5';
 var currentStt = localStorage.getItem(LS_STT) || 'base';
+// Prepared mode is now the intended default (the onset/fade artifacts that
+// once made it sound choppy are fixed). Clear a stale opt-out once so returning
+// users land on prepared; they can still toggle back to raw, and that choice
+// then sticks (the gen key stops further resets). Bump the gen to re-flip.
+var LS_SPEECH_PREP_GEN = 'nanoclaw.speechPreparation.defaultGen';
+var SPEECH_PREP_GEN = '1';
+(function migrateSpeechPrepDefault() {
+  try {
+    if (localStorage.getItem(LS_SPEECH_PREP_GEN) === SPEECH_PREP_GEN) return;
+    localStorage.removeItem(LS_SPEECH_PREPARATION); // → default (prepared)
+    localStorage.setItem(LS_SPEECH_PREP_GEN, SPEECH_PREP_GEN);
+  } catch (_e) { /* storage disabled — falls through to the default below */ }
+})();
 var speechPreparationEnabled = localStorage.getItem(LS_SPEECH_PREPARATION) !== 'false';
 var speechPreparationAvailable = true;
 var speechPreparationVersion = 'unknown';
