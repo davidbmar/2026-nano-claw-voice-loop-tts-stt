@@ -547,6 +547,13 @@ export class OpenAIProvider extends BaseProvider {
     return known ? model.slice(slash + 1) : model;
   }
 
+  /** Extra body params merged into every request — subclass hook (e.g. Ollama
+   * sends reasoning_effort:"none" so thinking-capable local models answer
+   * immediately on the voice path instead of reasoning in silence). */
+  protected extraRequestParams(): Record<string, unknown> {
+    return {};
+  }
+
   async complete(
     messages: Message[],
     model: string,
@@ -566,6 +573,7 @@ export class OpenAIProvider extends BaseProvider {
         })),
         temperature,
         max_tokens: maxTokens,
+        ...this.extraRequestParams(),
       };
 
       if (tools && tools.length > 0) {
@@ -613,6 +621,7 @@ export class OpenAIProvider extends BaseProvider {
       })),
       temperature, max_tokens: maxTokens, stream: true,
       stream_options: { include_usage: true },
+      ...this.extraRequestParams(),
     };
     if (tools && tools.length > 0) requestData.tools = tools;
     let response;
@@ -626,5 +635,24 @@ export class OpenAIProvider extends BaseProvider {
       throw new ProviderError(`OpenAI API error: ${(error as Error).message}`);
     }
     yield* parseOpenAIEvents(response.data as Readable);
+  }
+}
+
+/**
+ * Local Ollama server via its OpenAI-compatible /v1 endpoint. Runs NATIVELY
+ * on the Mac host (Docker containers on macOS get no Metal GPU) and is
+ * reached from the voice container as host.docker.internal — same pattern as
+ * the intelligence API. reasoning_effort:"none" makes thinking-capable
+ * models (gemma4 family) answer immediately instead of reasoning in silence
+ * — dead air is the one thing a voice turn cannot afford — and is accepted
+ * as a no-op by non-thinking models (verified against Ollama 0.20).
+ */
+export class OllamaProvider extends OpenAIProvider {
+  protected getDefaultApiBase(): string {
+    return 'http://host.docker.internal:11434/v1';
+  }
+
+  protected extraRequestParams(): Record<string, unknown> {
+    return { reasoning_effort: 'none' };
   }
 }

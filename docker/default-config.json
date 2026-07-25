@@ -1,5 +1,10 @@
 {
-  "providers": {},
+  "providers": {
+    "ollama": {
+      "apiKey": "ollama",
+      "apiBase": "http://host.docker.internal:11434/v1"
+    }
+  },
   "agents": {
     "defaults": {
       "model": "deepseek/deepseek-v4-flash",

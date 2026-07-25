@@ -13,6 +13,12 @@ export const MODEL_CATALOG: CatalogModel[] = [
   { id: 'groq/llama-3.3-70b-versatile', label: 'Groq Llama 3.3 70B', provider: 'groq' },
   { id: 'dashscope/qwen-plus', label: 'Qwen Plus (Alibaba)', provider: 'dashscope' },
   { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini', provider: 'openai' },
+  // Local Ollama on the Mac host (Metal), reached via host.docker.internal.
+  // gemma4 models are thinking-capable; OllamaProvider sends
+  // reasoning_effort:"none" so they answer immediately on the voice path.
+  { id: 'ollama/gemma4:e2b', label: 'Gemma4 E2B (local)', provider: 'ollama' },
+  { id: 'ollama/gemma3:1b', label: 'Gemma3 1B (local)', provider: 'ollama' },
+  { id: 'ollama/gemma3:270m', label: 'Gemma3 270M (local)', provider: 'ollama' },
 ];
 
 export const DEFAULT_MODEL = 'anthropic/claude-haiku-4-5';

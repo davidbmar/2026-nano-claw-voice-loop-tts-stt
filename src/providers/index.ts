@@ -2,7 +2,7 @@ import { Config } from '../config/schema';
 import { Message, LLMResponse, ToolDefinition, ProviderConfig, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
-import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider } from './base';
+import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider, OllamaProvider } from './base';
 import { findProviderByModel } from './registry';
 import { completeWithFallback, streamWithFallback } from './fallback';
 
@@ -97,6 +97,9 @@ export class ProviderManager {
           throw new ProviderError('vLLM provider requires apiBase configuration');
         }
         provider = new OpenAIProvider(providerConfig.apiKey, providerConfig.apiBase);
+        break;
+      case 'ollama':
+        provider = new OllamaProvider(providerConfig.apiKey, providerConfig.apiBase);
         break;
       default:
         throw new ProviderError(`Unknown provider: ${providerName}`);

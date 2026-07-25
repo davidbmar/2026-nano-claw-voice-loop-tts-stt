@@ -25,6 +25,7 @@ export const ProvidersConfigSchema = z.object({
   moonshot: ProviderConfigSchema.optional(),
   zhipu: ProviderConfigSchema.optional(),
   vllm: ProviderConfigSchema.optional(),
+  ollama: ProviderConfigSchema.optional(),
 });
 
 /** Evidence retrieval from the local intelligence-platform service. */
