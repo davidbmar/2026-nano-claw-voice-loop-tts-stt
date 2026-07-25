@@ -219,7 +219,7 @@ def test_declick_ramps_onset_to_zero():
     declicked = tts._declick_edges(tone)
     samples = np.frombuffer(declicked, dtype=np.int16)
     assert abs(int(samples[0])) < 400, "leading edge must ramp up from ~0"
-    assert int(samples[-1]) == 12000, "trailing edge is untouched by default"
+    assert abs(int(samples[-1])) < 400, "trailing edge ramps down to ~0 (fade-out on)"
     assert int(samples[n // 2]) == 12000
 
 
@@ -241,16 +241,16 @@ def test_declick_leaves_short_pcm_untouched():
     assert tts._declick_edges(tiny) == tiny
 
 
-def test_declick_onset_ramp_is_gradual_and_tail_off_by_default():
-    # The fade-out is off by default; the onset ramp is gradual enough to smooth
-    # a hard engine onset (Lux) with no hard step.
-    assert tts._DECLICK_OUT_SAMPLES == 0
+def test_declick_onset_and_tail_ramp_gradually_by_default():
+    # Both edges fade by default: the onset ramp smooths Lux's hard attack, and
+    # the tail ramp settles each clause chunk into the following pause silence.
+    assert tts._DECLICK_OUT_SAMPLES > 0
     assert tts._DECLICK_IN_SAMPLES > 0
     n = tts.TARGET_RATE // 5  # 200 ms
     tone = np.full(n, 10000, dtype=np.int16).tobytes()
     s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16).astype(np.int32)
     assert abs(int(s[0])) < 200, "onset starts at ~zero"
-    assert int(s[-1]) == 10000, "tail untouched by default"
+    assert abs(int(s[-1])) < 200, "tail settles to ~zero"
     fin = tts._DECLICK_IN_SAMPLES
     assert int(np.abs(np.diff(s[:fin])).max()) < 60, "onset ramp has no hard step"
 

@@ -66,14 +66,14 @@ def _pause_ms(name: str, default: int) -> int:
 # move noted alongside (fall/rise) is rendered by the TTS from the punctuation
 # itself, not by this table.
 _PAUSE_AFTER_MS = {
-    "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 900),        # fall
-    "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 900),    # rise
-    "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 900),  # fall, energetic
-    "dash": _pause_ms("NANO_CLAW_PAUSE_DASH_MS", 700),            # em-dash: strong break
-    "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 600),  # level/slight fall
-    "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 600),          # level
-    "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 400),          # slight rise, "more coming"
-    "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 400),        # mid-clause split
+    "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 600),        # fall
+    "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 600),    # rise
+    "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 600),  # fall, energetic
+    "dash": _pause_ms("NANO_CLAW_PAUSE_DASH_MS", 470),            # em-dash: strong break
+    "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 400),  # level/slight fall
+    "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 400),          # level
+    "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 270),          # slight rise, "more coming"
+    "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 270),        # mid-clause split
 }
 
 
