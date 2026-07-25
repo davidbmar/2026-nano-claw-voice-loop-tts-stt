@@ -768,6 +768,9 @@ def _structured_payload(raw_text: str) -> dict:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
         payload = json.loads(_strip_json_fences(raw_text))
+        # Only reached when stripping succeeded where strict parsing failed —
+        # make the model's fencing habit visible instead of silently absorbed.
+        log.debug("Supervisor payload was markdown-fenced; parsed after stripping")
     if isinstance(payload, dict):
         return payload
     raise ValueError("supervisor response did not contain a JSON object")
