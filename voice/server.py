@@ -26,6 +26,7 @@ from voice.flow_session import (
     FLOW_MODES,
     REGION_MODELS,
     FlowSession,
+    active_scheduling_domain,
     get_flow_mode,
     get_flow_profile,
     get_region_model,
@@ -468,9 +469,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         new_session._history_agent_failed = False
         new_session._backoff = Backoff()
         new_session._resume_task = None
-        new_session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
+        new_session._scheduler_flow_enabled = (
+            active_scheduling_domain(get_flow_mode()) is not None
+        )
         new_session._scheduler_flow_attempted = False
         new_session._scheduler_flow = None
+        new_session._scheduler_flow_domain = None
         if "voice" in pending_settings:
             voice = pending_settings["voice"]
             new_session.set_voice(voice["voiceId"], voice["speed"])
@@ -1227,10 +1231,17 @@ async def _handle_scheduler_request(
     # silently falling through to the FLOW_MODES fallback persona for the rest
     # of the session (the pre-fix behavior: a stale snapshot taken at session
     # creation left the engine off and every turn spoke as Space Channel).
-    if get_flow_mode() != "scheduler":
+    domain_id = active_scheduling_domain(get_flow_mode())
+    if domain_id is None:
         return False
 
     flow = getattr(session, "_scheduler_flow", None)
+    flow_domain = getattr(session, "_scheduler_flow_domain", None)
+    if flow_domain is not None and flow_domain != domain_id:
+        flow = None
+        session._scheduler_flow = None
+        session._scheduler_flow_attempted = False
+        session._scheduler_flow_domain = None
     if flow is None and getattr(session, "_scheduler_flow_attempted", False):
         # A prior activation failed or the flow already completed; later
         # scheduler-mode turns stay on the normal agent path per FLOW_MODES.
@@ -1242,7 +1253,8 @@ async def _handle_scheduler_request(
     current_receipt = None
     if flow is None:
         session._scheduler_flow_attempted = True
-        flow = FlowSession.create()
+        session._scheduler_flow_domain = domain_id
+        flow = await FlowSession.create_async(domain_id=domain_id)
         if flow is None:
             session._scheduler_flow_enabled = False
             return False
@@ -1274,6 +1286,7 @@ async def _handle_scheduler_request(
             # Revert before either so a completed flow cannot be stranded.
             session._scheduler_flow = None
             session._scheduler_flow_enabled = False
+            session._scheduler_flow_domain = None
         await ws.send_json(_flow_state_message(flow, reply))
         await ws.send_json({"type": "agent_reply", "text": reply.text})
         completed_text = (
@@ -2520,8 +2533,9 @@ async def costs_handler(request: web.Request) -> web.Response:
 
 
 def _flow_api_payload() -> dict:
+    active_mode = get_flow_mode()
     return {
-        "active": get_flow_mode(),
+        "active": active_mode,
         "options": [
             {
                 "id": mode_id,
@@ -2530,7 +2544,7 @@ def _flow_api_payload() -> dict:
             }
             for mode_id, mode in FLOW_MODES.items()
         ],
-        "availability_ok": FlowSession.availability_ok(),
+        "availability_ok": FlowSession.availability_ok(active_mode),
     }
 
 

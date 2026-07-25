@@ -8,25 +8,37 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
+from voice.calendar_client import (
+    CalendarClient,
+    CalendarError,
+    availability_snapshot,
+    load_calendar_settings,
+)
 from voice.goal_region import (
     BUSINESS_TIMEZONE,
     FreeWindow,
     GoalRegionRunner,
     RegionConfig,
 )
+from voice.scheduling_domains import (
+    DOMAINS,
+    SCHEDULER_GREETING,
+    SchedulingDomain,
+    region_config_for,
+)
+
+if TYPE_CHECKING:
+    from voice.booking import BookingFlow
 
 log = logging.getLogger("nano-claw.flow")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_AVAILABILITY_PATH = REPO_ROOT / "scripts/scheduling_eval/availability.json"
-SCHEDULER_GREETING = (
-    "Thanks for calling Lakeside Plumbing. What can I help you schedule?"
-)
-
-FlowOutcome = Literal["booked", "escape", "budget"]
+FlowOutcome = Literal["booked", "escape", "budget", "not_booked"]
 
 
 class FlowModeConfig(TypedDict):
@@ -35,6 +47,7 @@ class FlowModeConfig(TypedDict):
     label: str
     profile: str
     scheduler: bool
+    domain: NotRequired[str]
     abstract: str
 
 
@@ -99,7 +112,17 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         # fallback behavior for subsequent normal agent turns.
         "profile": "spacechannel",
         "scheduler": True,
+        "domain": "plumber",
         "abstract": "Goal-driven plumber scheduling flow with live availability.",
+    },
+    "lawyer": {
+        "label": "Lawyer Scheduler",
+        "profile": "spacechannel",
+        "scheduler": True,
+        "domain": "lawyer",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
     },
 }
 DEFAULT_FLOW_MODE = "spacechannel"
@@ -142,6 +165,7 @@ class FlowReply:
     turns_used: int | None = None
     max_turns: int | None = None
     supervisor_ms: float | None = None
+    event_id: str | None = None
 
 
 def _normalize_flow_mode(mode: str) -> str | None:
@@ -183,6 +207,19 @@ def get_flow_profile(mode: str | None = None) -> str:
     return FLOW_MODES[active]["profile"]
 
 
+def active_scheduling_domain(mode: str | None = None) -> str | None:
+    """Return the selected scheduling domain, if the mode enables one."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        return None
+    config = FLOW_MODES[active]
+    domain_id = config.get("domain")
+    if not config["scheduler"] or domain_id not in DOMAINS:
+        return None
+    return domain_id
+
+
 def get_region_model() -> str:
     """Return the runtime scheduler model or its environment/default fallback."""
 
@@ -206,40 +243,13 @@ def set_region_model(name: str) -> bool:
 def scheduler_flow_enabled() -> bool:
     """Compatibility helper for callers that only need a boolean check."""
 
-    return FLOW_MODES[get_flow_mode()]["scheduler"]
+    return active_scheduling_domain() is not None
 
 
 def scheduler_region_config(digest: str) -> RegionConfig:
     """Return the scheduler configuration shared by live voice and evals."""
 
-    return RegionConfig(
-        goal=(
-            "Book one plumbing appointment that satisfies the caller and fits "
-            "the grounded availability. Never shorten the requested duration."
-        ),
-        persona=(
-            "You are a concise, warm plumbing scheduler. Offer concrete available "
-            "times, clarify constraints, and never claim a time outside the digest. "
-            "Keep every reply to one or two short spoken sentences; offer at most "
-            "two candidate times per turn. When a requested duration does not fit "
-            "any window on a day, say so plainly and offer the nearest other day "
-            "whose window fits it; never keep proposing a day that cannot fit the "
-            "duration."
-        ),
-        digest=digest,
-        slots={
-            "job": {"type": "text", "required": True},
-            "slot_start": {"type": "datetime", "required": True},
-            "duration_minutes": {
-                "type": "minutes",
-                "values": [30, 60, 120, 240],
-                "required": True,
-            },
-        },
-        escape_phrases=("operator", "human", "goodbye"),
-        max_turns=12,
-        deadline_s=600,
-    )
+    return region_config_for(DOMAINS["plumber"], digest)
 
 
 def load_free_windows(availability: dict) -> list[FreeWindow]:
@@ -280,35 +290,107 @@ def availability_digest(availability: dict) -> str:
     return "\n".join(lines)
 
 
+def digest_from_windows(windows: list[FreeWindow], timezone: str) -> str:
+    """Render runner free windows without mutating them."""
+
+    days: dict[str, list[dict[str, str]]] = {}
+    for window in sorted(windows, key=lambda item: (item.start, item.end)):
+        day = window.start.date().isoformat()
+        days.setdefault(day, []).append(
+            {
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+            }
+        )
+    return availability_digest({"timezone": timezone, "days": days})
+
+
+class RefusalSession:
+    """Terminal scheduler surface used when a live calendar cannot be trusted."""
+
+    greeting = SCHEDULER_GREETING
+
+    def __init__(self, domain: SchedulingDomain) -> None:
+        self._domain = domain
+        self.greeting = domain.greeting
+        self._turns_used = 0
+
+    @property
+    def goal(self) -> str:
+        return self._domain.goal
+
+    @property
+    def slots(self) -> dict:
+        return {}
+
+    @property
+    def turns_used(self) -> int:
+        return self._turns_used
+
+    @property
+    def max_turns(self) -> int:
+        return self._domain.max_turns
+
+    async def reply(self, caller_text: str) -> FlowReply:
+        """Speak one terminal apology without attempting stale negotiation."""
+
+        del caller_text
+        self._turns_used = 1
+        return FlowReply(
+            text=self._domain.apology_unavailable,
+            done=True,
+            outcome="not_booked",
+            slots={},
+            turns_used=self.turns_used,
+            max_turns=self.max_turns,
+        )
+
+
 class FlowSession:
     """Async voice-facing wrapper around the synchronous goal-region runner."""
 
     greeting = SCHEDULER_GREETING
 
-    def __init__(self, runner: GoalRegionRunner) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        booking: BookingFlow,
+        greeting: str = SCHEDULER_GREETING,
+    ) -> None:
+        self._booking = booking
+        self.greeting = greeting
         self._turn_lock = asyncio.Lock()
         self._inflight_turn: asyncio.Future | None = None
 
     @property
     def goal(self) -> str:
-        return str(getattr(getattr(self._runner, "config", None), "goal", ""))
+        runner = getattr(self._booking, "_runner", None)
+        return str(getattr(getattr(runner, "config", None), "goal", ""))
 
     @property
     def slots(self) -> dict:
-        return dict(getattr(self._runner, "slots", {}) or {})
+        runner = getattr(self._booking, "_runner", None)
+        return dict(getattr(runner, "slots", {}) or {})
 
     @property
     def turns_used(self) -> int:
-        return int(getattr(self._runner, "turns_used", 0))
+        runner = getattr(self._booking, "_runner", None)
+        return int(getattr(runner, "turns_used", 0))
 
     @property
     def max_turns(self) -> int:
-        return int(getattr(self._runner, "max_turns", 0))
+        runner = getattr(self._booking, "_runner", None)
+        return int(getattr(runner, "max_turns", 0))
 
     @classmethod
-    def availability_ok(cls) -> bool:
-        """Check scheduler availability without constructing or caching a runner."""
+    def availability_ok(cls, mode: str | None = None) -> bool:
+        """Check mode prerequisites without probing a live calendar."""
+
+        domain_id = active_scheduling_domain(mode)
+        if domain_id is None:
+            return True
+        domain = DOMAINS[domain_id]
+        if domain.uses_live_calendar:
+            return load_calendar_settings() is not None
 
         try:
             _load_scheduler_inputs()
@@ -317,21 +399,89 @@ class FlowSession:
         return True
 
     @classmethod
-    def create(cls, *, client=None) -> FlowSession | None:
-        """Build a scheduler session, or return None when it cannot be loaded."""
+    def create(
+        cls,
+        *,
+        domain_id: str | None = None,
+        client=None,
+    ) -> FlowSession | RefusalSession | None:
+        """Build a domain scheduler; live-calendar failures refuse explicitly."""
 
-        try:
-            path, config, windows = _load_scheduler_inputs()
-        except _AVAILABILITY_ERRORS as exc:
-            path = _availability_path()
-            log.error("Scheduler flow unavailable; cannot load %s: %s", path, exc)
+        selected_domain = domain_id or "plumber"
+        domain = DOMAINS.get(selected_domain)
+        if domain is None:
+            log.error("Scheduler flow unavailable; unknown domain %s", selected_domain)
             return None
 
+        calendar = None
+        if domain.uses_live_calendar:
+            settings = load_calendar_settings()
+            if settings is None:
+                log.error(
+                    "Scheduler flow unavailable; calendar settings are not configured "
+                    "for domain %s",
+                    domain.id,
+                )
+                return RefusalSession(domain)
+            try:
+                calendar = CalendarClient(settings)
+                availability = availability_snapshot(calendar)
+                windows = load_free_windows(availability)
+                config = region_config_for(domain, availability_digest(availability))
+            except (CalendarError, *_AVAILABILITY_ERRORS) as exc:
+                log.error(
+                    "Scheduler flow unavailable; cannot fetch calendar for domain "
+                    "%s: %s",
+                    domain.id,
+                    exc,
+                )
+                return RefusalSession(domain)
+            except Exception as exc:
+                log.exception(
+                    "Scheduler flow unavailable; cannot prepare calendar for domain "
+                    "%s: %s",
+                    domain.id,
+                    exc,
+                )
+                return RefusalSession(domain)
+        else:
+            try:
+                path, config, windows = _load_scheduler_inputs()
+            except _AVAILABILITY_ERRORS as exc:
+                path = _availability_path()
+                log.error("Scheduler flow unavailable; cannot load %s: %s", path, exc)
+                return None
+
         try:
-            return cls(GoalRegionRunner(config, windows, client=client))
+            # Imported lazily because BookingFlow uses the digest/speech helpers
+            # in this module.
+            from voice.booking import BookingFlow
+
+            runner = GoalRegionRunner(config, windows, client=client)
+            booking = BookingFlow(runner, domain, calendar)
+            return cls(booking, domain.greeting)
         except Exception as exc:
             log.error("Scheduler flow unavailable; cannot initialize runner: %s", exc)
-            return None
+            return RefusalSession(domain) if domain.uses_live_calendar else None
+
+    @classmethod
+    async def create_async(
+        cls,
+        *,
+        domain_id: str | None = None,
+        client=None,
+    ) -> FlowSession | RefusalSession | None:
+        """Create live-calendar sessions in an executor; plumber stays synchronous."""
+
+        selected_domain = domain_id or "plumber"
+        domain = DOMAINS.get(selected_domain)
+        if domain is None or not domain.uses_live_calendar:
+            return cls.create(domain_id=domain_id, client=client)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(cls.create, domain_id=selected_domain, client=client),
+        )
 
     async def reply(self, caller_text: str) -> FlowReply:
         """Run one blocking supervisor turn without blocking the event loop."""
@@ -339,7 +489,7 @@ class FlowSession:
         async with self._turn_lock:
             await self._discard_orphaned_turn()
             loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(None, self._runner.turn, caller_text)
+            future = loop.run_in_executor(None, self._booking.turn, caller_text)
             self._inflight_turn = future
             try:
                 # Shield keeps the executor future awaitable after browser
@@ -355,30 +505,20 @@ class FlowSession:
                 self._inflight_turn = None
 
         outcome: FlowOutcome | None = (
-            turn.exit if turn.exit in ("booked", "escape", "budget") else None
+            turn.outcome
+            if turn.outcome in ("booked", "escape", "budget", "not_booked")
+            else None
         )
-        slots = dict(turn.slots)
-        if outcome == "booked":
-            text = (
-                f"You're booked: {slots.get('job')} on "
-                f"{_spoken_datetime(slots.get('slot_start'))} for "
-                f"{slots.get('duration_minutes')} minutes. See you then. Goodbye!"
-            )
-        elif outcome == "escape":
-            text = "Of course — I'm transferring you now. Goodbye!"
-        elif outcome == "budget":
-            text = "Our scheduler will call you back to finish this up. Goodbye!"
-        else:
-            text = turn.reply
         return FlowReply(
-            text=text,
-            done=outcome is not None,
+            text=turn.reply,
+            done=turn.done,
             outcome=outcome,
-            slots=slots,
+            slots=dict(turn.slots),
             rejected=list(turn.rejected),
-            turns_used=getattr(self._runner, "turns_used", None),
-            max_turns=getattr(self._runner, "max_turns", None),
+            turns_used=turn.turns_used,
+            max_turns=turn.max_turns,
             supervisor_ms=turn.supervisor_ms,
+            event_id=turn.event_id,
         )
 
     async def _discard_orphaned_turn(self) -> None:

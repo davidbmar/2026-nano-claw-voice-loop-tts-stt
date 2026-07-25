@@ -53,7 +53,12 @@ import numpy as np
 from aiohttp import web
 
 from voice import metrics_db, silero_vad
-from voice.flow_session import FlowSession, get_flow_mode, get_flow_profile
+from voice.flow_session import (
+    FlowSession,
+    active_scheduling_domain,
+    get_flow_mode,
+    get_flow_profile,
+)
 from voice.phone_audio import (
     FRAME_MS,
     BargeInDetector,
@@ -92,6 +97,7 @@ FRAME_S = FRAME_MS / 1000.0
 DEFAULT_PHONE_PREBUFFER_MS = 200.0
 DEFAULT_PHONE_PACE_FACTOR = 1.0
 PROCESSING_CUE_SENTINEL = "\0nano-claw-processing-cue\0"
+_FLOW_NOT_SUPPLIED = object()
 
 
 class FramePacer:
@@ -318,7 +324,14 @@ _active_calls: set[str] = set()
 class PhoneCall:
     """One live call: endpointing → STT → agent → TTS, half-duplex."""
 
-    def __init__(self, ws: web.WebSocketResponse, call_id: str) -> None:
+    def __init__(
+        self,
+        ws: web.WebSocketResponse,
+        call_id: str,
+        *,
+        _flow=_FLOW_NOT_SUPPLIED,
+        _flow_domain_id=_FLOW_NOT_SUPPLIED,
+    ) -> None:
         self.ws = ws
         self.call_id = call_id
         _active_calls.add(call_id)
@@ -375,7 +388,20 @@ class PhoneCall:
         self._inbound_buffer: deque[tuple[np.ndarray, bool | None]] = deque()
         self._inbound_buffer_drops = 0
         self._http = httpx.AsyncClient(timeout=120.0)
-        self.flow = FlowSession.create() if get_flow_mode() == "scheduler" else None
+        flow_domain_id = (
+            active_scheduling_domain(get_flow_mode())
+            if _flow_domain_id is _FLOW_NOT_SUPPLIED
+            else _flow_domain_id
+        )
+        if _flow is _FLOW_NOT_SUPPLIED:
+            self.flow = (
+                FlowSession.create(domain_id=flow_domain_id)
+                if flow_domain_id is not None
+                else None
+            )
+        else:
+            self.flow = _flow
+        self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         # Idle policy: clock runs from the last time the caller spoke or the
@@ -383,6 +409,27 @@ class PhoneCall:
         self.last_activity = time.monotonic()
         self.idle_prompted = False
         self._idle_task = asyncio.create_task(self._idle_watchdog())
+
+    @classmethod
+    async def create_async(
+        cls,
+        ws: web.WebSocketResponse,
+        call_id: str,
+    ) -> PhoneCall:
+        """Build live-calendar flows off-loop before the phone greeting."""
+
+        domain_id = active_scheduling_domain(get_flow_mode())
+        flow = (
+            await FlowSession.create_async(domain_id=domain_id)
+            if domain_id is not None
+            else None
+        )
+        return cls(
+            ws,
+            call_id,
+            _flow=flow,
+            _flow_domain_id=domain_id,
+        )
 
     async def close(self) -> None:
         was_speaking = self.speaking
@@ -410,21 +457,78 @@ class PhoneCall:
         """Re-evaluate the Flow dropdown at each turn boundary so a change in
         the web UI applies to the caller's next utterance, mid-call.
 
-        Off → scheduler joins the flow cold (no flow greeting; it engages
-        with whatever the caller says next). Scheduler → off abandons the
-        negotiation state and returns to persona chat. A failed FlowSession
-        create (availability missing) falls back to persona chat and is not
-        retried for the rest of the call."""
-        want = get_flow_mode() == "scheduler"
-        if want and self.flow is None and not self._flow_create_failed:
-            self.flow = FlowSession.create()
+        Off → a scheduling domain joins the flow cold (no flow greeting; it
+        engages with whatever the caller says next). Leaving or changing the
+        scheduling domain abandons the prior negotiation. A failed plumber
+        FlowSession create falls back to persona chat and is not retried for
+        the rest of the call. Runtime turns use the async sibling below."""
+        domain_id = active_scheduling_domain(get_flow_mode())
+        if domain_id != self._flow_domain_id:
+            if self.flow is not None:
+                log.info(
+                    "[phone %s] flow changed mid-call (%s → %s)",
+                    self.call_id[:8],
+                    self._flow_domain_id or "persona",
+                    domain_id or "persona",
+                )
+            self.flow = None
+            self._flow_create_failed = False
+            self._flow_domain_id = domain_id
+        if (
+            domain_id is not None
+            and self.flow is None
+            and not self._flow_create_failed
+        ):
+            self.flow = FlowSession.create(domain_id=domain_id)
             if self.flow is None:
                 self._flow_create_failed = True
                 log.warning("[phone %s] flow switch requested but FlowSession "
                             "unavailable — staying in persona chat", self.call_id[:8])
             else:
-                log.info("[phone %s] flow joined mid-call (scheduler)", self.call_id[:8])
-        elif not want and self.flow is not None:
+                log.info(
+                    "[phone %s] flow joined mid-call (%s)",
+                    self.call_id[:8],
+                    domain_id,
+                )
+        elif domain_id is None and self.flow is not None:
+            log.info("[phone %s] flow left mid-call (scheduler → persona)", self.call_id[:8])
+            self.flow = None
+
+    async def _sync_flow_mode_async(self) -> None:
+        """Async runtime variant so live availability never blocks the loop."""
+
+        domain_id = active_scheduling_domain(get_flow_mode())
+        if domain_id != self._flow_domain_id:
+            if self.flow is not None:
+                log.info(
+                    "[phone %s] flow changed mid-call (%s → %s)",
+                    self.call_id[:8],
+                    self._flow_domain_id or "persona",
+                    domain_id or "persona",
+                )
+            self.flow = None
+            self._flow_create_failed = False
+            self._flow_domain_id = domain_id
+        if (
+            domain_id is not None
+            and self.flow is None
+            and not self._flow_create_failed
+        ):
+            self.flow = await FlowSession.create_async(domain_id=domain_id)
+            if self.flow is None:
+                self._flow_create_failed = True
+                log.warning(
+                    "[phone %s] flow switch requested but FlowSession "
+                    "unavailable — staying in persona chat",
+                    self.call_id[:8],
+                )
+            else:
+                log.info(
+                    "[phone %s] flow joined mid-call (%s)",
+                    self.call_id[:8],
+                    domain_id,
+                )
+        elif domain_id is None and self.flow is not None:
             log.info("[phone %s] flow left mid-call (scheduler → persona)", self.call_id[:8])
             self.flow = None
 
@@ -646,7 +750,7 @@ class PhoneCall:
             self._tail_extensions = 0
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
-            self._sync_flow_mode()
+            await self._sync_flow_mode_async()
             if self.flow:
                 agent_started = time.monotonic() if self.tap else None
                 reply = await self.flow.reply(text)
@@ -1169,7 +1273,7 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
             if event == "start":
                 meta = msg.get("start") or {}
                 cid = meta.get("call_control_id") or msg.get("stream_id") or "unknown"
-                call = PhoneCall(ws, cid)
+                call = await PhoneCall.create_async(ws, cid)
                 log.info("[phone %s] media stream started", cid[:8])
                 greeting = _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
                 asyncio.create_task(call.speak(greeting))

@@ -9,6 +9,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from scripts.scheduling_eval import run_eval
 from voice import flow_session, phone, server
+from voice.booking import BookingFlow, BookingTurn
+from voice.calendar_client import CalendarError
 from voice.flow_session import (
     DEFAULT_FLOW_MODE,
     DEFAULT_REGION_MODEL,
@@ -16,15 +18,19 @@ from voice.flow_session import (
     REGION_MODELS,
     FlowReply,
     FlowSession,
+    RefusalSession,
     SCHEDULER_GREETING,
+    active_scheduling_domain,
     get_flow_mode,
     get_flow_profile,
     get_region_model,
+    scheduler_flow_enabled,
     scheduler_region_config,
     set_flow_mode,
     set_region_model,
 )
 from voice.goal_region import RegionTurn
+from voice.scheduling_domains import DOMAINS
 
 
 @pytest.fixture(autouse=True)
@@ -41,10 +47,36 @@ class StaticRunner:
     def __init__(self, turn):
         self.result = turn
         self.caller_texts = []
+        self.config = SimpleNamespace(goal="Book one plumbing appointment.")
+        self.slots = dict(turn.slots)
+        self.turns_used = 1
+        self.max_turns = 12
 
     def turn(self, caller_text):
         self.caller_texts.append(caller_text)
         return self.result
+
+
+class RunnerBooking:
+    """BookingTurn adapter for flow-wrapper cancellation/serialization tests."""
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def turn(self, caller_text):
+        turn = self._runner.turn(caller_text)
+        outcome = turn.exit if turn.exit in ("booked", "escape", "budget") else None
+        return BookingTurn(
+            reply=turn.reply,
+            done=outcome is not None,
+            outcome=outcome,
+            slots=dict(turn.slots),
+            event_id=None,
+            rejected=list(turn.rejected),
+            supervisor_ms=turn.supervisor_ms,
+            turns_used=self._runner.turns_used,
+            max_turns=self._runner.max_turns,
+        )
 
 
 class FakeWebSocket:
@@ -100,15 +132,20 @@ def test_booked_terminal_is_speech_friendly():
         "duration_minutes": 60,
     }
     session = FlowSession(
-        StaticRunner(
-            RegionTurn(
-                reply="",
-                exit="booked",
-                slots=slots,
-                supervisor_ms=5.0,
-                rejected=[],
-            )
-        )
+        BookingFlow(
+            StaticRunner(
+                RegionTurn(
+                    reply="",
+                    exit="booked",
+                    slots=slots,
+                    supervisor_ms=5.0,
+                    rejected=[],
+                )
+            ),
+            DOMAINS["plumber"],
+            None,
+        ),
+        SCHEDULER_GREETING,
     )
 
     reply = run(session.reply("Monday at ten works"))
@@ -121,9 +158,143 @@ def test_booked_terminal_is_speech_friendly():
         done=True,
         outcome="booked",
         slots=slots,
+        turns_used=1,
+        max_turns=12,
         supervisor_ms=5.0,
     )
     assert "2026-07-20" not in reply.text
+
+
+def test_flow_reply_preserves_booking_event_id():
+    turn = BookingTurn(
+        reply="You're booked. Goodbye!",
+        done=True,
+        outcome="booked",
+        slots={"service_type": "follow_up_call"},
+        event_id="event-123",
+        rejected=[],
+        supervisor_ms=3.5,
+        turns_used=2,
+        max_turns=12,
+    )
+    runner = SimpleNamespace(
+        config=SimpleNamespace(goal="Book one appointment."),
+        slots=turn.slots,
+        turns_used=2,
+        max_turns=12,
+    )
+    booking = SimpleNamespace(_runner=runner, turn=lambda _text: turn)
+
+    reply = run(FlowSession(booking, "Hello").reply("yes"))
+
+    assert reply.event_id == "event-123"
+    assert reply.outcome == "booked"
+    assert reply.done is True
+
+
+def test_lawyer_create_async_wires_live_calendar_off_event_loop(monkeypatch):
+    settings = SimpleNamespace(
+        sa_path="/host/test-gcal.json",
+        calendar_id="lawyer-test@example.invalid",
+        timezone="America/Chicago",
+    )
+    calendar_instances = []
+    snapshot_threads = []
+    runner_args = {}
+    supervisor_client = object()
+    snapshot = {
+        "timezone": "America/Chicago",
+        "days": {
+            "2026-07-27": [
+                {
+                    "start": "2026-07-27T09:00:00",
+                    "end": "2026-07-27T11:00:00",
+                }
+            ]
+        },
+    }
+
+    class FakeCalendar:
+        def __init__(self, loaded_settings):
+            self.settings = loaded_settings
+            calendar_instances.append(self)
+
+    class FakeRunner:
+        def __init__(self, config, windows, client=None):
+            runner_args.update(config=config, windows=windows, client=client)
+            self.config = config
+            self.slots = {}
+            self.turns_used = 0
+            self.max_turns = config.max_turns
+
+    def fake_snapshot(calendar):
+        snapshot_threads.append(threading.get_ident())
+        assert calendar is calendar_instances[0]
+        return snapshot
+
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: settings)
+    monkeypatch.setattr(flow_session, "CalendarClient", FakeCalendar)
+    monkeypatch.setattr(flow_session, "availability_snapshot", fake_snapshot)
+    monkeypatch.setattr(flow_session, "GoalRegionRunner", FakeRunner)
+    caller_thread = threading.get_ident()
+
+    session = run(
+        FlowSession.create_async(
+            domain_id="lawyer",
+            client=supervisor_client,
+        )
+    )
+
+    assert isinstance(session, FlowSession)
+    assert session.greeting == DOMAINS["lawyer"].greeting
+    assert session._booking._domain is DOMAINS["lawyer"]
+    assert session._booking._calendar is calendar_instances[0]
+    assert runner_args["client"] is supervisor_client
+    assert runner_args["config"].goal == DOMAINS["lawyer"].goal
+    assert "2026-07-27" in runner_args["config"].digest
+    assert len(runner_args["windows"]) == 1
+    assert snapshot_threads and snapshot_threads[0] != caller_thread
+
+
+def test_lawyer_create_degrades_for_missing_settings_or_calendar_error(monkeypatch):
+    domain = DOMAINS["lawyer"]
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: None)
+
+    missing = FlowSession.create(domain_id="lawyer")
+    assert isinstance(missing, RefusalSession)
+    assert missing.greeting == domain.greeting
+    assert missing.goal == domain.goal
+    assert missing.slots == {}
+
+    reply = run(missing.reply("I need an initial consultation"))
+    assert reply == FlowReply(
+        text=domain.apology_unavailable,
+        done=True,
+        outcome="not_booked",
+        slots={},
+        turns_used=1,
+        max_turns=domain.max_turns,
+    )
+
+    settings = SimpleNamespace(
+        sa_path="/host/test-gcal.json",
+        calendar_id="lawyer-test@example.invalid",
+        timezone="America/Chicago",
+    )
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: settings)
+    monkeypatch.setattr(
+        flow_session,
+        "CalendarClient",
+        lambda loaded: SimpleNamespace(settings=loaded),
+    )
+
+    def unavailable(_calendar):
+        raise CalendarError("freebusy unavailable")
+
+    monkeypatch.setattr(flow_session, "availability_snapshot", unavailable)
+    failed_fetch = FlowSession.create(domain_id="lawyer")
+    assert isinstance(failed_fetch, RefusalSession)
+    assert run(failed_fetch.reply("Tuesday")).outcome == "not_booked"
 
 
 def test_run_eval_uses_shared_scheduler_config_without_network():
@@ -326,6 +497,53 @@ def test_phone_missing_availability_falls_back_and_logs(
     assert str(missing) in caplog.text
 
 
+def test_phone_lawyer_degraded_start_speaks_apology_and_never_uses_persona(
+    monkeypatch,
+):
+    domain = DOMAINS["lawyer"]
+    events = []
+    monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "lawyer")
+    monkeypatch.delenv("NANO_CLAW_GCAL_CALENDAR_ID", raising=False)
+    monkeypatch.delenv("NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setattr(phone, "get_vad_mode", lambda: "energy")
+    monkeypatch.setattr(phone.metrics_db, "bump_call_turns", lambda *args: None)
+
+    async def fake_telnyx_cmd(client, call_id, command, payload):
+        events.append(("telnyx", call_id, command, payload))
+        return True
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_telnyx_cmd)
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "lawyer-unavailable")
+
+        async def transcribe(_pcm):
+            return "I need an initial consultation"
+
+        async def speak(text):
+            events.append(("speak", text))
+
+        async def unexpected_stream(_text):
+            raise AssertionError("degraded lawyer mode must not use persona chat")
+
+        call._transcribe = transcribe
+        call.speak = speak
+        call._stream_reply = unexpected_stream
+        try:
+            assert isinstance(call.flow, RefusalSession)
+            assert call.default_greeting == domain.greeting
+            await call._run_turn(b"audio")
+            assert call.closed is True
+        finally:
+            await call.close()
+
+    run(exercise())
+    assert events == [
+        ("speak", domain.apology_unavailable),
+        ("telnyx", "lawyer-unavailable", "hangup", {}),
+    ]
+
+
 def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
     terminal = FlowReply(
         text="You're booked. Goodbye!",
@@ -346,7 +564,8 @@ def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
 
     class FakeFlowSession:
         @classmethod
-        def create(cls):
+        def create(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
             return flow
 
     async def fake_telnyx_cmd(client, call_id, command, payload):
@@ -409,6 +628,61 @@ def test_browser_flag_off_routes_to_normal_api(monkeypatch):
     assert client.calls[0][2]["json"]["analysisStyle"] == "topic_map"
     assert session.spoken == ["normal API reply"]
     assert {"type": "agent_reply", "text": "normal API reply"} in ws.messages
+
+
+def test_browser_gate_starts_any_registered_scheduling_domain(monkeypatch):
+    domain = DOMAINS["lawyer"]
+    created_domains = []
+
+    class FakeFlow:
+        greeting = domain.greeting
+        goal = domain.goal
+        slots = {}
+        turns_used = 0
+        max_turns = domain.max_turns
+
+        async def reply(self, text):
+            assert text == "I need contract advice"
+            return FlowReply(
+                text="What day works for the consultation?",
+                done=False,
+                outcome=None,
+                slots={"service_type": "contract_dispute_consult"},
+                turns_used=1,
+                max_turns=domain.max_turns,
+            )
+
+    class FakeFlowSession:
+        @classmethod
+        async def create_async(cls, **kwargs):
+            created_domains.append(kwargs["domain_id"])
+            return FakeFlow()
+
+    monkeypatch.setattr(server, "active_scheduling_domain", lambda mode=None: "lawyer")
+    monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._scheduler_flow_enabled = False
+    session._scheduler_flow_attempted = False
+    session._scheduler_flow = None
+    client = FakeHttpClient()
+
+    run(
+        server._handle_agent_request(
+            ws,
+            session,
+            client,
+            "I need contract advice",
+        )
+    )
+
+    assert created_domains == ["lawyer"]
+    assert client.calls == []
+    assert session.spoken == [
+        domain.greeting,
+        "What day works for the consultation?",
+    ]
 
 
 def test_browser_passes_experimental_analysis_style(monkeypatch):
@@ -480,7 +754,8 @@ def test_browser_flow_greets_speaks_and_reverts_to_normal_api(monkeypatch):
 
     class FakeFlowSession:
         @classmethod
-        def create(cls):
+        async def create_async(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
             return flow
 
     monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
@@ -529,7 +804,8 @@ def test_browser_first_flow_reply_keeps_audio_gate_closed(monkeypatch):
 
         class FakeFlowSession:
             @classmethod
-            def create(cls):
+            async def create_async(cls, **kwargs):
+                assert kwargs["domain_id"] == "plumber"
                 return flow
 
         monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
@@ -638,12 +914,27 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
         "intelligence-platform",
         "replicantpm",
         "scheduler",
+        "lawyer",
     ]
     assert all(mode.get("abstract") for mode in FLOW_MODES.values())
+    assert FLOW_MODES["scheduler"]["domain"] == "plumber"
+    assert FLOW_MODES["lawyer"] == {
+        "label": "Lawyer Scheduler",
+        "profile": "spacechannel",
+        "scheduler": True,
+        "domain": "lawyer",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
+    }
     assert DEFAULT_FLOW_MODE == "spacechannel"
     assert get_flow_mode() == "spacechannel"
     assert get_flow_profile() == "spacechannel"
     assert get_flow_profile("scheduler") == "spacechannel"
+    assert get_flow_profile("lawyer") == "spacechannel"
+    assert active_scheduling_domain("scheduler") == "plumber"
+    assert active_scheduling_domain("lawyer") == "lawyer"
+    assert active_scheduling_domain("spacechannel") is None
 
     assert set_flow_mode("off") is True
     assert get_flow_mode() == "spacechannel"
@@ -653,6 +944,46 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "off")
     monkeypatch.setattr(flow_session, "_flow_mode", None)
     assert get_flow_mode() == "spacechannel"
+    assert scheduler_flow_enabled() is False
+
+    assert set_flow_mode("lawyer") is True
+    assert scheduler_flow_enabled() is True
+
+
+def test_flow_api_payload_contains_lawyer_and_only_checks_calendar_settings(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "NANO_CLAW_GCAL_CALENDAR_ID",
+        "lawyer-test@example.invalid",
+    )
+    monkeypatch.setenv(
+        "NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON",
+        "/host/test-gcal.json",
+    )
+    monkeypatch.setattr(
+        flow_session,
+        "availability_snapshot",
+        lambda _client: (_ for _ in ()).throw(
+            AssertionError("configuration GET must not contact Google")
+        ),
+    )
+    assert set_flow_mode("lawyer") is True
+
+    payload = server._flow_api_payload()
+
+    assert payload["active"] == "lawyer"
+    assert payload["availability_ok"] is True
+    assert {
+        "id": "lawyer",
+        "label": "Lawyer Scheduler",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
+    } in payload["options"]
+
+    monkeypatch.delenv("NANO_CLAW_GCAL_CALENDAR_ID")
+    assert server._flow_api_payload()["availability_ok"] is False
 
 
 def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_path):
@@ -684,6 +1015,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 ("intelligence-platform", "intelligence-platform"),
                 ("replicantpm", "Replicant PM"),
                 ("scheduler", "Plumber Scheduler"),
+                ("lawyer", "Lawyer Scheduler"),
             ]
             assert all(
                 isinstance(o.get("abstract"), str) and o["abstract"]
@@ -707,6 +1039,10 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             )
             assert response.status == 400
 
+            response = await client.post(
+                "/api/voice/flow", json={"mode": "scheduler"}
+            )
+            assert response.status == 200
             monkeypatch.setenv(
                 "NANO_CLAW_FLOW_AVAILABILITY", str(tmp_path / "missing.json")
             )
@@ -882,7 +1218,10 @@ def test_cancelled_flow_reply_serializes_next_runner_turn(monkeypatch):
         assert set_flow_mode("scheduler") is True
         browser_session._scheduler_flow_enabled = True
         browser_session._scheduler_flow_attempted = True
-        browser_session._scheduler_flow = FlowSession(SlowRunner())
+        browser_session._scheduler_flow = FlowSession(
+            RunnerBooking(SlowRunner()),
+            SCHEDULER_GREETING,
+        )
         client = FakeHttpClient()
 
         first_task = asyncio.create_task(
@@ -963,7 +1302,10 @@ def test_orphaned_flow_exception_does_not_break_next_turn(caplog):
                     rejected=[],
                 )
 
-        flow = FlowSession(RaisingRunner())
+        flow = FlowSession(
+            RunnerBooking(RaisingRunner()),
+            SCHEDULER_GREETING,
+        )
         first_task = asyncio.create_task(flow.reply("first turn"))
         await asyncio.wait_for(first_started.wait(), timeout=1)
         first_task.cancel()
@@ -1000,7 +1342,8 @@ def test_browser_mid_session_switch_to_scheduler_engages_flow(monkeypatch):
 
     class TrackingFlowSession:
         @classmethod
-        def create(cls):
+        async def create_async(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
             created.append(True)
             return None  # availability missing -> graceful fallback after the attempt
 

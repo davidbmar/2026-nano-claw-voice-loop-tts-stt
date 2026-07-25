@@ -840,11 +840,16 @@ function updateFlowVisualization(state, outcome, rejected) {
         pulseDuration: 1500,
         duration: 2000,
       });
-    } else if (outcome === 'escape' || outcome === 'budget') {
+    } else if (outcome === 'escape' || outcome === 'budget' || outcome === 'not_booked') {
       startVisualizationMoment({
         primary: '#64748b',
         secondary: '#334155',
-        label: outcome === 'escape' ? 'Flow ended · Muted' : 'Budget reached · Muted',
+        label:
+          outcome === 'escape'
+            ? 'Flow ended · Muted'
+            : outcome === 'budget'
+              ? 'Budget reached · Muted'
+              : 'Not booked · Muted',
         strength: 0.5,
         pulseDuration: 700,
         duration: 1400,

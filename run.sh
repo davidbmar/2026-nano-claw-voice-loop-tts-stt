@@ -223,6 +223,19 @@ fi
 # same-LAN, lower-latency deployment.
 NANO_CLAW_WS_AUDIO="${NANO_CLAW_WS_AUDIO:-1}"
 NANO_CLAW_MEMORY_DIR="${NANO_CLAW_MEMORY_DIR:-/app/data/memory}"
+# The voice service cannot see riff's host-side .env or service-account path.
+# Forward only configured calendar values, and translate the credential path to
+# the read-only location mounted inside this container.
+GCAL_DOCKER_ARGS=()
+if [ -n "${NANO_CLAW_GCAL_CALENDAR_ID:-}" ]; then
+  GCAL_DOCKER_ARGS+=(-e NANO_CLAW_GCAL_CALENDAR_ID)
+fi
+if [ -n "${NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON:-}" ]; then
+  GCAL_DOCKER_ARGS+=(
+    -e NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON=/app/secrets/gcal-sa.json
+    -v "${NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON}:/app/secrets/gcal-sa.json:ro"
+  )
+fi
 # Bare `-e VAR` forwards a variable only when it is set in this shell
 # (.env is sourced above with `set -a`), so optional keys/flags pass
 # through automatically without being required.
@@ -298,6 +311,7 @@ docker run $TTY_FLAGS --rm \
   -e SCHED_EVAL_MODEL \
   -e SCHED_EVAL_THINKING \
   -e NANO_CLAW_FLOW_AVAILABILITY \
+  "${GCAL_DOCKER_ARGS[@]}" \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -e LUX_SERVICE_URL="$LUX_SERVICE_URL" \
