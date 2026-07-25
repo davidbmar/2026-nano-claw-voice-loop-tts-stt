@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from voice import flow_session
-from voice.goal_region import FreeWindow, GoalRegionRunner, RegionConfig
+from voice.goal_region import (
+    FreeWindow,
+    GoalRegionRunner,
+    RegionConfig,
+    build_supervisor_schema,
+)
 
 
 class FrozenClock:
@@ -106,6 +111,39 @@ def config(
         deadline_s=deadline_s,
         escape_on_provider_failure=escape_on_provider_failure,
         suppress_premature_confirmation=suppress_premature_confirmation,
+    )
+
+
+def lawyer_config():
+    return RegionConfig(
+        goal="Book a legal appointment.",
+        persona="You are a helpful legal scheduler.",
+        digest="Monday has the listed free windows.",
+        slots={
+            "service_type": {
+                "type": "enum",
+                "values": [
+                    "follow_up_call",
+                    "initial_consultation",
+                    "contract_dispute_consult",
+                ],
+                "required": True,
+            },
+            "slot_start": {"type": "datetime", "required": True},
+            "duration_minutes": {
+                "type": "derived_minutes",
+                "from": "service_type",
+                "map": {
+                    "follow_up_call": 30,
+                    "initial_consultation": 60,
+                    "contract_dispute_consult": 120,
+                },
+                "required": True,
+            },
+        },
+        escape_phrases=("operator", "human", "goodbye"),
+        max_turns=6,
+        deadline_s=60,
     )
 
 
@@ -597,3 +635,162 @@ def test_empty_reply_on_legitimate_booked_exit_is_unaffected():
     assert turn.exit == "booked"
     assert turn.reply == ""
     assert turn.rejected == []
+
+
+def test_schema_builder_uses_enum_any_of_and_omits_derived_slots():
+    schema = build_supervisor_schema(lawyer_config().slots)
+
+    candidates = schema["properties"]["slot_candidates"]
+    assert candidates["additionalProperties"] is False
+    assert candidates["required"] == ["service_type", "slot_start"]
+    assert candidates["properties"] == {
+        "service_type": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": [
+                        "follow_up_call",
+                        "initial_consultation",
+                        "contract_dispute_consult",
+                    ],
+                },
+                {"type": "null"},
+            ]
+        },
+        "slot_start": {"type": ["string", "null"]},
+    }
+
+
+def test_enum_candidate_accepts_and_derives_duration_minutes():
+    runner = GoalRegionRunner(lawyer_config(), [], client=FakeClient())
+
+    updates, rejected = runner._validate_candidates({
+        "service_type": "initial_consultation",
+    })
+
+    assert updates == {
+        "service_type": "initial_consultation",
+        "duration_minutes": 60,
+    }
+    assert rejected == []
+    assert runner._allowed_durations() == {30, 60, 120}
+
+
+def test_enum_candidate_rejects_value_outside_configured_values():
+    runner = GoalRegionRunner(lawyer_config(), [], client=FakeClient())
+
+    updates, rejected = runner._validate_candidates({
+        "service_type": "estate_planning",
+    })
+
+    assert updates == {}
+    assert rejected == [
+        "service_type estate_planning: expected one of "
+        "follow_up_call, initial_consultation, contract_dispute_consult"
+    ]
+
+
+def test_derived_120_minute_service_must_fit_inside_one_60_minute_window():
+    runner = GoalRegionRunner(
+        lawyer_config(),
+        [window("2026-07-20T09:00:00", "2026-07-20T10:00:00")],
+        client=FakeClient(),
+    )
+
+    updates, rejected = runner._validate_candidates({
+        "service_type": "contract_dispute_consult",
+        "slot_start": "2026-07-20T09:00:00",
+    })
+
+    assert updates == {}
+    assert rejected == [
+        "slot_start 2026-07-20T09:00:00: "
+        "interval does not fit entirely inside one free window "
+        "(that window fits at most 60m; this visit needs 120m — choose a window "
+        "marked as fitting at least 120m)"
+    ]
+
+
+def test_enum_change_rejects_new_duration_that_does_not_fit_held_start():
+    runner = GoalRegionRunner(
+        lawyer_config(),
+        [window("2026-07-20T09:00:00", "2026-07-20T10:00:00")],
+        client=FakeClient(),
+    )
+    initial, rejected = runner._validate_candidates({
+        "service_type": "initial_consultation",
+        "slot_start": "2026-07-20T09:00:00",
+    })
+    assert rejected == []
+    runner._slots.update(initial)
+
+    updates, rejected = runner._validate_candidates({
+        "service_type": "contract_dispute_consult",
+    })
+
+    assert updates == {}
+    assert rejected == [
+        "service_type contract_dispute_consult: "
+        "interval does not fit entirely inside one free window "
+        "(that window fits at most 60m; this visit needs 120m — choose a window "
+        "marked as fitting at least 120m); propose a new time for this service"
+    ]
+    assert runner.slots == initial
+
+
+@pytest.mark.parametrize(
+    ("remove_start", "remove_end", "expected"),
+    [
+        (
+            "2026-07-20T08:00:00",
+            "2026-07-20T10:00:00",
+            [("2026-07-20T10:00:00", "2026-07-20T12:00:00")],
+        ),
+        (
+            "2026-07-20T11:00:00",
+            "2026-07-20T13:00:00",
+            [("2026-07-20T09:00:00", "2026-07-20T11:00:00")],
+        ),
+        (
+            "2026-07-20T10:00:00",
+            "2026-07-20T11:00:00",
+            [
+                ("2026-07-20T09:00:00", "2026-07-20T10:00:00"),
+                ("2026-07-20T11:00:00", "2026-07-20T12:00:00"),
+            ],
+        ),
+        ("2026-07-20T08:00:00", "2026-07-20T13:00:00", []),
+        (
+            "2026-07-20T12:00:00",
+            "2026-07-20T13:00:00",
+            [("2026-07-20T09:00:00", "2026-07-20T12:00:00")],
+        ),
+    ],
+    ids=["clip-left", "clip-right", "split", "delete", "no-op"],
+)
+def test_remove_free_window_overlap_matrix(remove_start, remove_end, expected):
+    runner = GoalRegionRunner(
+        config(),
+        [window("2026-07-20T09:00:00", "2026-07-20T12:00:00")],
+        client=FakeClient(),
+    )
+
+    runner.remove_free_window_overlap(
+        datetime.fromisoformat(remove_start),
+        datetime.fromisoformat(remove_end),
+    )
+
+    assert [
+        (free_window.start.isoformat(), free_window.end.isoformat())
+        for free_window in runner.free_windows
+    ] == expected
+
+
+def test_clear_slot_drops_existing_slot_and_ignores_missing_slot():
+    runner = GoalRegionRunner(config(), [], client=FakeClient())
+    runner._slots.update({"job": "leak repair", "duration_minutes": 60})
+
+    runner.clear_slot("job")
+    runner.clear_slot("not_present")
+
+    assert runner.slots == {"duration_minutes": 60}
