@@ -840,7 +840,12 @@ def test_structured_payload_tolerates_markdown_fences():
     assert _structured_payload('{"reply": "plain"}') == {"reply": "plain"}
     import pytest
 
+    prose_wrapped = 'Sure thing! {"reply": "Thursday at 9 works", "exit": null} Anything else?'
+    assert _structured_payload(prose_wrapped) == {
+        "reply": "Thursday at 9 works",
+        "exit": None,
+    }
     with pytest.raises(ValueError):
         _structured_payload("no json here")
     with pytest.raises(ValueError):
-        _structured_payload("```json\nstill not json\n```")
+        _structured_payload("{unterminated")

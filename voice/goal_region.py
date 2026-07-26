@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -767,13 +768,52 @@ def _structured_payload(raw_text: str) -> dict:
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
-        payload = json.loads(_strip_json_fences(raw_text))
-        # Only reached when stripping succeeded where strict parsing failed —
-        # make the model's fencing habit visible instead of silently absorbed.
-        log.debug("Supervisor payload was markdown-fenced; parsed after stripping")
+        try:
+            payload = json.loads(_strip_json_fences(raw_text))
+            # Reached only when stripping succeeded where strict parsing
+            # failed — make the fencing habit visible, not silently absorbed.
+            log.debug("Supervisor payload was markdown-fenced; parsed after stripping")
+        except json.JSONDecodeError:
+            _capture_unparseable(raw_text)
+            payload = json.loads(_extract_json_object(raw_text))
+            log.debug("Supervisor payload had prose around JSON; extracted object")
     if isinstance(payload, dict):
         return payload
     raise ValueError("supervisor response did not contain a JSON object")
+
+
+def _capture_unparseable(text: str) -> None:
+    """Append raw not-yet-parsed payloads to NANO_CLAW_REGION_CAPTURE_UNPARSEABLE
+    (a file path) when set — the eval's forensic hook. No-op otherwise."""
+    path = os.environ.get("NANO_CLAW_REGION_CAPTURE_UNPARSEABLE", "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a") as sink:
+            sink.write(text + "\n===UNPARSEABLE-SEP===\n")
+    except OSError:
+        log.debug("unparseable-capture sink unavailable", exc_info=True)
+
+
+def _extract_json_object(text: str) -> str:
+    """Last-resort tolerance: the outermost brace-balanced block.
+
+    Handles prose-wrapped JSON ("Sure! Here's the plan: {...} Let me know").
+    Naive about braces inside strings — acceptable for a final fallback whose
+    failure mode is the same rejection we'd have issued anyway."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("supervisor response contained no JSON object")
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise ValueError("supervisor response contained an unterminated JSON object")
 
 
 def _strip_json_fences(text: str) -> str:
