@@ -80,6 +80,13 @@ export const AgentDefaultsSchema = z.object({
    * per-attempt timeout for the non-streaming path). The last model in the
    * chain gets no deadline — a slow answer beats none. */
   fallbackTimeoutMs: z.number().positive().optional().default(4000),
+  /** Streaming hedge delay in ms. When set (and fallbacks exist), streaming
+   * turns race the chain instead of trying it sequentially: each fallback
+   * starts this many ms after the previous one unless a first token already
+   * arrived, first token wins, losers are cancelled. Removes the dead
+   * fallbackTimeoutMs wait on every turn where the primary is slow. Unset =
+   * sequential fallback (unchanged behavior). */
+  fallbackHedgeMs: z.number().positive().optional(),
 });
 
 /**

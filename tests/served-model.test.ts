@@ -81,4 +81,37 @@ describe('served-model attribution', () => {
       | undefined;
     expect(done?.model).toBe('ollama/gemma4:e2b');
   });
+
+  it('hedged streaming preserves served-model attribution', async () => {
+    const hedgedConfig = {
+      ...config,
+      agents: {
+        defaults: {
+          fallbackModels: ['gemini/gemini-flash-lite-latest'],
+          fallbackTimeoutMs: 4000,
+          fallbackHedgeMs: 20,
+        },
+      },
+    } as unknown as Config;
+    const pm = new ProviderManager(hedgedConfig);
+    const cache = (pm as unknown as { providerCache: Map<string, unknown> })
+      .providerCache;
+    cache.set('ollama', {
+      async *completeStream(): AsyncGenerator<StreamEvent> {
+        await new Promise((r) => setTimeout(r, 200)); // misses the hedge window
+        yield { type: 'text', delta: 'slow local' };
+        yield { type: 'done', finishReason: 'stop' };
+      },
+    });
+    cache.set('gemini', fakeProvider({ text: 'hedge wins' }));
+
+    const events = await collect(pm.completeStream(messages, 'ollama/gemma4:e2b'));
+    const done = events.find((e) => e.type === 'done') as
+      | { type: 'done'; model?: string }
+      | undefined;
+    expect(done?.model).toBe('gemini/gemini-flash-lite-latest');
+    expect(
+      events.filter((e) => e.type === 'text').map((e) => (e as { delta: string }).delta)
+    ).toEqual(['hedge wins']);
+  });
 });
