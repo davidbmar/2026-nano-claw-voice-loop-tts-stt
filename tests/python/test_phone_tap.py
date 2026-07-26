@@ -80,13 +80,48 @@ def test_l16_frames_keep_supplied_rates_and_pcm_width(tmp_path, monkeypatch):
 
 def test_disabled_mode_returns_none_and_creates_nothing(tmp_path, monkeypatch):
     output_root = tmp_path / "disabled"
-    monkeypatch.delenv("NANO_CLAW_PHONE_TAP", raising=False)
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP", "0")
     monkeypatch.setenv("NANO_CLAW_PHONE_TAP_DIR", str(output_root))
 
     tap = CallTap.create("never-created", "pcmu", 8_000, 8_000)
 
     assert tap is None
     assert not output_root.exists()
+
+
+def test_tap_enabled_by_default_when_env_unset(tmp_path, monkeypatch):
+    output_root = tmp_path / "default-on"
+    monkeypatch.delenv("NANO_CLAW_PHONE_TAP", raising=False)
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP_DIR", str(output_root))
+
+    tap = CallTap.create("default-on-call", "pcmu", 8_000, 8_000)
+
+    assert tap is not None
+    tap.close()
+    assert (output_root / "default-on-call" / "inbound.wav").exists()
+
+
+def test_default_tap_root_is_inside_data_volume():
+    from voice.phone_tap import DEFAULT_TAP_ROOT
+
+    assert DEFAULT_TAP_ROOT == "/app/data/phone-taps"
+
+
+def test_meta_json_contains_clock_anchor(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP", "1")
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP_DIR", str(tmp_path))
+
+    tap = CallTap.create("anchored-call", "l16", 16_000, 16_000)
+
+    assert tap is not None
+    tap.close()
+    meta = json.loads((tmp_path / "anchored-call" / "meta.json").read_text())
+    assert meta["call_id"] == "anchored-call"
+    assert meta["codec"] == "l16"
+    assert abs(meta["wall_t0"] - time.time()) < 5.0
+    assert abs(meta["mono_t0"] - time.monotonic()) < 5.0
 
 
 def test_unwritable_output_disables_without_raising(tmp_path, monkeypatch, caplog):

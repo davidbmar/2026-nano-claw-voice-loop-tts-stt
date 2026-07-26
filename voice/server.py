@@ -240,6 +240,12 @@ async def costs_page_handler(request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "costs.html", headers=_NO_CACHE)
 
 
+async def calls_page_handler(request: web.Request) -> web.FileResponse:
+    """Serve the call review panel (list, retrace, playback)."""
+
+    return web.FileResponse(STATIC_DIR / "calls.html", headers=_NO_CACHE)
+
+
 async def static_handler(request: web.Request) -> web.FileResponse:
     filename = request.match_info["filename"]
     path = (STATIC_DIR / filename).resolve()
@@ -2666,6 +2672,7 @@ def create_app(
     cost_ledger.ensure_schema(METRICS)
     app.router.add_get("/", index_handler)
     app.router.add_get("/costs", costs_page_handler)
+    app.router.add_get("/calls", calls_page_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/voices", voices_handler)
     app.router.add_get("/api/voice/version", voice_version_handler)

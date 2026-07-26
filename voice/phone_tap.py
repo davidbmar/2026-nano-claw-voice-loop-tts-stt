@@ -27,7 +27,7 @@ from voice.phone_audio import ulaw_decode
 
 log = logging.getLogger("nano-claw.phone_tap")
 
-DEFAULT_TAP_ROOT = "/tmp/nano-claw-phone-taps"
+DEFAULT_TAP_ROOT = "/app/data/phone-taps"
 
 
 class CallTap:
@@ -64,12 +64,13 @@ class CallTap:
 
         ``call_id`` names the output subdirectory. ``codec`` is ``pcmu`` for
         G.711 mu-law bytes or a linear PCM16 codec name. Rates are integer Hz
-        for the inbound and outbound WAV files. Only the exact environment
-        value ``NANO_CLAW_PHONE_TAP=1`` enables capture.
+        for the inbound and outbound WAV files. Capture is on by default —
+        recordings feed the call review panel; only the exact environment
+        value ``NANO_CLAW_PHONE_TAP=0`` disables it.
         """
         tap: CallTap | None = None
         try:
-            if os.environ.get("NANO_CLAW_PHONE_TAP") != "1":
+            if os.environ.get("NANO_CLAW_PHONE_TAP", "1") == "0":
                 return None
             tap = cls(call_id, codec, inbound_rate, outbound_rate)
             tap._open()
@@ -166,6 +167,20 @@ class CallTap:
         self._tts = self._open_wav(self.directory / "tts_48k.wav", 48_000)
         self._outbound = self._open_wav(self.directory / "outbound.wav", self.outbound_rate)
         self._timings = (self.directory / "timings.jsonl").open("w", encoding="utf-8")
+        # Wall/monotonic anchor pair: projects the monotonic ``t`` values in
+        # timings.jsonl onto wall-clock time for the call review timeline.
+        (self.directory / "meta.json").write_text(
+            json.dumps(
+                {
+                    "call_id": self.call_id,
+                    "codec": self.codec,
+                    "wall_t0": time.time(),
+                    "mono_t0": time.monotonic(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _open_wav(path: Path, rate: int) -> wave.Wave_write:

@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Call Review</title>
+  <style>
+    :root {
+      --bg: #050606;
+      --panel: rgba(16, 18, 19, 0.82);
+      --panel-strong: rgba(20, 22, 23, 0.94);
+      --line: rgba(255, 255, 255, 0.085);
+      --line-strong: rgba(255, 255, 255, 0.14);
+      --text: #f1f4f3;
+      --muted: #969e9b;
+      --faint: #5e6663;
+      --accent: #ff775f;
+      --accent-rgb: 255, 119, 95;
+      --accent-2: #ffca5c;
+      --good: #52f5a8;
+      --caller: #6fb7ff;
+      --caller-rgb: 111, 183, 255;
+      --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      padding-bottom: 6rem;
+      background-image: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(var(--accent-rgb), 0.08), transparent);
+    }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 1.5rem; }
+    header.top { padding: 3rem 0 2rem; border-bottom: 1px solid var(--line); }
+    .eyebrow {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.72rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 0.75rem;
+    }
+    .eyebrow .sep { color: var(--faint); }
+    h1 {
+      font-size: clamp(1.9rem, 4vw, 2.8rem);
+      margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+      text-wrap: balance;
+    }
+    .sub { color: var(--muted); max-width: 62ch; margin: 0; }
+    .glass {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(26px) saturate(130%);
+      -webkit-backdrop-filter: blur(26px) saturate(130%);
+    }
+    .state {
+      display: none;
+      margin: 1.25rem 0 0;
+      padding: 0.8rem 1rem;
+      border: 1px solid rgba(var(--accent-rgb), 0.35);
+      border-radius: 10px;
+      color: var(--accent-2);
+      background: rgba(var(--accent-rgb), 0.07);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+    }
+    .state.show { display: block; }
+    .state.error { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.55); }
+
+    /* Token gate */
+    #token-gate { margin: 2.5rem 0; padding: 1.6rem; max-width: 30rem; }
+    #token-gate label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.6rem; }
+    #token-gate .row { display: flex; gap: 0.6rem; }
+    #token-input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 0.55rem 0.8rem;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.85rem;
+    }
+    button.primary {
+      background: rgba(var(--accent-rgb), 0.16);
+      color: var(--accent-2);
+      border: 1px solid rgba(var(--accent-rgb), 0.4);
+      border-radius: 8px;
+      padding: 0.55rem 1.1rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 160ms var(--ease);
+    }
+    button.primary:hover { background: rgba(var(--accent-rgb), 0.28); }
+    button.ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      padding: 0.45rem 0.9rem;
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    button.ghost:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.3); }
+
+    /* List view */
+    #list-view { margin-top: 2rem; }
+    .list-meta { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.9rem; }
+    .list-meta .node { color: var(--faint); font-size: 0.75rem; }
+    table.calls { width: 100%; border-collapse: collapse; overflow: hidden; }
+    table.calls th {
+      text-align: left;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--faint);
+      font-weight: 500;
+      padding: 0.7rem 0.9rem;
+      border-bottom: 1px solid var(--line-strong);
+    }
+    table.calls td { padding: 0.65rem 0.9rem; border-bottom: 1px solid var(--line); font-size: 0.88rem; }
+    table.calls tbody tr { cursor: pointer; transition: background 140ms var(--ease); }
+    table.calls tbody tr:hover { background: rgba(255, 255, 255, 0.045); }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { color: var(--faint); padding: 1.4rem; text-align: center; }
+
+    /* Detail view */
+    #detail-view { display: none; margin-top: 2rem; }
+    .detail-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.2rem; flex-wrap: wrap; }
+    .detail-head h2 { margin: 0; font-size: 1.25rem; letter-spacing: -0.01em; }
+    .detail-head .when { color: var(--muted); font-size: 0.85rem; }
+    .detail-head .callid { color: var(--faint); font-size: 0.7rem; word-break: break-all; }
+    .audio-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin: 1.1rem 0 1.6rem; }
+    .audio-card { padding: 0.9rem 1rem; }
+    .audio-card .lbl {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-bottom: 0.55rem;
+    }
+    .audio-card audio { width: 100%; height: 2.1rem; }
+
+    /* Timeline */
+    #timeline { display: flex; flex-direction: column; gap: 0.7rem; margin-top: 0.4rem; }
+    .bubble {
+      max-width: 72%;
+      padding: 0.65rem 0.9rem;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble .t {
+      display: block;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.65rem;
+      color: var(--faint);
+      margin-bottom: 0.3rem;
+      letter-spacing: 0.06em;
+    }
+    .turn { display: flex; }
+    .turn.caller { justify-content: flex-start; }
+    .turn.agent { justify-content: flex-end; }
+    .turn.caller .bubble { background: rgba(var(--caller-rgb), 0.09); border-color: rgba(var(--caller-rgb), 0.25); }
+    .turn.agent .bubble { background: rgba(var(--accent-rgb), 0.08); border-color: rgba(var(--accent-rgb), 0.22); }
+    .chips { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .chip {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.64rem;
+      letter-spacing: 0.06em;
+      padding: 0.14rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+    }
+    .chip.outcome { color: var(--good); border-color: rgba(82, 245, 168, 0.4); }
+    .chip.rejected { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.4); }
+    .chip.mode { color: var(--accent-2); }
+    .lifecycle, .marker {
+      align-self: center;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--faint);
+      padding: 0.2rem 0.9rem;
+    }
+    .marker { color: var(--accent-2); }
+    .marker::before, .marker::after { content: " — "; color: var(--faint); }
+
+    /* Cost summary */
+    #cost-card { margin-top: 1.6rem; padding: 1rem 1.2rem; }
+    #cost-card .lbl {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-bottom: 0.6rem;
+    }
+    #cost-card table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    #cost-card td { padding: 0.3rem 0; color: var(--muted); }
+    #cost-card td.num { color: var(--text); }
+    #cost-card tr.total td { border-top: 1px solid var(--line-strong); padding-top: 0.5rem; color: var(--accent-2); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <p class="eyebrow">nano-claw <span class="sep">/</span> ops <span class="sep">/</span> call review</p>
+      <h1>Call Review</h1>
+      <p class="sub">Every phone call this node served: retrace the conversation turn by turn,
+        see what the scheduler decided, and listen back to both sides of the line.</p>
+      <div id="state" class="state"></div>
+    </header>
+
+    <section id="token-gate" class="glass" style="display:none">
+      <label for="token-input">Phone ops token</label>
+      <div class="row">
+        <input id="token-input" type="password" autocomplete="off" placeholder="NANO_CLAW_PHONE_TOKEN">
+        <button class="primary" id="token-save">Unlock</button>
+      </div>
+    </section>
+
+    <section id="list-view" style="display:none">
+      <div class="list-meta">
+        <span class="mono" id="call-count"></span>
+        <span class="node mono" id="node-name"></span>
+      </div>
+      <div class="glass">
+        <table class="calls">
+          <thead>
+            <tr>
+              <th>Answered</th><th>Caller</th><th>Called</th>
+              <th class="num">Duration</th><th class="num">Turns</th><th>Node</th>
+            </tr>
+          </thead>
+          <tbody id="call-rows"></tbody>
+        </table>
+        <div id="list-empty" class="empty" style="display:none">No calls recorded yet.</div>
+      </div>
+    </section>
+
+    <section id="detail-view">
+      <div class="detail-head">
+        <button class="ghost" id="back-btn">&larr; All calls</button>
+        <h2 id="detail-title"></h2>
+        <span class="when" id="detail-when"></span>
+        <span class="callid mono" id="detail-callid"></span>
+      </div>
+      <div class="audio-row" id="audio-row"></div>
+      <div id="timeline"></div>
+      <div id="cost-card" class="glass" style="display:none">
+        <div class="lbl">Cost breakdown</div>
+        <table id="cost-table"></table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    "use strict";
+    const TOKEN_KEY = "nc-phone-token";
+    const $ = (id) => document.getElementById(id);
+    const state = $("state");
+    const objectUrls = [];
+
+    function showState(message, isError) {
+      state.textContent = message;
+      state.classList.toggle("error", Boolean(isError));
+      state.classList.add("show");
+    }
+    function clearState() { state.classList.remove("show", "error"); }
+
+    function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
+
+    async function api(path) {
+      const resp = await fetch(path, { headers: { "X-NC-Phone-Token": token() } });
+      if (resp.status === 403) {
+        localStorage.removeItem(TOKEN_KEY);
+        showGate();
+        throw new Error("bad token");
+      }
+      return resp;
+    }
+
+    function showGate() {
+      $("token-gate").style.display = "block";
+      $("list-view").style.display = "none";
+      $("detail-view").style.display = "none";
+      showState("Enter the phone ops token to view calls.", false);
+    }
+
+    function parseDbTime(text) {
+      // phone_calls timestamps are UTC "YYYY-MM-DD HH:MM:SS"
+      return text ? new Date(text.replace(" ", "T") + "Z") : null;
+    }
+    function fmtLocal(date) {
+      return date
+        ? date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        : "—";
+    }
+    function fmtClock(epochSeconds) {
+      return new Date(epochSeconds * 1000).toLocaleTimeString([], {
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      });
+    }
+    function fmtDuration(startText, endText) {
+      const start = parseDbTime(startText);
+      const end = parseDbTime(endText);
+      if (!start || !end) return "—";
+      const seconds = Math.max(0, Math.round((end - start) / 1000));
+      return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    }
+
+    async function loadList() {
+      clearState();
+      const resp = await api("/api/calls");
+      const body = await resp.json();
+      if (body.error) showState(`Node degraded: ${body.error}`, true);
+      $("node-name").textContent = body.node || "";
+      const calls = body.calls || [];
+      $("call-count").textContent = `${calls.length} call${calls.length === 1 ? "" : "s"}`;
+      const rows = $("call-rows");
+      rows.textContent = "";
+      $("list-empty").style.display = calls.length ? "none" : "block";
+      for (const call of calls) {
+        const tr = document.createElement("tr");
+        const cells = [
+          fmtLocal(parseDbTime(call.answered_at)),
+          call.caller || "?",
+          call.called || "?",
+          fmtDuration(call.answered_at, call.ended_at),
+          String(call.turns ?? 0),
+          call.node || "",
+        ];
+        cells.forEach((text, i) => {
+          const td = document.createElement("td");
+          if (i === 3 || i === 4) td.className = "num";
+          td.textContent = text;
+          tr.appendChild(td);
+        });
+        tr.addEventListener("click", () => loadDetail(call.id));
+        rows.appendChild(tr);
+      }
+      $("token-gate").style.display = "none";
+      $("detail-view").style.display = "none";
+      $("list-view").style.display = "block";
+    }
+
+    function addChip(parent, text, cls) {
+      const chip = document.createElement("span");
+      chip.className = `chip ${cls || ""}`;
+      chip.textContent = text;
+      parent.appendChild(chip);
+    }
+
+    function renderEvent(event) {
+      const { kind, payload } = event;
+      if (kind === "call_start" || kind === "call_end") {
+        const div = document.createElement("div");
+        div.className = "lifecycle";
+        div.textContent = kind === "call_start"
+          ? `call started · ${payload.mode || ""} ${payload.flowDomain ? "· " + payload.flowDomain : ""}`
+          : "call ended";
+        return div;
+      }
+      if (kind === "barge_in") {
+        const div = document.createElement("div");
+        div.className = "marker";
+        div.textContent = "caller barged in";
+        return div;
+      }
+      const isCaller = kind === "user_turn";
+      const turn = document.createElement("div");
+      turn.className = `turn ${isCaller ? "caller" : "agent"}`;
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      const clock = document.createElement("span");
+      clock.className = "t";
+      clock.textContent = fmtClock(event.ts);
+      bubble.appendChild(clock);
+      bubble.appendChild(document.createTextNode(payload.text || ""));
+      const chips = document.createElement("div");
+      chips.className = "chips";
+      if (!isCaller && payload.mode && payload.mode !== "persona") {
+        addChip(chips, payload.mode, "mode");
+      }
+      if (payload.outcome) addChip(chips, `outcome: ${payload.outcome}`, "outcome");
+      if (payload.slots && Object.keys(payload.slots).length) {
+        for (const [key, value] of Object.entries(payload.slots)) {
+          addChip(chips, `${key}: ${value}`, "");
+        }
+      }
+      if (Array.isArray(payload.rejected) && payload.rejected.length) {
+        addChip(chips, `rejected: ${payload.rejected.join(", ")}`, "rejected");
+      }
+      if (payload.supervisorMs != null) {
+        addChip(chips, `${Math.round(payload.supervisorMs)} ms`, "");
+      }
+      if (payload.interrupted) addChip(chips, "interrupted", "rejected");
+      if (chips.children.length) bubble.appendChild(chips);
+      turn.appendChild(bubble);
+      return turn;
+    }
+
+    async function attachAudio(callPk, availability) {
+      const row = $("audio-row");
+      row.textContent = "";
+      objectUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+      const legs = [
+        ["inbound", "Caller (line in)"],
+        ["outbound", "Agent (as heard)"],
+      ];
+      for (const [leg, label] of legs) {
+        if (!availability[leg]) continue;
+        const card = document.createElement("div");
+        card.className = "audio-card glass";
+        const lbl = document.createElement("div");
+        lbl.className = "lbl";
+        lbl.textContent = label;
+        card.appendChild(lbl);
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "none";
+        card.appendChild(audio);
+        row.appendChild(card);
+        try {
+          const resp = await api(`/api/calls/${callPk}/audio/${leg}`);
+          if (resp.ok) {
+            const url = URL.createObjectURL(await resp.blob());
+            objectUrls.push(url);
+            audio.src = url;
+          } else {
+            lbl.textContent = `${label} — unavailable`;
+          }
+        } catch (err) {
+          lbl.textContent = `${label} — unavailable`;
+        }
+      }
+    }
+
+    function renderCost(entries) {
+      const card = $("cost-card");
+      const table = $("cost-table");
+      table.textContent = "";
+      if (!entries || !entries.length) { card.style.display = "none"; return; }
+      const byComponent = new Map();
+      let total = 0;
+      for (const entry of entries) {
+        const usd = entry.usd_per_unit_snapshot != null ? entry.units * entry.usd_per_unit_snapshot : 0;
+        total += usd;
+        const key = entry.component;
+        const bucket = byComponent.get(key) || { usd: 0, detail: [] };
+        bucket.usd += usd;
+        bucket.detail.push(`${entry.units} ${entry.unit_kind}`);
+        byComponent.set(key, bucket);
+      }
+      for (const [component, bucket] of byComponent) {
+        const tr = document.createElement("tr");
+        const name = document.createElement("td");
+        name.textContent = `${component} (${bucket.detail.join(", ")})`;
+        const usd = document.createElement("td");
+        usd.className = "num";
+        usd.style.textAlign = "right";
+        usd.textContent = `$${bucket.usd.toFixed(4)}`;
+        tr.append(name, usd);
+        table.appendChild(tr);
+      }
+      const totalRow = document.createElement("tr");
+      totalRow.className = "total";
+      const totalName = document.createElement("td");
+      totalName.textContent = "total";
+      const totalUsd = document.createElement("td");
+      totalUsd.className = "num";
+      totalUsd.style.textAlign = "right";
+      totalUsd.textContent = `$${total.toFixed(4)}`;
+      totalRow.append(totalName, totalUsd);
+      table.appendChild(totalRow);
+      card.style.display = "block";
+    }
+
+    async function loadDetail(callPk) {
+      clearState();
+      const resp = await api(`/api/calls/${callPk}/timeline`);
+      if (resp.status === 404) { showState("Call not found on this node.", true); return; }
+      const body = await resp.json();
+      if (body.error) { showState(`Unavailable: ${body.error}`, true); return; }
+      const call = body.call;
+      $("detail-title").textContent = `${call.caller || "?"} → ${call.called || "?"}`;
+      $("detail-when").textContent =
+        `${fmtLocal(parseDbTime(call.answeredAt))} · ${fmtDuration(call.answeredAt, call.endedAt)} · ${call.turns ?? 0} turns`;
+      $("detail-callid").textContent = call.callId;
+      const timeline = $("timeline");
+      timeline.textContent = "";
+      if (!body.events.length) {
+        const div = document.createElement("div");
+        div.className = "empty";
+        div.textContent = "No timeline recorded for this call (predates event logging, or events were swept).";
+        timeline.appendChild(div);
+      }
+      for (const event of body.events) timeline.appendChild(renderEvent(event));
+      renderCost(body.cost);
+      $("list-view").style.display = "none";
+      $("detail-view").style.display = "block";
+      attachAudio(callPk, body.audio || {});
+    }
+
+    $("token-save").addEventListener("click", () => {
+      const value = $("token-input").value.trim();
+      if (!value) return;
+      localStorage.setItem(TOKEN_KEY, value);
+      $("token-input").value = "";
+      loadList().catch(() => {});
+    });
+    $("token-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $("token-save").click();
+    });
+    $("back-btn").addEventListener("click", () => {
+      loadList().catch(() => {});
+    });
+
+    if (token()) {
+      loadList().catch((err) => {
+        if (err.message !== "bad token") showState(`Failed to load calls: ${err.message}`, true);
+      });
+    } else {
+      showGate();
+    }
+  </script>
+</body>
+</html>

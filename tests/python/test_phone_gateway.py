@@ -631,3 +631,281 @@ def test_phone_config_toggles_speech_mode_live(monkeypatch):
     # Reject nonsense.
     status, _ = _config_roundtrip("post", payload={"speech_mode": "bogus"})
     assert status == 400
+
+
+# ── Call review: event emission, greeting notice, header auth ─────────────────
+
+
+def _event_conn(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    monkeypatch.setattr(phone, "_metrics_conn", conn)
+    call_log._seq.clear()
+    return conn
+
+
+def test_token_ok_accepts_header_token():
+    from aiohttp.test_utils import make_mocked_request
+
+    ok = make_mocked_request(
+        "GET", "/api/calls", headers={"X-NC-Phone-Token": "sekrit"}
+    )
+    bad = make_mocked_request(
+        "GET", "/api/calls", headers={"X-NC-Phone-Token": "wrong"}
+    )
+    assert phone._token_ok(ok) is True
+    assert phone._token_ok(bad) is False
+
+
+def test_compose_greeting_appends_notice_by_default(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_PHONE_RECORD_NOTICE", raising=False)
+    composed = phone._compose_greeting("Hello from Space Channel!")
+    assert composed == (
+        "Hello from Space Channel! " + phone.DEFAULT_RECORD_NOTICE
+    )
+
+
+def test_compose_greeting_off_restores_plain_greeting(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "off")
+    assert phone._compose_greeting("Hello!") == "Hello!"
+
+
+def test_compose_greeting_custom_notice(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Calls are recorded.")
+    assert phone._compose_greeting("Hi.") == "Hi. Calls are recorded."
+
+
+def test_run_turn_emits_user_and_scheduler_assistant_events(
+    tmp_path, monkeypatch
+):
+    from voice import call_log
+    from voice.flow_session import FlowReply
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    class FakeFlow:
+        greeting = "Thanks for calling."
+
+        async def reply(self, text):
+            return FlowReply(
+                text="Monday at nine works.",
+                done=False,
+                outcome=None,
+                slots={"day": "monday"},
+                rejected=["tuesday"],
+                turns_used=2,
+                max_turns=12,
+                supervisor_ms=180.5,
+                event_id=None,
+            )
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-flow-events")
+        try:
+            call.flow = FakeFlow()
+
+            async def no_sync():
+                return None
+
+            async def no_speak(text):
+                return None
+
+            async def fake_transcribe(pcm):
+                return "book me monday"
+
+            call._sync_flow_mode_async = no_sync
+            call.speak = no_speak
+            call._transcribe = fake_transcribe
+            await call._run_turn(b"\x00\x00" * 200)
+        finally:
+            await call.close()
+
+    run(exercise())
+    events = call_log.read_timeline(conn, "cc-flow-events")
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["call_start", "user_turn", "assistant_turn", "call_end"]
+    assert events[0]["payload"]["mode"] == "scheduler" or events[0]["payload"]["mode"] == "persona"
+    assert events[0]["payload"]["sessionId"].startswith("phone-")
+    assert events[1]["payload"] == {"text": "book me monday"}
+    assistant = events[2]["payload"]
+    assert assistant["text"] == "Monday at nine works."
+    assert assistant["mode"] == "scheduler"
+    assert assistant["slots"] == {"day": "monday"}
+    assert assistant["rejected"] == ["tuesday"]
+    assert assistant["supervisorMs"] == 180.5
+    assert assistant["turnsUsed"] == 2
+
+
+def test_interrupt_emits_barge_in_and_close_emits_call_end_once(
+    tmp_path, monkeypatch
+):
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-interrupt")
+        call.speaking = True
+        call._interrupt()
+        call.speaking = False
+        await call.close()
+        await call.close()
+
+    run(exercise())
+    kinds = [e["kind"] for e in call_log.read_timeline(conn, "cc-interrupt")]
+    assert kinds.count("barge_in") == 1
+    assert kinds.count("call_end") == 1
+
+
+def test_persona_stream_emits_assistant_turn(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    sse_lines = [
+        "event: delta",
+        'data: {"text": "Hello there. General Kenobi."}',
+        "",
+        "event: final",
+        'data: {"response": "Hello there. General Kenobi."}',
+        "",
+    ]
+
+    class FakeResp:
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            yield FakeResp()
+
+    async def exercise():
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.call_id = "cc-persona"
+        call.session_id = "phone-ccpersona"
+        call.tap = None
+        call._http = FakeHttp()
+        call.barge = type("B", (), {"reset": lambda self: None})()
+        call.closed = False
+        call.speaking = False
+        call.interrupted = False
+        call._playback_flush_sent = False
+        call.endpointer = type("E", (), {"reset": lambda self: None})()
+
+        async def consume(units):
+            async for _ in units:
+                pass
+
+        call._speak_sentences = consume
+        await call._stream_reply("hello")
+
+    run(exercise())
+    events = call_log.read_timeline(conn, "cc-persona")
+    assert [e["kind"] for e in events] == ["assistant_turn"]
+    payload = events[0]["payload"]
+    assert payload["mode"] == "persona"
+    assert payload["complete"] is True
+    assert payload["interrupted"] is False
+    assert "Hello there." in payload["text"]
+    assert "General Kenobi." in payload["text"]
+
+
+def test_media_start_records_call_row_and_greeting_event(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+    monkeypatch.delenv("NANO_CLAW_PHONE_GREETING", raising=False)
+    monkeypatch.delenv("NANO_CLAW_PHONE_RECORD_NOTICE", raising=False)
+
+    class StubCall:
+        default_greeting = "Hello from Space Channel!"
+
+        async def speak(self, text):
+            return None
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(
+        phone.PhoneCall, "create_async", staticmethod(fake_create)
+    )
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-media-start"}}
+            )
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    calls = metrics_db.recent_calls(conn)
+    assert any(c["call_id"] == "cc-media-start" for c in calls)
+    events = call_log.read_timeline(conn, "cc-media-start")
+    greeting_events = [e for e in events if e["kind"] == "assistant_turn"]
+    assert len(greeting_events) == 1
+    payload = greeting_events[0]["payload"]
+    assert payload["mode"] == "greeting"
+    assert payload["text"] == (
+        "Hello from Space Channel! " + phone.DEFAULT_RECORD_NOTICE
+    )
+
+
+def test_retention_days_default_disable_and_fallback(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_CALL_RETENTION_DAYS", raising=False)
+    assert phone._retention_days() == 30.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "7")
+    assert phone._retention_days() == 7.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "0")
+    assert phone._retention_days() == 0.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "")
+    assert phone._retention_days() == 0.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "bogus")
+    assert phone._retention_days() == 30.0
+
+
+def test_retention_sweep_runs_once_at_startup(tmp_path, monkeypatch):
+    from voice import call_log
+
+    swept = []
+    monkeypatch.setattr(
+        call_log, "sweep", lambda conn, root, days: swept.append((str(root), days))
+    )
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "14")
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP_DIR", str(tmp_path / "taps"))
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+        finally:
+            await client.close()
+
+    run(_run())
+    assert swept == [(str(tmp_path / "taps"), 14.0)]

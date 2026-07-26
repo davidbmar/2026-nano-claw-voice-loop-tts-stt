@@ -22,7 +22,7 @@ BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://localhost:9090").rstrip("/
 # Endpoints the page fetches on load. `auth_ok` marks ones where 401 is a valid
 # "not signed in" answer rather than a failure (/api/me is only reachable with a
 # session cookie and legitimately 401s for an anonymous visitor).
-PAGES = ["/", "/costs"]
+PAGES = ["/", "/costs", "/calls"]
 BOOT_ENDPOINTS = [
     "/api/models",
     "/api/voices",

@@ -52,7 +52,7 @@ import httpx
 import numpy as np
 from aiohttp import web
 
-from voice import metrics_db, silero_vad
+from voice import call_log, metrics_db, silero_vad
 from voice.flow_session import (
     FlowSession,
     active_scheduling_domain,
@@ -70,7 +70,7 @@ from voice.phone_audio import (
     transcript_looks_incomplete,
     ulaw_decode,
 )
-from voice.phone_tap import CallTap
+from voice.phone_tap import DEFAULT_TAP_ROOT, CallTap
 from voice.processing_audio import processing_chime
 from voice.sentence_pipeline import SentencePipeline
 from voice.speech_preparer import (
@@ -92,6 +92,7 @@ DEFAULT_GREETING = (
 )
 IDLE_PROMPT_TEXT = "Hi — are you still there?"
 IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling Space Channel — goodbye!"
+DEFAULT_RECORD_NOTICE = "This call may be recorded for quality and training."
 MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
 FRAME_S = FRAME_MS / 1000.0
 DEFAULT_PHONE_PREBUFFER_MS = 200.0
@@ -187,6 +188,20 @@ def _cfg(name: str, default: str = "") -> str:
     if name in _overrides:
         return _overrides[name].strip()
     return os.environ.get(name, default).strip()
+
+
+def _compose_greeting(base: str) -> str:
+    """Append the recording disclosure to the greeting.
+
+    Calls are recorded for the review panel, so the caller must hear a
+    disclosure up front. ``NANO_CLAW_PHONE_RECORD_NOTICE`` overrides the
+    spoken line; ``off``/``0`` restores the plain greeting (for deployments
+    whose owner has not approved the line — recording stays on regardless).
+    """
+    notice = _cfg("NANO_CLAW_PHONE_RECORD_NOTICE", DEFAULT_RECORD_NOTICE)
+    if notice.lower() in ("off", "0", ""):
+        return base
+    return f"{base} {notice}"
 
 
 _config_fallback_warned: set[str] = set()
@@ -426,6 +441,20 @@ class PhoneCall:
         self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
+        self._call_end_emitted = False
+        call_log.emit(
+            _metrics_conn,
+            call_id,
+            "call_start",
+            {
+                "codec": codec,
+                "vad": self.vad_mode,
+                "voice": _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+                "mode": "scheduler" if self.flow else "persona",
+                "flowDomain": flow_domain_id,
+                "sessionId": self.session_id,
+            },
+        )
         # Idle policy: clock runs from the last time the caller spoke or the
         # agent finished speaking; one "are you still there?" per stretch.
         self.last_activity = time.monotonic()
@@ -474,6 +503,9 @@ class PhoneCall:
             if tap:
                 tap.event("call_end")
                 tap.close()
+            if not self._call_end_emitted:
+                self._call_end_emitted = True
+                call_log.emit(_metrics_conn, self.call_id, "call_end")
 
     def _sync_flow_mode(self) -> None:
         """Re-evaluate the Flow dropdown at each turn boundary so a change in
@@ -574,9 +606,21 @@ class PhoneCall:
             if action == "prompt":
                 log.info("[phone %s] idle %.0fs — prompting caller", self.call_id[:8], prompt_after)
                 self.idle_prompted = True
+                call_log.emit(
+                    _metrics_conn,
+                    self.call_id,
+                    "assistant_turn",
+                    {"text": IDLE_PROMPT_TEXT, "mode": "idle"},
+                )
                 await self.speak(IDLE_PROMPT_TEXT)
             elif action == "hangup":
                 log.info("[phone %s] idle after prompt — hanging up", self.call_id[:8])
+                call_log.emit(
+                    _metrics_conn,
+                    self.call_id,
+                    "assistant_turn",
+                    {"text": IDLE_GOODBYE_TEXT, "mode": "idle"},
+                )
                 await self.speak(IDLE_GOODBYE_TEXT)
                 await _telnyx_cmd(self._http, self.call_id, "hangup", {})
                 self.closed = True
@@ -702,6 +746,7 @@ class PhoneCall:
             self.tap.event(
                 "barge_in", sentence_index=self._active_tap_sentence_index
             )
+        call_log.emit(_metrics_conn, self.call_id, "barge_in")
         self._mark_activity()
         self.interrupted = True
         self.speaking = False  # speak() loop sees this and aborts
@@ -772,6 +817,7 @@ class PhoneCall:
             self._tail_extensions = 0
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
+            call_log.emit(_metrics_conn, self.call_id, "user_turn", {"text": text})
             await self._sync_flow_mode_async()
             if self.flow:
                 agent_started = time.monotonic() if self.tap else None
@@ -786,6 +832,24 @@ class PhoneCall:
                     reply.outcome or "continue",
                     reply.slots,
                 )
+                outcome = getattr(reply, "outcome", None)
+                call_log.emit(
+                    _metrics_conn,
+                    self.call_id,
+                    "assistant_turn",
+                    {
+                        "text": reply.text,
+                        "mode": "scheduler",
+                        "outcome": getattr(outcome, "value", outcome),
+                        "slots": getattr(reply, "slots", {}),
+                        "rejected": getattr(reply, "rejected", []),
+                        "supervisorMs": getattr(reply, "supervisor_ms", None),
+                        "turnsUsed": getattr(reply, "turns_used", None),
+                        "maxTurns": getattr(reply, "max_turns", None),
+                        "eventId": getattr(reply, "event_id", None),
+                        "done": reply.done,
+                    },
+                )
                 await self.speak(reply.text)
                 if reply.done:
                     await _telnyx_cmd(self._http, self.call_id, "hangup", {})
@@ -796,7 +860,14 @@ class PhoneCall:
             raise
         except Exception:
             log.exception("[phone %s] turn failed", self.call_id[:8])
-            await self.speak("Sorry, something went wrong on my end. Try asking again.")
+            error_line = "Sorry, something went wrong on my end. Try asking again."
+            call_log.emit(
+                _metrics_conn,
+                self.call_id,
+                "assistant_turn",
+                {"text": error_line, "mode": "error"},
+            )
+            await self.speak(error_line)
 
     async def _stream_reply(self, text: str) -> None:
         """Stream the agent's reply (SSE) and speak each sentence as it
@@ -821,6 +892,19 @@ class PhoneCall:
         chunker = TextChunker()
         first_spoken_at: float | None = None
         reply_complete = False
+        spoken_parts: list[str] = []
+
+        async def record_spoken(source):
+            # Accumulate exactly what is handed to synthesis so the call
+            # review timeline shows what the caller actually heard —
+            # including barge-in truncation.
+            async for unit in source:
+                if unit is not PROCESSING_CUE_SENTINEL:
+                    unit_text = unit if isinstance(unit, str) else getattr(unit, "text", "")
+                    if unit_text and unit_text.strip():
+                        spoken_parts.append(unit_text.strip())
+                yield unit
+
         try:
             payload: dict = {
                 "message": text,
@@ -845,6 +929,8 @@ class PhoneCall:
                     body = json.loads(await resp.aread())
                     reply = body.get("response", "") or "I didn't catch that — could you say it again?"
                     record_agent_done()
+                    reply_complete = True
+                    spoken_parts.append(reply)
                     log.info("[phone %s] agent non-stream (%.1fs)", self.call_id[:8], time.monotonic() - t0)
                     await self._speak_sentences(self._speech_units(reply))
                     return
@@ -932,7 +1018,7 @@ class PhoneCall:
                         elif raw.startswith("data:"):
                             data_lines.append(raw[5:].strip())
 
-                await self._speak_sentences(stream_sentences())
+                await self._speak_sentences(record_spoken(stream_sentences()))
                 if reply_complete:
                     log.info(
                         "[phone %s] reply complete (%.1fs total)",
@@ -943,6 +1029,18 @@ class PhoneCall:
                 record_agent_done()
         finally:
             self.speaking = False
+            if spoken_parts:
+                call_log.emit(
+                    _metrics_conn,
+                    self.call_id,
+                    "assistant_turn",
+                    {
+                        "text": " ".join(spoken_parts),
+                        "mode": "persona",
+                        "complete": reply_complete,
+                        "interrupted": self.interrupted,
+                    },
+                )
             if not self.interrupted:
                 self.endpointer.reset()
             self.last_activity = time.monotonic()
@@ -1224,7 +1322,12 @@ def _node() -> str:
 
 def _token_ok(request: web.Request) -> bool:
     expected = _cfg("NANO_CLAW_PHONE_TOKEN")
-    return bool(expected) and request.query.get("token") == expected
+    if not expected:
+        return False
+    # Telnyx webhook/media URLs carry ?token=; the call review panel sends a
+    # header instead so the token never lands in URLs or access logs.
+    supplied = request.headers.get("X-NC-Phone-Token") or request.query.get("token")
+    return supplied == expected
 
 
 async def incoming_handler(request: web.Request) -> web.Response:
@@ -1301,7 +1404,19 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 cid = meta.get("call_control_id") or msg.get("stream_id") or "unknown"
                 call = await PhoneCall.create_async(ws, cid)
                 log.info("[phone %s] media stream started", cid[:8])
-                greeting = _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
+                # Calls that never hit the webhook (loopback tests, direct
+                # media connections) still get a reviewable phone_calls row;
+                # INSERT OR IGNORE keeps the webhook row when both fire.
+                metrics_db.record_call_start(_metrics_conn, cid, "?", "?", _node())
+                greeting = _compose_greeting(
+                    _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
+                )
+                call_log.emit(
+                    _metrics_conn,
+                    cid,
+                    "assistant_turn",
+                    {"text": greeting, "mode": "greeting"},
+                )
                 asyncio.create_task(call.speak(greeting))
             elif event == "media" and call:
                 call.feed_media((msg.get("media") or {}).get("payload", ""))
@@ -1426,6 +1541,39 @@ async def config_set_handler(request: web.Request) -> web.Response:
     return await config_get_handler(request)
 
 
+def _retention_days() -> float:
+    """Call-content retention window in days; 0/empty disables the sweep."""
+    raw = _cfg("NANO_CLAW_CALL_RETENTION_DAYS", "30")
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        _warn_config_fallback("NANO_CLAW_CALL_RETENTION_DAYS", raw, 30)
+        return 30.0
+
+
+async def _retention_sweep_loop() -> None:
+    try:
+        while True:
+            days = _retention_days()
+            if days > 0:
+                tap_root = os.environ.get("NANO_CLAW_PHONE_TAP_DIR", DEFAULT_TAP_ROOT)
+                call_log.sweep(_metrics_conn, tap_root, days)
+            await asyncio.sleep(24 * 3600)
+    except asyncio.CancelledError:
+        return  # health-ok: sweep loop cancellation is orderly shutdown
+
+
+async def _retention_sweep_context(app: web.Application):
+    task = asyncio.create_task(_retention_sweep_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def register_phone_routes(app: web.Application) -> None:
     """Attach gateway routes when NANO_CLAW_PHONE=1 (no-op otherwise)."""
     global _metrics_conn
@@ -1440,12 +1588,19 @@ def register_phone_routes(app: web.Application) -> None:
         log.error("[phone] NANO_CLAW_PHONE=1 but missing env: %s — gateway NOT registered", missing)
         return
     _metrics_conn = metrics_db.init_db()
+    call_log.ensure_schema(_metrics_conn)
+    # Imported here, not at module top: call_review imports this module for
+    # the token check and metrics connection.
+    from voice import call_review
+
     app.router.add_post("/api/phone/incoming", incoming_handler)
     app.router.add_get("/ws/phone-media", media_ws_handler)
     app.router.add_get("/api/calls", calls_handler)
+    call_review.register_call_review_routes(app)
     app.router.add_get("/api/phone/vad", vad_get_handler)
     app.router.add_post("/api/phone/vad", vad_set_handler)
     app.router.add_get("/api/phone/config", config_get_handler)
     app.router.add_post("/api/phone/config", config_set_handler)
+    app.cleanup_ctx.append(_retention_sweep_context)
     log.info("[phone] Telnyx gateway registered (webhook base: %s, VAD: %s)",
              _cfg("NANO_CLAW_PHONE_WEBHOOK_BASE"), get_vad_mode())
