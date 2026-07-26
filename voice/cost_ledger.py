@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
   component TEXT,
   units REAL,
   unit_kind TEXT,
-  usd_per_unit_snapshot REAL
+  usd_per_unit_snapshot REAL,
+  model TEXT DEFAULT ''
 );
 """
 
@@ -67,15 +68,23 @@ class LedgerEntry:
     units: float
     unit_kind: str
     usd_per_unit_snapshot: float | None
+    model: str = ""
 
 
 def ensure_schema(conn) -> bool:
-    """Create ``cost_ledger`` on *conn*; return success and never raise."""
+    """Create ``cost_ledger`` on *conn*; return success and never raise.
+
+    Pre-model deployments carry an 8-column table; migrate it in place so
+    old rows read back with ``model == ''``.
+    """
 
     if conn is None:
         return False
     try:
         conn.executescript(_SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(cost_ledger)")}
+        if "model" not in columns:
+            conn.execute("ALTER TABLE cost_ledger ADD COLUMN model TEXT DEFAULT ''")
         conn.commit()
         return True
     except Exception:
@@ -113,11 +122,13 @@ def write_call(
                 units = raw.units
                 unit_kind = raw.unit_kind
                 rate = raw.usd_per_unit_snapshot
+                model = raw.model
             else:
                 component = raw.get("component")
                 units = raw.get("units")
                 unit_kind = raw.get("unit_kind")
                 rate = raw.get("usd_per_unit_snapshot")
+                model = raw.get("model")
             if (
                 not isinstance(component, str)
                 or not component
@@ -138,6 +149,7 @@ def write_call(
                     float(units),
                     unit_kind,
                     normalized_rate,
+                    str(model or ""),
                 )
             )
 
@@ -152,8 +164,8 @@ def write_call(
             conn.executemany(
                 """INSERT INTO cost_ledger(
                        call_id, ts, business, flow, component, units,
-                       unit_kind, usd_per_unit_snapshot
-                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                       unit_kind, usd_per_unit_snapshot, model
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 rows,
             )
         return True
@@ -187,6 +199,36 @@ def read_entries(conn, call_id: str | None = None) -> list[dict]:
     except Exception:
         log.exception("cost ledger read failed")
         return []
+
+
+def component_meta(pricing_path: str | Path | None = None) -> dict[str, dict]:
+    """Per-ledger-component display metadata (label/color/math) for panels.
+
+    Keyed by the ledger ``component`` value so callers can join it onto
+    ``read_entries`` rows. Missing or malformed pricing degrades to ``{}``.
+    """
+
+    pricing = load_pricing(pricing_path)
+    if pricing is None:
+        return {}
+    meta: dict[str, dict] = {}
+    try:
+        for config in pricing.get("components", []):
+            ledger_component = str(
+                config.get("ledger_component") or config.get("id") or ""
+            )
+            if not ledger_component:
+                continue
+            meta[ledger_component] = {
+                "id": config.get("id", ledger_component),
+                "label": config.get("label", config.get("id", ledger_component)),
+                "color": config.get("color", "#969e9b"),
+                "math": config.get("math", ""),
+            }
+    except Exception:
+        log.exception("component metadata assembly failed")
+        return {}
+    return meta
 
 
 def load_pricing(path: str | Path | None = None) -> dict | None:
@@ -734,6 +776,7 @@ def finish_call(conn, call_id: str, *, duration_minutes: float | None = None) ->
             usd_per_unit_snapshot=_unit_rate(
                 pricing, component, unit_kind, model=model
             ),
+            model=model,
         )
         for (component, unit_kind, model), units in tracked.units.items()
         if units > 0
@@ -761,6 +804,27 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
         return
 
     base = phone_module.PhoneCall
+
+    def _phone_cfg(name: str, default: str = "") -> str:
+        cfg = getattr(phone_module, "_cfg", None)
+        if callable(cfg):
+            try:
+                return str(cfg(name, default))
+            except Exception:
+                return default
+        return os.environ.get(name, default)
+
+    def _tts_model() -> str:
+        # Records the catalog engine for the configured voice; an in-process
+        # piper degradation inside voice.tts is not distinguishable here.
+        voice_id = _phone_cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+        try:
+            from voice import voice_catalog  # deferred: keeps this module portable
+
+            engine = (voice_catalog.lookup(voice_id) or {}).get("engine", "unknown")
+        except Exception:
+            engine = "unknown"
+        return f"{engine}/{voice_id}"
 
     class CostTrackedPhoneCall(base):
         def __init__(self, ws, call_id: str, **kwargs) -> None:
@@ -800,6 +864,7 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
                     STT,
                     len(pcm) / (2.0 * rate),
                     "audio_seconds",
+                    model=f"whisper/{_phone_cfg('NANO_CLAW_PHONE_STT_SIZE', 'base')}",
                 )
             return await super()._transcribe(pcm)
 
@@ -811,7 +876,13 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
                 # In prepared-speech mode the unit is a SpeechChunk, not a str;
                 # bill on its rendered text length rather than crashing on len().
                 billable_text = getattr(sentence, "text", sentence)
-                add_units(self.call_id, TTS, len(billable_text), "characters")
+                add_units(
+                    self.call_id,
+                    TTS,
+                    len(billable_text),
+                    "characters",
+                    model=_tts_model(),
+                )
             return speech
 
         async def _run_turn(self, pcm: bytes) -> None:

@@ -4,7 +4,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from voice import call_log, metrics_db, phone
+from voice import call_log, cost_ledger, metrics_db, phone
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +107,38 @@ def test_timeline_returns_call_events_cost_and_audio_flags(phone_env, tap_root):
                 "tts": False,
             }
             assert body["cost"] == []
+            assert body["costMeta"]["tts"]["label"] == "TTS (Kokoro/Lux, local)"
+            assert body["costMeta"]["stt"]["label"].startswith("STT")
+        finally:
+            await client.close()
+
+    run(_run())
+
+
+def test_timeline_cost_rows_carry_model(phone_env, tap_root):
+    pk = _seed_call(phone_env)
+    assert cost_ledger.write_call(
+        phone_env,
+        "v3:abc:def",
+        "Acme",
+        "conversation",
+        [
+            cost_ledger.LedgerEntry(
+                "tts", 42, "characters", 1e-6, model="luxtts/lux_george"
+            )
+        ],
+    )
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            resp = await client.get(
+                f"/api/calls/{pk}/timeline",
+                headers={"X-NC-Phone-Token": "sekrit"},
+            )
+            body = await resp.json()
+            assert body["cost"][0]["model"] == "luxtts/lux_george"
         finally:
             await client.close()
 

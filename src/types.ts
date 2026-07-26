@@ -166,6 +166,9 @@ export interface LLMResponse {
   content: string;
   toolCalls?: ToolCall[];
   finishReason?: string;
+  /** Model that actually served this response (differs from the requested
+   * model when the fallback chain answered). */
+  model?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -225,6 +228,8 @@ export type StreamEvent =
       type: 'done';
       finishReason?: string;
       usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+      /** Model that actually streamed this reply (fallback-aware). */
+      model?: string;
     };
 
 /**

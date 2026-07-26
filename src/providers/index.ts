@@ -204,19 +204,20 @@ export class ProviderManager {
     return completeWithFallback(
       chain.map((m) => ({
         label: m,
-        run: () => {
+        run: async () => {
           const providerName = this.detectProvider(m);
           logger.info(
             { provider: providerName, model: m, messageCount: messages.length },
             'Completing chat'
           );
-          return this.getProviderInstance(providerName).complete(
+          const response = await this.getProviderInstance(providerName).complete(
             messages,
             m,
             temperature,
             maxTokens,
             tools
           );
+          return { ...response, model: m };
         },
       })),
       this.fallbackTimeoutMs()
@@ -246,16 +247,30 @@ export class ProviderManager {
             { provider: providerName, model: m, messageCount: messages.length },
             'Completing chat (stream)'
           );
-          return this.getProviderInstance(providerName).completeStream(
-            messages,
-            m,
-            temperature,
-            maxTokens,
-            tools
+          return tagDoneWithModel(
+            this.getProviderInstance(providerName).completeStream(
+              messages,
+              m,
+              temperature,
+              maxTokens,
+              tools
+            ),
+            m
           );
         },
       })),
       this.fallbackTimeoutMs()
     );
+  }
+}
+
+/** Stamp `done` events with the model that streamed them so consumers can
+ * attribute the turn even after a fallback switch. Pass-through otherwise. */
+async function* tagDoneWithModel(
+  gen: AsyncGenerator<StreamEvent>,
+  model: string
+): AsyncGenerator<StreamEvent> {
+  for await (const event of gen) {
+    yield event.type === 'done' ? { ...event, model } : event;
   }
 }

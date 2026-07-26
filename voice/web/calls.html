@@ -187,6 +187,8 @@
     .chip.outcome { color: var(--good); border-color: rgba(82, 245, 168, 0.4); }
     .chip.rejected { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.4); }
     .chip.mode { color: var(--accent-2); }
+    .chip.model { color: var(--faint); }
+    .chip.fallback { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.4); }
     .source-badge {
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: 0.64rem;
@@ -243,9 +245,35 @@
     }
     .marker { color: var(--accent-2); }
     .marker::before, .marker::after { content: " — "; color: var(--faint); }
+    .providers {
+      align-self: center;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.66rem;
+      color: var(--faint);
+      padding: 0 0.9rem 0.4rem;
+    }
 
     /* Cost summary */
     #cost-card { margin-top: 1.6rem; padding: 1rem 1.2rem; }
+    #cost-card .swatch {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+    #cost-card tr.sub td:first-child {
+      padding-left: 1.4rem;
+      font-size: 0.78rem;
+      color: var(--faint);
+    }
+    #cost-card .unpriced { color: var(--faint); font-style: italic; }
+    #cost-card .cost-note {
+      margin-top: 0.6rem;
+      font-size: 0.72rem;
+      color: var(--faint);
+    }
     #cost-card .lbl {
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: 0.68rem;
@@ -440,6 +468,28 @@
         div.textContent = kind === "call_start"
           ? `call started · ${payload.mode || ""} ${payload.flowDomain ? "· " + payload.flowDomain : ""}`
           : "call ended";
+        if (kind === "call_start") {
+          // Old calls predate the self-describing payload; render only what
+          // exists so their timelines stay unchanged.
+          const parts = [];
+          if (payload.voice) {
+            parts.push(`TTS ${payload.engine ? payload.engine + "/" : ""}${payload.voice}`);
+          }
+          if (payload.sttSize) parts.push(`STT whisper/${payload.sttSize}`);
+          if (payload.vad) parts.push(`VAD ${payload.vad}`);
+          if (payload.codec) parts.push(`codec ${payload.codec}`);
+          if (payload.speed && payload.speed !== "1.0") parts.push(`speed ${payload.speed}`);
+          if ("model" in payload) parts.push(`model ${payload.model || "server default"}`);
+          if (parts.length) {
+            const frag = document.createDocumentFragment();
+            frag.appendChild(div);
+            const providers = document.createElement("div");
+            providers.className = "providers";
+            providers.textContent = parts.join(" · ");
+            frag.appendChild(providers);
+            return frag;
+          }
+        }
         return div;
       }
       if (kind === "barge_in") {
@@ -476,6 +526,14 @@
         addChip(chips, `${Math.round(payload.supervisorMs)} ms`, "");
       }
       if (payload.interrupted) addChip(chips, "interrupted", "rejected");
+      if (!isCaller && payload.model) {
+        const short = String(payload.model).split("/").pop();
+        addChip(
+          chips,
+          payload.modelFallback ? `${short} (fallback)` : short,
+          payload.modelFallback ? "fallback" : "model"
+        );
+      }
       if (chips.children.length) bubble.appendChild(chips);
       turn.appendChild(bubble);
       return turn;
@@ -517,43 +575,123 @@
       }
     }
 
-    function renderCost(entries) {
+    function fmtTokens(n) {
+      return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n)}`;
+    }
+
+    function fmtUnits(unitKind, units) {
+      const n = Number(units) || 0;
+      switch (unitKind) {
+        case "audio_seconds": return `${n.toFixed(1)}s audio`;
+        case "characters": return `${Math.round(n).toLocaleString()} chars`;
+        case "minutes":
+        case "call_minutes": return `${n.toFixed(1)} min`;
+        case "input_tokens": return `${fmtTokens(n)} in`;
+        case "output_tokens": return `${fmtTokens(n)} out`;
+        case "cache_read_tokens": return `${fmtTokens(n)} cache-read`;
+        case "cache_write_tokens": return `${fmtTokens(n)} cache-write`;
+        default: return `${n} ${unitKind}`;
+      }
+    }
+
+    function fmtUsd(usd) {
+      return usd > 0 && usd < 0.0001 ? "<$0.0001" : `$${usd.toFixed(4)}`;
+    }
+
+    function costUsdCell(usd) {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.style.textAlign = "right";
+      td.textContent = fmtUsd(usd);
+      return td;
+    }
+
+    function renderCost(entries, costMeta) {
       const card = $("cost-card");
       const table = $("cost-table");
+      const meta = costMeta || {};
       table.textContent = "";
+      card.querySelectorAll(".cost-note").forEach((el) => el.remove());
       if (!entries || !entries.length) { card.style.display = "none"; return; }
+
+      // component → model → { usd, detail[], unpriced } so a call that mixed
+      // models (fallback turn, mid-call voice switch) shows each source.
       const byComponent = new Map();
       let total = 0;
       for (const entry of entries) {
-        const usd = entry.usd_per_unit_snapshot != null ? entry.units * entry.usd_per_unit_snapshot : 0;
+        const priced = entry.usd_per_unit_snapshot != null;
+        const usd = priced ? entry.units * entry.usd_per_unit_snapshot : 0;
         total += usd;
-        const key = entry.component;
-        const bucket = byComponent.get(key) || { usd: 0, detail: [] };
+        const component = byComponent.get(entry.component)
+          || { usd: 0, models: new Map() };
+        component.usd += usd;
+        const modelKey = entry.model || "";
+        const bucket = component.models.get(modelKey)
+          || { usd: 0, detail: [], unpriced: false };
         bucket.usd += usd;
-        bucket.detail.push(`${entry.units} ${entry.unit_kind}`);
-        byComponent.set(key, bucket);
+        bucket.detail.push(fmtUnits(entry.unit_kind, entry.units));
+        if (!priced) bucket.unpriced = true;
+        component.models.set(modelKey, bucket);
+        byComponent.set(entry.component, component);
       }
-      for (const [component, bucket] of byComponent) {
+
+      for (const [component, group] of byComponent) {
+        const info = meta[component] || {};
         const tr = document.createElement("tr");
         const name = document.createElement("td");
-        name.textContent = `${component} (${bucket.detail.join(", ")})`;
-        const usd = document.createElement("td");
-        usd.className = "num";
-        usd.style.textAlign = "right";
-        usd.textContent = `$${bucket.usd.toFixed(4)}`;
-        tr.append(name, usd);
+        if (info.color) {
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = info.color;
+          name.appendChild(swatch);
+        }
+        name.appendChild(document.createTextNode(info.label || component));
+        const single = group.models.size === 1;
+        if (single) {
+          const [modelKey, bucket] = group.models.entries().next().value;
+          const detail = ` — ${modelKey ? modelKey + " · " : ""}${bucket.detail.join(" · ")}`;
+          name.appendChild(document.createTextNode(detail));
+          if (bucket.unpriced) {
+            const mark = document.createElement("span");
+            mark.className = "unpriced";
+            mark.textContent = " · unpriced";
+            name.appendChild(mark);
+          }
+        }
+        tr.append(name, costUsdCell(group.usd));
         table.appendChild(tr);
+        if (!single) {
+          for (const [modelKey, bucket] of group.models) {
+            const sub = document.createElement("tr");
+            sub.className = "sub";
+            const subName = document.createElement("td");
+            subName.textContent =
+              `${modelKey || "unattributed"} · ${bucket.detail.join(" · ")}`;
+            if (bucket.unpriced) {
+              const mark = document.createElement("span");
+              mark.className = "unpriced";
+              mark.textContent = " · unpriced";
+              subName.appendChild(mark);
+            }
+            sub.append(subName, costUsdCell(bucket.usd));
+            table.appendChild(sub);
+          }
+        }
       }
+
       const totalRow = document.createElement("tr");
       totalRow.className = "total";
       const totalName = document.createElement("td");
       totalName.textContent = "total";
-      const totalUsd = document.createElement("td");
-      totalUsd.className = "num";
-      totalUsd.style.textAlign = "right";
-      totalUsd.textContent = `$${total.toFixed(4)}`;
-      totalRow.append(totalName, totalUsd);
+      totalRow.append(totalName, costUsdCell(total));
       table.appendChild(totalRow);
+      if (byComponent.has("telephony") && byComponent.has("infra")) {
+        const note = document.createElement("div");
+        note.className = "cost-note";
+        note.textContent =
+          "telephony and infra both bill the same connected minutes (carrier vs host amortization) — not double billing.";
+        card.appendChild(note);
+      }
       card.style.display = "block";
     }
 
@@ -616,7 +754,7 @@
       }
       for (const event of body.events) timeline.appendChild(renderEvent(event));
       renderLogs(body.timings);
-      renderCost(body.cost);
+      renderCost(body.cost, body.costMeta);
       $("list-view").style.display = "none";
       $("detail-view").style.display = "block";
       attachAudio(callPk, body.audio || {});

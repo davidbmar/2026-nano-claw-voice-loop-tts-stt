@@ -21,7 +21,11 @@ remains the merged cross-node view.
 - `GET /api/calls` — recent call metadata (existing endpoint, snake_case).
 - `GET /api/calls/{id}/timeline` — full retrace for one call, where `{id}`
   is the integer `id` from `/api/calls`. camelCase payload:
-  `{call, events: [{ts, iso, seq, kind, payload}], cost, audio}`.
+  `{call, events: [{ts, iso, seq, kind, payload}], cost, costMeta, audio}`.
+  `cost` rows carry a `model` column (`whisper/<size>`, `<engine>/<voice>`,
+  or the LLM wire model; `""` on rows written before the column existed) and
+  `costMeta` maps each ledger component to its pricing label/color/math for
+  display.
 - `GET /api/calls/{id}/audio/{leg}` — recorded WAV; `leg` is `inbound`
   (caller), `outbound` (what the caller heard), or `tts` (48 kHz TTS
   source before phone-rate resampling).
@@ -47,13 +51,19 @@ pointed at this node, driven by `NANO_CLAW_PHONE_DISPLAY_NUMBER` via
 `/api/phone/config` (`voice/web/phone-banner.js`). Keep it in sync with
 the live Telnyx routing (`/phone-routing`); unset hides the banner.
 
+Console-set phone settings (voice, model, speed, STT size, speech mode,
+VAD) persist to `NANO_CLAW_PHONE_SETTINGS_PATH` (default
+`/app/data/phone-settings.json` on the data volume) and reload at boot,
+so they survive container restarts; `.env` remains the factory default
+underneath.
+
 ## Event vocabulary (`call_events` table, `voice/call_log.py`)
 
 | kind | payload |
 |---|---|
-| `call_start` | codec, vad, voice, mode (`persona`/`scheduler`), flowDomain, sessionId |
+| `call_start` | codec, vad, voice, engine (TTS catalog engine), sttSize, speed, model (null → server default chain), mode (`persona`/`scheduler`), flowDomain, sessionId |
 | `user_turn` | text (verbatim caller ASR) |
-| `assistant_turn` | text, mode (`persona`/`scheduler`/`greeting`/`idle`/`error`); persona adds complete + interrupted; scheduler adds outcome, slots, rejected, supervisorMs, turnsUsed, maxTurns, eventId, done |
+| `assistant_turn` | text, mode (`persona`/`scheduler`/`greeting`/`idle`/`error`); persona adds complete + interrupted + model/modelRequested/modelFallback (the model that actually wrote the turn — differs from the request when the LLM fallback chain answered); scheduler adds outcome, slots, rejected, supervisorMs, turnsUsed, maxTurns, eventId, done, model |
 | `barge_in` | — |
 | `call_end` | — |
 

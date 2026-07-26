@@ -65,7 +65,10 @@ import type { AnalysisNavigationDecision } from '../agent/analysis-navigation';
 interface DebugInfo {
   iteration: number;
   messageCount: number;
+  /** Model that actually served the turn (fallback-aware). */
   model: string;
+  /** Present only when a fallback answered: the model originally asked for. */
+  requestedModel?: string;
   tokenUsage?: {
     prompt: number;
     completion: number;
@@ -577,7 +580,9 @@ async function stepLoop(
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: turnConfig.model,
+      model: response.model ?? turnConfig.model,
+      ...(response.model &&
+        response.model !== turnConfig.model && { requestedModel: turnConfig.model }),
       tokenUsage: response.usage
         ? {
             prompt: response.usage.promptTokens,
@@ -902,6 +907,7 @@ export async function* stepLoopStream(
     let toolCalls: ToolCall[] | undefined;
     let finishReason: string | undefined;
     let usage: LLMResponse['usage'];
+    let servedModel: string | undefined;
     let firstTokenAt: number | undefined;
     const holdResponse =
       analysisVoiceWordLimit(deepResult) !== undefined ||
@@ -925,6 +931,7 @@ export async function* stepLoopStream(
       } else if (ev.type === 'done') {
         finishReason = ev.finishReason;
         usage = ev.usage;
+        servedModel = ev.model;
       }
     }
     const voiceGuard = guardAnalysisVoiceResponse(text, deepResult);
@@ -941,7 +948,9 @@ export async function* stepLoopStream(
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: turnConfig.model,
+      model: servedModel ?? turnConfig.model,
+      ...(servedModel &&
+        servedModel !== turnConfig.model && { requestedModel: turnConfig.model }),
       tokenUsage: usage
         ? {
             prompt: usage.promptTokens,

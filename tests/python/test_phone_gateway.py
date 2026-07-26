@@ -817,6 +817,100 @@ def test_persona_stream_emits_assistant_turn(tmp_path, monkeypatch):
     assert payload["interrupted"] is False
     assert "Hello there." in payload["text"]
     assert "General Kenobi." in payload["text"]
+    assert payload["model"] is None  # stream carried no debug info
+    assert payload["modelFallback"] is False
+
+
+def _persona_stream_call(sse_lines):
+    from contextlib import asynccontextmanager
+
+    class FakeResp:
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            yield FakeResp()
+
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "cc-served"
+    call.session_id = "phone-ccserved"
+    call.tap = None
+    call._http = FakeHttp()
+    call.barge = type("B", (), {"reset": lambda self: None})()
+    call.closed = False
+    call.speaking = False
+    call.interrupted = False
+    call._playback_flush_sent = False
+    call.endpointer = type("E", (), {"reset": lambda self: None})()
+
+    async def consume(units):
+        async for _ in units:
+            pass
+
+    call._speak_sentences = consume
+    return call
+
+
+def test_persona_stream_records_served_model_on_fallback(tmp_path, monkeypatch):
+    # The agent server reports the model that actually wrote the turn in
+    # debug.model (requestedModel present only when a fallback answered);
+    # the call timeline must record it so the panel can attribute turns.
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    debug = (
+        '{"model": "gemini/gemini-flash-lite-latest",'
+        ' "requestedModel": "ollama/gemma4:e2b"}'
+    )
+    sse_lines = [
+        "event: delta",
+        'data: {"text": "Words by Gemini."}',
+        "",
+        "event: final",
+        'data: {"response": "Words by Gemini.", "debug": ' + debug + "}",
+        "",
+    ]
+
+    async def exercise():
+        await _persona_stream_call(sse_lines)._stream_reply("hello")
+
+    run(exercise())
+    payload = call_log.read_timeline(conn, "cc-served")[0]["payload"]
+    assert payload["model"] == "gemini/gemini-flash-lite-latest"
+    assert payload["modelRequested"] == "ollama/gemma4:e2b"
+    assert payload["modelFallback"] is True
+
+
+def test_call_start_event_is_self_describing(tmp_path, monkeypatch):
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "lux_george")
+    monkeypatch.setenv("NANO_CLAW_PHONE_STT_SIZE", "medium")
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "1.2")
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-selfdesc")
+        await call.close()
+
+    run(exercise())
+    start = next(
+        e
+        for e in call_log.read_timeline(conn, "cc-selfdesc")
+        if e["kind"] == "call_start"
+    )
+    payload = start["payload"]
+    assert payload["voice"] == "lux_george"
+    assert payload["engine"] == "luxtts"
+    assert payload["sttSize"] == "medium"
+    assert payload["speed"] == "1.2"
+    assert payload["model"] is None  # unset → server default chain
 
 
 def test_media_start_records_call_row_and_greeting_event(tmp_path, monkeypatch):

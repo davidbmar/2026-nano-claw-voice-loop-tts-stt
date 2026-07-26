@@ -47,12 +47,13 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import numpy as np
 from aiohttp import web
 
-from voice import call_log, metrics_db, silero_vad
+from voice import call_log, metrics_db, silero_vad, voice_catalog
 from voice.flow_session import (
     FlowSession,
     active_scheduling_domain,
@@ -179,15 +180,100 @@ def idle_action(idle_s: float, prompted: bool, prompt_after_s: float) -> str:
 
 # Runtime overrides set from the web UI (/api/phone/config). Checked before
 # the environment so changes apply live — voice mid-call on the next sentence,
-# model on the next turn. In-memory only: a container restart falls back to
-# the .env values.
+# model on the next turn. Persisted to NANO_CLAW_PHONE_SETTINGS_PATH on the
+# data volume so console choices survive container restarts; .env stays the
+# factory default underneath.
 _overrides: dict[str, str] = {}
+
+# The only keys the settings file may carry — anything else in the file is
+# ignored on load and never written, so the file can't smuggle e.g. a token.
+_SETTINGS_KEYS = (
+    "NANO_CLAW_PHONE_VOICE",
+    "NANO_CLAW_PHONE_MODEL",
+    "NANO_CLAW_PHONE_SPEED",
+    "NANO_CLAW_PHONE_STT_SIZE",
+    "NANO_CLAW_PHONE_SPEECH_PREPARATION",
+    "NANO_CLAW_PHONE_VAD",
+)
 
 
 def _cfg(name: str, default: str = "") -> str:
     if name in _overrides:
         return _overrides[name].strip()
     return os.environ.get(name, default).strip()
+
+
+def _settings_path() -> Path:
+    return Path(
+        os.environ.get(
+            "NANO_CLAW_PHONE_SETTINGS_PATH", "/app/data/phone-settings.json"
+        )
+    )
+
+
+def _valid_setting(name: str, value: str) -> bool:
+    """Shared by the config POST handler and the boot-time settings loader."""
+    if name == "NANO_CLAW_PHONE_VOICE":
+        return voice_catalog.lookup(value) is not None
+    if name == "NANO_CLAW_PHONE_MODEL":
+        return bool(value.strip())
+    if name == "NANO_CLAW_PHONE_SPEED":
+        try:
+            return 0.5 <= float(value) <= 2.0
+        except (TypeError, ValueError):
+            return False
+    if name == "NANO_CLAW_PHONE_STT_SIZE":
+        return value in ("tiny", "base", "small", "medium")
+    if name == "NANO_CLAW_PHONE_SPEECH_PREPARATION":
+        return value in ("1", "raw")
+    if name == "NANO_CLAW_PHONE_VAD":
+        return value in VAD_MODES
+    return False
+
+
+def _persist_overrides() -> None:
+    """Write-through of console overrides; best-effort (dev boxes lack the
+    data volume). A key absent from the file is a deliberate reset to .env."""
+    path = _settings_path()
+    payload = {key: _overrides[key] for key in _SETTINGS_KEYS if key in _overrides}
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("phone settings not persisted (%s unavailable)", path)
+
+
+def _load_persisted_overrides() -> None:
+    """Restore console settings at boot. Unknown keys and invalid values are
+    dropped with a warning; any failure leaves the override map untouched so
+    a corrupt file can never brick call handling."""
+    path = _settings_path()
+    try:
+        if not path.is_file():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        log.warning("phone settings file %s unreadable — ignored", path)
+        return
+    if not isinstance(data, dict):
+        log.warning("phone settings file %s is not a JSON object — ignored", path)
+        return
+    for name, value in data.items():
+        if name not in _SETTINGS_KEYS:
+            log.warning("phone settings: unknown key %s ignored", name)
+            continue
+        value = str(value)
+        if not _valid_setting(name, value):
+            log.warning("phone settings: invalid %s=%r dropped", name, value)
+            continue
+        _overrides[name] = value
+    if _overrides:
+        log.info(
+            "phone settings restored from %s: %s",
+            path,
+            ", ".join(sorted(k for k in _overrides if k in _SETTINGS_KEYS)),
+        )
 
 
 def _compose_greeting(base: str) -> str:
@@ -442,6 +528,7 @@ class PhoneCall:
         self._flow_create_failed = False
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         self._call_end_emitted = False
+        start_voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
         call_log.emit(
             _metrics_conn,
             call_id,
@@ -449,7 +536,13 @@ class PhoneCall:
             {
                 "codec": codec,
                 "vad": self.vad_mode,
-                "voice": _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+                "voice": start_voice,
+                "engine": (voice_catalog.lookup(start_voice) or {}).get(
+                    "engine", "unknown"
+                ),
+                "sttSize": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
+                "speed": _cfg("NANO_CLAW_PHONE_SPEED", "1.0"),
+                "model": _cfg("NANO_CLAW_PHONE_MODEL") or None,
                 "mode": "scheduler" if self.flow else "persona",
                 "flowDomain": flow_domain_id,
                 "sessionId": self.session_id,
@@ -848,6 +941,11 @@ class PhoneCall:
                         "maxTurns": getattr(reply, "max_turns", None),
                         "eventId": getattr(reply, "event_id", None),
                         "done": reply.done,
+                        "model": str(
+                            getattr(getattr(self.flow, "_runner", None), "_model", "")
+                            or ""
+                        )
+                        or None,
                     },
                 )
                 await self.speak(reply.text)
@@ -893,6 +991,17 @@ class PhoneCall:
         first_spoken_at: float | None = None
         reply_complete = False
         spoken_parts: list[str] = []
+        # Which model actually wrote the turn (fallback-aware, from the API's
+        # debug payload); requested is present only when a fallback answered.
+        turn_model: dict[str, str | None] = {"served": None, "requested": None}
+
+        def record_turn_model(obj: dict) -> None:
+            debug = obj.get("debug")
+            if isinstance(debug, dict):
+                turn_model["served"] = debug.get("model") or turn_model["served"]
+                turn_model["requested"] = (
+                    debug.get("requestedModel") or turn_model["requested"]
+                )
 
         async def record_spoken(source):
             # Accumulate exactly what is handed to synthesis so the call
@@ -928,6 +1037,7 @@ class PhoneCall:
                 if "text/event-stream" not in resp.headers.get("content-type", ""):
                     body = json.loads(await resp.aread())
                     reply = body.get("response", "") or "I didn't catch that — could you say it again?"
+                    record_turn_model(body)
                     record_agent_done()
                     reply_complete = True
                     spoken_parts.append(reply)
@@ -989,6 +1099,7 @@ class PhoneCall:
                                     last_processing_cue = now
                                     yield PROCESSING_CUE_SENTINEL
                             elif ev == "final":
+                                record_turn_model(obj)
                                 record_agent_done()
                                 reply_complete = True
                                 if prepared:
@@ -1006,6 +1117,7 @@ class PhoneCall:
                                     if tail:
                                         yield tail
                             elif ev == "tool_pending":
+                                record_turn_model(obj)
                                 yield (
                                     "I can't take actions over the phone, but I'm happy "
                                     "to answer questions."
@@ -1039,6 +1151,9 @@ class PhoneCall:
                         "mode": "persona",
                         "complete": reply_complete,
                         "interrupted": self.interrupted,
+                        "model": turn_model["served"],
+                        "modelRequested": turn_model["requested"],
+                        "modelFallback": bool(turn_model["requested"]),
                     },
                 )
             if not self.interrupted:
@@ -1470,6 +1585,8 @@ async def vad_set_handler(request: web.Request) -> web.Response:
     mode = str(body.get("mode", "")).lower()
     if not set_vad_mode(mode):
         return web.Response(status=400, text=f"unknown mode: {mode}")
+    _overrides["NANO_CLAW_PHONE_VAD"] = mode
+    _persist_overrides()
     return web.json_response({"active": get_vad_mode()})
 
 
@@ -1495,9 +1612,8 @@ async def config_get_handler(request: web.Request) -> web.Response:
 async def config_set_handler(request: web.Request) -> web.Response:
     """Set runtime overrides from the web UI. Voice applies to the next
     spoken sentence (even mid-call); model applies to the next agent turn.
-    Overrides live in memory — a restart returns to the .env values."""
-    from voice import voice_catalog
-
+    Overrides persist to the data volume and reload at boot; .env remains
+    the factory default underneath."""
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -1540,6 +1656,7 @@ async def config_set_handler(request: web.Request) -> web.Response:
             "1" if mode == "prepared" else "raw"
         )
 
+    _persist_overrides()
     log.info("phone config updated: voice=%s model=%s speed=%s (%d active call(s))",
              _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
              _cfg("NANO_CLAW_PHONE_MODEL") or "(default)",
@@ -1585,6 +1702,7 @@ def register_phone_routes(app: web.Application) -> None:
     global _metrics_conn
     if not phone_enabled():
         return
+    _load_persisted_overrides()
     missing = [
         name
         for name in ("TELNYX_API_KEY", "NANO_CLAW_PHONE_WEBHOOK_BASE", "NANO_CLAW_PHONE_TOKEN")

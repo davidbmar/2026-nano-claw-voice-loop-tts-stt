@@ -137,6 +137,7 @@ async def timeline_handler(request: web.Request) -> web.Response:
             },
             "events": events,
             "cost": cost_ledger.read_entries(conn, call_id),
+            "costMeta": cost_ledger.component_meta(),
             "audio": {
                 leg: (tap_dir / filename).is_file()
                 for leg, filename in LEG_FILES.items()
