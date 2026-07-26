@@ -72,7 +72,7 @@ from voice.phone_audio import (
     ulaw_decode,
 )
 from voice.phone_tap import DEFAULT_TAP_ROOT, CallTap
-from voice.processing_audio import processing_chime
+from voice.processing_audio import processing_chime, thinking_tick
 from voice.sentence_pipeline import SentencePipeline
 from voice.speech_preparer import (
     SPEECH_COMPILER_VERSION,
@@ -99,6 +99,7 @@ FRAME_S = FRAME_MS / 1000.0
 DEFAULT_PHONE_PREBUFFER_MS = 200.0
 DEFAULT_PHONE_PACE_FACTOR = 1.0
 PROCESSING_CUE_SENTINEL = "\0nano-claw-processing-cue\0"
+THINKING_TICK_INTERVAL_S = 0.5  # cadence of the thinking-cue clock tick
 _FLOW_NOT_SUPPLIED = object()
 
 
@@ -528,6 +529,8 @@ class PhoneCall:
         self._flow_create_failed = False
         self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
         self._call_end_emitted = False
+        self._thinking_cue_task: asyncio.Task | None = None
+        self._thinking_cue_stop: asyncio.Event | None = None
         start_voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
         call_log.emit(
             _metrics_conn,
@@ -579,6 +582,7 @@ class PhoneCall:
         was_speaking = self.speaking
         self.speaking = False
         self.closed = True
+        self._stop_thinking_cue()
         for pipeline in tuple(self._sentence_pipelines):
             await pipeline.aclose()
         if was_speaking or self.interrupted:
@@ -814,6 +818,7 @@ class PhoneCall:
     def _turn_finished(self, task: asyncio.Task) -> None:
         if task is not self._turn_task:
             return
+        self._stop_thinking_cue()
         self._turn_task = None
         if self.closed or task.cancelled() or self.interrupted:
             # Barge-in has already primed the endpointer; stale thinking audio
@@ -835,6 +840,7 @@ class PhoneCall:
         """Caller talked over the agent: stop speaking and turn the
         interruption itself into the next utterance."""
         log.info("[phone %s] barge-in — caller interrupted", self.call_id[:8])
+        self._stop_thinking_cue()
         if self.tap:
             self.tap.event(
                 "barge_in", sentence_index=self._active_tap_sentence_index
@@ -865,9 +871,84 @@ class PhoneCall:
             if self.tap:
                 self.tap.event("clear_sent")
 
+    # ── Thinking cue ─────────────────────────────────────────────
+
+    def _start_thinking_cue(self) -> None:
+        """Acknowledge the accepted utterance, then tick while the turn
+        thinks (STT + LLM) so the wait never sounds like a dead line."""
+        if _cfg("NANO_CLAW_PHONE_THINKING_CUE", "on").lower() == "off":
+            return
+        self._stop_thinking_cue()
+        stop = asyncio.Event()
+        self._thinking_cue_stop = stop
+        self._thinking_cue_task = asyncio.create_task(self._thinking_cue_loop(stop))
+
+    def _stop_thinking_cue(self) -> None:
+        # getattr: several tests build PhoneCall skeletons via __new__.
+        stop = getattr(self, "_thinking_cue_stop", None)
+        task = getattr(self, "_thinking_cue_task", None)
+        self._thinking_cue_stop = None
+        self._thinking_cue_task = None
+        if stop is not None:
+            stop.set()
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _thinking_cue_loop(self, stop: asyncio.Event) -> None:
+        ticks = 0
+        if self.tap:
+            self.tap.event("thinking_cue_start")
+        try:
+            await self._play_cue(processing_chime(), stop)  # "I heard you"
+            while not stop.is_set() and not self.closed:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=THINKING_TICK_INTERVAL_S)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                if stop.is_set() or self.closed:
+                    break
+                await self._play_cue(thinking_tick(), stop)
+                ticks += 1
+        except asyncio.CancelledError:
+            pass  # health-ok: _stop_thinking_cue cancels this task on purpose
+        except Exception:
+            log.exception("[phone %s] thinking cue failed", self.call_id[:8])
+        finally:
+            if self.tap:
+                self.tap.event("thinking_cue_stop", ticks=ticks)
+
+    async def _play_cue(self, pcm48k: bytes, stop: asyncio.Event) -> None:
+        """Pace one pre-tuned earcon to the transport, outside the sentence
+        pipeline (which does not exist while STT/LLM think). Uses its own
+        pacer and never touches ``speaking``, so reply pacing, inbound
+        buffering, and barge-in semantics stay untouched. The stop event is
+        checked before every frame so cue audio can never interleave with a
+        reply that is starting."""
+        frames = (
+            pcm48k_to_l16_frames(pcm48k)
+            if phone_codec() == "l16"
+            else pcm48k_to_ulaw_frames(pcm48k)
+        )
+        pacer = _phone_frame_pacer()
+        pacer.reset()
+        for frame in frames:
+            if self.closed or stop.is_set():
+                return
+            deadline = pacer.next_deadline()
+            await asyncio.sleep(max(0.0, deadline - pacer.now()))
+            if self.closed or stop.is_set():
+                return
+            await self.ws.send_json(
+                {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
+            )
+            if self.tap:
+                self.tap.outbound_frame(frame)
+
     # ── One conversational turn ──────────────────────────────────
 
     async def _run_turn(self, pcm: bytes) -> None:
+        self._start_thinking_cue()
         try:
             # If we extended the window and the caller stayed quiet (<600 ms
             # of new audio), don't re-transcribe near-identical audio — they
@@ -1375,6 +1456,7 @@ class PhoneCall:
 
     async def _speak_sentences(self, sentences) -> None:
         """Synthesize and play a sync or async sentence source in order."""
+        self._stop_thinking_cue()  # real speech replaces the thinking cue
         if self.closed or not self.speaking:
             return
         self._gain_normalizer.reset()

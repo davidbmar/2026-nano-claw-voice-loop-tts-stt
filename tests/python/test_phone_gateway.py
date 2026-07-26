@@ -887,6 +887,93 @@ def test_persona_stream_records_served_model_on_fallback(tmp_path, monkeypatch):
     assert payload["modelFallback"] is True
 
 
+class CueWebSocket:
+    closed = False
+
+    def __init__(self):
+        self.frames = []
+
+    async def send_json(self, obj):
+        self.frames.append(obj)
+
+
+def _cue_call():
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "cc-cue"
+    call.tap = None
+    call.closed = False
+    call.speaking = False
+    call.ws = CueWebSocket()
+    call._thinking_cue_task = None
+    call._thinking_cue_stop = None
+    return call
+
+
+def test_thinking_cue_plays_ack_then_ticks_until_stopped(monkeypatch):
+    monkeypatch.setattr(phone, "THINKING_TICK_INTERVAL_S", 0.03)
+    call = _cue_call()
+
+    async def exercise():
+        call._start_thinking_cue()
+        assert call._thinking_cue_task is not None
+        await asyncio.sleep(0.7)  # paced ack chime (~0.36s) + at least one tick
+        assert len(call.ws.frames) > 0
+        call._stop_thinking_cue()
+        await asyncio.sleep(0.05)
+        after = len(call.ws.frames)
+        await asyncio.sleep(0.15)
+        assert len(call.ws.frames) == after  # nothing sent after stop
+
+    run(exercise())
+
+
+def test_thinking_cue_env_off_sends_nothing(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_THINKING_CUE", "off")
+    call = _cue_call()
+
+    async def exercise():
+        call._start_thinking_cue()
+        assert call._thinking_cue_task is None
+        await asyncio.sleep(0.05)
+        assert call.ws.frames == []
+        call._stop_thinking_cue()  # idempotent no-op
+
+    run(exercise())
+
+
+def test_speak_sentences_stops_thinking_cue_first():
+    call = _cue_call()
+    stopped = []
+    call._stop_thinking_cue = lambda: stopped.append(True)
+
+    async def empty():
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    run(call._speak_sentences(empty()))
+    assert stopped == [True]
+
+
+def test_interrupt_stops_thinking_cue(tmp_path, monkeypatch):
+    conn = _event_conn(tmp_path, monkeypatch)
+    call = _cue_call()
+    call.interrupted = False
+    call._active_tap_sentence_index = None
+    call._playback_flush_sent = True
+    call.barge = type("B", (), {"take_frames": lambda self: []})()
+    call.endpointer = type("E", (), {"prime": lambda self, f: None})()
+    call._mark_activity = lambda: None
+    stopped = []
+    call._stop_thinking_cue = lambda: stopped.append(True)
+
+    async def exercise():
+        call._interrupt()
+        await asyncio.sleep(0)
+
+    run(exercise())
+    assert stopped == [True]
+
+
 def test_call_start_event_is_self_describing(tmp_path, monkeypatch):
     from voice import call_log
 

@@ -5,7 +5,15 @@ from types import SimpleNamespace
 import numpy as np
 
 from voice import phone, server
-from voice.processing_audio import CHIME_SECONDS, PEAK_AMPLITUDE, SAMPLE_RATE, processing_chime
+from voice.processing_audio import (
+    CHIME_SECONDS,
+    PEAK_AMPLITUDE,
+    SAMPLE_RATE,
+    TICK_PEAK_AMPLITUDE,
+    TICK_SECONDS,
+    processing_chime,
+    thinking_tick,
+)
 
 
 def run(coro):
@@ -20,6 +28,20 @@ def test_processing_chime_is_quiet_click_free_pcm16():
     assert samples[0] == 0
     assert np.max(np.abs(samples.astype(np.int32))) <= PEAK_AMPLITUDE
     assert processing_chime() is pcm
+
+
+def test_thinking_tick_is_quiet_click_free_pcm16():
+    pcm = thinking_tick()
+    samples = np.frombuffer(pcm, dtype=np.int16)
+
+    assert len(samples) == int(SAMPLE_RATE * TICK_SECONDS)
+    assert samples[0] == 0
+    assert np.max(np.abs(samples.astype(np.int32))) <= TICK_PEAK_AMPLITUDE
+    assert TICK_PEAK_AMPLITUDE < PEAK_AMPLITUDE  # ticks sit under the chime
+    # Fully decayed tail so the 0.5s repeat cadence cannot click.
+    tail = samples[-int(SAMPLE_RATE * 0.002):]
+    assert np.max(np.abs(tail.astype(np.int32))) < TICK_PEAK_AMPLITUDE * 0.05
+    assert thinking_tick() is pcm
 
 
 def test_phone_processing_marker_bypasses_tts():

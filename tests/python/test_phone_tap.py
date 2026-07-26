@@ -304,6 +304,9 @@ def test_phone_call_records_lifecycle_inbound_and_endpoint_events(monkeypatch):
 
 
 def test_phone_call_records_stt_agent_synthesis_and_pacing(monkeypatch):
+    # This test audits SPEECH frame accounting; the thinking cue adds its own
+    # (tap-tee'd) earcon frames, so disable it here.
+    monkeypatch.setenv("NANO_CLAW_PHONE_THINKING_CUE", "off")
     tap = _RecordingTap()
     _install_recording_tap(monkeypatch, tap)
     pcm48k = _tone(440.0, 0.04, 48_000).tobytes()
