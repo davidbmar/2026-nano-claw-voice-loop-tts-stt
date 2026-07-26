@@ -271,3 +271,41 @@ def test_prepared_speechchunk_is_billed_without_crashing(monkeypatch):
     result = asyncio.new_event_loop().run_until_complete(call._synthesize_sentence(chunk))
     assert result == b"pcm"
     assert billed == [(cost_ledger.TTS, len("Hello there."))]
+
+
+def test_phone_tracking_subclass_forwards_create_async_kwargs():
+    # PhoneCall.create_async builds flows off-loop and passes them into the
+    # constructor as _flow/_flow_domain_id. The runtime cost-tracking
+    # subclass must forward unknown kwargs, or every live call dies with a
+    # TypeError before the greeting.
+    from types import SimpleNamespace
+
+    class Base:
+        def __init__(self, ws, call_id, *, _flow=None, _flow_domain_id=None):
+            self.call_id = call_id
+            self.flow = _flow
+            self._http = SimpleNamespace()
+            self._turn_task = None
+
+        async def close(self):
+            return None
+
+        @classmethod
+        async def create_async(cls, ws, call_id):
+            return cls(ws, call_id, _flow=None, _flow_domain_id=None)
+
+    fake_module = SimpleNamespace(
+        PhoneCall=Base,
+        phone_rate=lambda: 8000,
+        PROCESSING_CUE_SENTINEL="\0cue\0",
+    )
+    cost_ledger.install_phone_tracking(fake_module, lambda: None)
+    tracked = fake_module.PhoneCall
+    assert tracked is not Base
+
+    async def exercise():
+        call = await tracked.create_async(object(), "kwargs-call")
+        assert call.call_id == "kwargs-call"
+        await call.close()
+
+    asyncio.run(exercise())

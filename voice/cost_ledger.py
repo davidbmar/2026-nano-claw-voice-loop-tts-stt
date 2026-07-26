@@ -763,8 +763,10 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
     base = phone_module.PhoneCall
 
     class CostTrackedPhoneCall(base):
-        def __init__(self, ws, call_id: str) -> None:
-            super().__init__(ws, call_id)
+        def __init__(self, ws, call_id: str, **kwargs) -> None:
+            # create_async passes keyword-only extras (_flow, _flow_domain_id);
+            # forward everything so this adapter never pins the base signature.
+            super().__init__(ws, call_id, **kwargs)
             flow = "scheduler" if getattr(self, "flow", None) is not None else "conversation"
             begin_call(call_id, flow)
             self._http = _UsageHTTPClient(self._http, call_id)
