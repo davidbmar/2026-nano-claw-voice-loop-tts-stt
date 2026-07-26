@@ -26,6 +26,27 @@ remains the merged cross-node view.
   (caller), `outbound` (what the caller heard), or `tts` (48 kHz TTS
   source before phone-rate resampling).
 
+The timeline payload also carries `timings`: the tap's `timings.jsonl`
+events projected onto wall-clock via the `meta.json` anchor — rendered in
+the panel as a collapsible "Call log" section (STT/synthesis/pacing/barge
+diagnostics per call).
+
+## Web UI sessions
+
+Browser voice conversations on the console appear in the list too, tagged
+**web UI** (source is inferred from the id prefix: `voice-*` = web,
+`loopback-*` = loopback test, anything else = phone). Only metadata is
+recorded for web sessions — start/end, turn count, signed-in flag —
+because anonymous browser transcripts deliberately stay ephemeral;
+signed-in users' transcripts live in their own conversation history.
+
+## Console banner
+
+The voice console shows a "Call the line" banner with the DID currently
+pointed at this node, driven by `NANO_CLAW_PHONE_DISPLAY_NUMBER` via
+`/api/phone/config` (`voice/web/phone-banner.js`). Keep it in sync with
+the live Telnyx routing (`/phone-routing`); unset hides the banner.
+
 ## Event vocabulary (`call_events` table, `voice/call_log.py`)
 
 | kind | payload |

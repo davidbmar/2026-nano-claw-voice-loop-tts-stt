@@ -909,3 +909,53 @@ def test_retention_sweep_runs_once_at_startup(tmp_path, monkeypatch):
 
     run(_run())
     assert swept == [(str(tmp_path / "taps"), 14.0)]
+
+
+def test_media_ws_close_fills_missing_call_end(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+
+    class StubCall:
+        default_greeting = "Hi."
+
+        async def speak(self, text):
+            return None
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(phone.PhoneCall, "create_async", staticmethod(fake_create))
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-ws-end"}}
+            )
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    row = next(c for c in metrics_db.recent_calls(conn) if c["call_id"] == "cc-ws-end")
+    assert row["ended_at"]
+
+
+def test_phone_config_reports_display_number(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_DISPLAY_NUMBER", "512-277-7311")
+    _, body = _config_roundtrip("get")
+    assert body["display_number"] == "512-277-7311"

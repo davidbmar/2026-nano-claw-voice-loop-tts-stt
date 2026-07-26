@@ -2391,3 +2391,38 @@ input[type="range"]::-moz-range-thumb {
   text-transform: none;
   letter-spacing: normal;
 }
+
+/* ── Phone-number banner (config-driven; hidden when no display number) ── */
+.phone-banner {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.9rem;
+  margin: 1.1rem auto 0.2rem;
+  padding: 0.65rem 1.6rem;
+  width: fit-content;
+  background: var(--panel);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 999px;
+  backdrop-filter: blur(26px) saturate(130%);
+  -webkit-backdrop-filter: blur(26px) saturate(130%);
+}
+.phone-banner[hidden] { display: none; }
+.phone-banner-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.phone-banner-number {
+  font-family: var(--mono);
+  font-size: clamp(1.25rem, 2.6vw, 1.7rem);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent-2);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.35);
+}
+.phone-banner-number:hover { color: #ffe09a; }

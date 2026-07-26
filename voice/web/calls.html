@@ -187,6 +187,51 @@
     .chip.outcome { color: var(--good); border-color: rgba(82, 245, 168, 0.4); }
     .chip.rejected { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.4); }
     .chip.mode { color: var(--accent-2); }
+    .source-badge {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.64rem;
+      letter-spacing: 0.08em;
+      padding: 0.14rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .source-badge.web { color: var(--caller); border-color: rgba(var(--caller-rgb), 0.4); }
+    .source-badge.phone { color: var(--good); border-color: rgba(82, 245, 168, 0.35); }
+    .source-badge.loopback { color: var(--faint); }
+    .session-note {
+      margin: 0.4rem 0 1rem;
+      padding: 0.7rem 1rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+      border: 1px dashed var(--line-strong);
+      border-radius: 10px;
+    }
+
+    /* Call log (tap timings) */
+    #log-card { margin-top: 1.6rem; padding: 0.4rem 1.2rem 1rem; display: none; }
+    #log-card summary {
+      cursor: pointer;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--faint);
+      padding: 0.6rem 0;
+    }
+    #log-lines {
+      max-height: 24rem;
+      overflow-y: auto;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.72rem;
+      line-height: 1.7;
+      white-space: pre;
+      overflow-x: auto;
+      color: var(--muted);
+    }
+    #log-lines .ev { color: var(--accent-2); }
+    #log-lines .lt { color: var(--faint); }
     .lifecycle, .marker {
       align-self: center;
       font-family: "SFMono-Regular", Consolas, monospace;
@@ -242,7 +287,7 @@
         <table class="calls">
           <thead>
             <tr>
-              <th>Answered</th><th>Caller</th><th>Called</th>
+              <th>Answered</th><th>Source</th><th>Caller</th><th>Called</th>
               <th class="num">Duration</th><th class="num">Turns</th><th>Node</th>
             </tr>
           </thead>
@@ -260,7 +305,12 @@
         <span class="callid mono" id="detail-callid"></span>
       </div>
       <div class="audio-row" id="audio-row"></div>
+      <div id="session-note" class="session-note" style="display:none"></div>
       <div id="timeline"></div>
+      <details id="log-card" class="glass">
+        <summary id="log-summary">Call log</summary>
+        <div id="log-lines"></div>
+      </details>
       <div id="cost-card" class="glass" style="display:none">
         <div class="lbl">Cost breakdown</div>
         <table id="cost-table"></table>
@@ -315,6 +365,14 @@
         hour: "2-digit", minute: "2-digit", second: "2-digit",
       });
     }
+    function sourceOf(callId) {
+      if (typeof callId !== "string") return "phone";
+      if (callId.startsWith("voice-")) return "web";
+      if (callId.startsWith("loopback-")) return "loopback";
+      return "phone";
+    }
+    const SOURCE_LABELS = { web: "web UI", loopback: "loopback", phone: "phone" };
+
     function fmtDuration(startText, endText) {
       const start = parseDbTime(startText);
       const end = parseDbTime(endText);
@@ -336,18 +394,27 @@
       $("list-empty").style.display = calls.length ? "none" : "block";
       for (const call of calls) {
         const tr = document.createElement("tr");
+        const source = sourceOf(call.call_id);
         const cells = [
           fmtLocal(parseDbTime(call.answered_at)),
-          call.caller || "?",
-          call.called || "?",
+          null, // source badge
+          call.caller === "?" ? "unknown" : (call.caller || "unknown"),
+          call.called || "—",
           fmtDuration(call.answered_at, call.ended_at),
           String(call.turns ?? 0),
           call.node || "",
         ];
         cells.forEach((text, i) => {
           const td = document.createElement("td");
-          if (i === 3 || i === 4) td.className = "num";
-          td.textContent = text;
+          if (i === 1) {
+            const badge = document.createElement("span");
+            badge.className = `source-badge ${source}`;
+            badge.textContent = SOURCE_LABELS[source];
+            td.appendChild(badge);
+          } else {
+            if (i === 4 || i === 5) td.className = "num";
+            td.textContent = text;
+          }
           tr.appendChild(td);
         });
         tr.addEventListener("click", () => loadDetail(call.id));
@@ -490,6 +557,35 @@
       card.style.display = "block";
     }
 
+    function renderLogs(timings) {
+      const card = $("log-card");
+      const lines = $("log-lines");
+      lines.textContent = "";
+      if (!timings || !timings.length) { card.style.display = "none"; return; }
+      $("log-summary").textContent = `Call log (${timings.length} events)`;
+      for (const entry of timings) {
+        const { wall, iso, t, event, ...fields } = entry;
+        const div = document.createElement("div");
+        const clock = document.createElement("span");
+        clock.className = "lt";
+        const stamp = new Date(wall * 1000);
+        clock.textContent =
+          stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+          + "." + String(stamp.getMilliseconds()).padStart(3, "0") + "  ";
+        const name = document.createElement("span");
+        name.className = "ev";
+        name.textContent = String(event).padEnd(18, " ");
+        div.append(clock, name);
+        const rest = Object.entries(fields)
+          .map(([key, value]) =>
+            `${key}=${typeof value === "number" ? +value.toFixed(3) : value}`)
+          .join(" ");
+        div.appendChild(document.createTextNode(rest));
+        lines.appendChild(div);
+      }
+      card.style.display = "block";
+    }
+
     async function loadDetail(callPk) {
       clearState();
       const resp = await api(`/api/calls/${callPk}/timeline`);
@@ -497,6 +593,15 @@
       const body = await resp.json();
       if (body.error) { showState(`Unavailable: ${body.error}`, true); return; }
       const call = body.call;
+      const source = sourceOf(call.callId);
+      const note = $("session-note");
+      if (source === "web") {
+        note.textContent = "Web UI voice session — turn count and timing are recorded; "
+          + "web transcripts are not captured here (signed-in users' transcripts live in their own history).";
+        note.style.display = "block";
+      } else {
+        note.style.display = "none";
+      }
       $("detail-title").textContent = `${call.caller || "?"} → ${call.called || "?"}`;
       $("detail-when").textContent =
         `${fmtLocal(parseDbTime(call.answeredAt))} · ${fmtDuration(call.answeredAt, call.endedAt)} · ${call.turns ?? 0} turns`;
@@ -510,6 +615,7 @@
         timeline.appendChild(div);
       }
       for (const event of body.events) timeline.appendChild(renderEvent(event));
+      renderLogs(body.timings);
       renderCost(body.cost);
       $("list-view").style.display = "none";
       $("detail-view").style.display = "block";

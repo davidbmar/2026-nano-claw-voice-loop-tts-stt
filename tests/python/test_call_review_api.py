@@ -220,3 +220,51 @@ def test_timeline_degrades_to_error_json_without_db(phone_env, monkeypatch):
             await client.close()
 
     run(_run())
+
+
+def test_timeline_includes_wall_projected_timings(phone_env, tap_root):
+    import json as _json
+
+    pk = _seed_call(phone_env)
+    call_dir = tap_root / "v3:abc:def"
+    call_dir.mkdir(parents=True)
+    (call_dir / "meta.json").write_text(
+        _json.dumps({"call_id": "v3:abc:def", "codec": "l16", "wall_t0": 1000.0, "mono_t0": 50.0})
+    )
+    (call_dir / "timings.jsonl").write_text(
+        _json.dumps({"event": "stt_done", "t": 51.0, "ms": 120.0}) + "\n"
+        + _json.dumps({"event": "synth_done", "t": 52.5, "ms": 300.0}) + "\n"
+    )
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
+            body = await resp.json()
+            timings = body["timings"]
+            assert [t["event"] for t in timings] == ["stt_done", "synth_done"]
+            assert timings[0]["wall"] == 1001.0
+            assert timings[0]["iso"].startswith("1970-01-01T00:16:41")
+            assert timings[0]["ms"] == 120.0
+            assert timings[1]["wall"] == 1002.5
+        finally:
+            await client.close()
+
+    run(_run())
+
+
+def test_timeline_timings_empty_without_tap_dir(phone_env, tap_root):
+    pk = _seed_call(phone_env)
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
+            body = await resp.json()
+            assert body["timings"] == []
+        finally:
+            await client.close()
+
+    run(_run())

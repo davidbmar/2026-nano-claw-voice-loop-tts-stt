@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import httpx
 from aiohttp import WSCloseCode, web
 
-from voice import cost_ledger, metrics_db
+from voice import call_log, cost_ledger, metrics_db
 from voice import voice_catalog
 from voice.flow_session import (
     FLOW_MODES,
@@ -803,6 +803,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     finally:
         if session:
             _abandon_agent_turn(session)
+            _finalize_web_call(session)
         if session and session._stream_task and not session._stream_task.done():
             session._stream_task.cancel()
             try:
@@ -966,6 +967,59 @@ async def _mark_history_failure(session: Any) -> None:
         log.warning("Could not persist incomplete-history marker", exc_info=True)
 
 
+def _record_web_call_turn(session: Any) -> None:
+    """Register a browser voice conversation in the call review log.
+
+    Metadata only — when the session happened and how many turns. Anonymous
+    web transcripts deliberately stay ephemeral (the browser-turn scrub
+    decision); signed-in transcripts live in the user's own history.
+    """
+    try:
+        conversation_id = getattr(session, "conversation_id", None)
+        if not isinstance(conversation_id, str) or not conversation_id:
+            return
+        if not getattr(session, "_call_log_started", False):
+            session._call_log_started = True
+            node = (
+                os.environ.get("NANO_CLAW_PHONE_WEBHOOK_BASE", "")
+                .replace("https://", "")
+                .rstrip("/")
+            )
+            metrics_db.record_call_start(
+                METRICS, conversation_id, "webUI", "voice console", node
+            )
+            call_log.emit(
+                METRICS,
+                conversation_id,
+                "call_start",
+                {
+                    "mode": "web",
+                    "sessionId": conversation_id,
+                    "signedIn": bool(getattr(session, "_user_sub", None)),
+                },
+            )
+        metrics_db.bump_call_turns(METRICS, conversation_id)
+    except Exception:
+        log.exception("web call-log record failed")
+
+
+def _finalize_web_call(session: Any) -> None:
+    """Close the call-log record for a browser conversation; idempotent."""
+    try:
+        if not getattr(session, "_call_log_started", False):
+            return
+        if getattr(session, "_call_log_finalized", False):
+            return
+        session._call_log_finalized = True
+        conversation_id = getattr(session, "conversation_id", None)
+        if not isinstance(conversation_id, str):
+            return
+        metrics_db.record_call_end_if_open(METRICS, conversation_id)
+        call_log.emit(METRICS, conversation_id, "call_end")
+    except Exception:
+        log.exception("web call-log finalize failed")
+
+
 async def _capture_user_utterance(ws: Any, session: Any, text: Any) -> bool:
     """Persist a final user transcription, while anonymous turns stay ephemeral."""
 
@@ -985,6 +1039,8 @@ async def _capture_user_utterance(ws: Any, session: Any, text: Any) -> bool:
                 }
             )
         return False
+
+    _record_web_call_turn(session)
 
     store = getattr(session, "_history_store", None)
     owner = _history_owner(session)
@@ -2670,6 +2726,7 @@ def create_app(
     app.cleanup_ctx.append(_auth_sweep_context)
     app.on_cleanup.append(close_auth_adapter)
     cost_ledger.ensure_schema(METRICS)
+    call_log.ensure_schema(METRICS)
     app.router.add_get("/", index_handler)
     app.router.add_get("/costs", costs_page_handler)
     app.router.add_get("/calls", calls_page_handler)

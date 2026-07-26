@@ -1426,6 +1426,11 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
     finally:
         if call:
             await call.close()
+            # Loopback/dropped-socket calls never get a hangup webhook; give
+            # them a duration (a webhook-recorded end is never overwritten).
+            # `cid` is always bound when `call` is — both are assigned only
+            # in the start branch.
+            metrics_db.record_call_end_if_open(_metrics_conn, cid)
     return ws
 
 
@@ -1483,6 +1488,7 @@ async def config_get_handler(request: web.Request) -> web.Response:
         "active_calls": len(_active_calls),
         "speech_mode": phone_speech_mode(),
         "speech_version": SPEECH_COMPILER_VERSION,
+        "display_number": _cfg("NANO_CLAW_PHONE_DISPLAY_NUMBER", ""),
     })
 
 
