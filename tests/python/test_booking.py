@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from voice.booking import BookingFlow
 from voice.calendar_client import CalendarError
-from voice.flow_session import digest_from_windows
+from voice.flow_session import _spoken_datetime, digest_from_windows
 from voice.goal_region import FreeWindow, GoalRegionRunner, RegionTurn
 from voice.scheduling_domains import DOMAINS
 
 
-START = "2026-07-27T10:00:00"
-SECOND_START = "2026-07-27T11:00:00"
+# Relative to today: hardcoded dates rot into the past and then trip the
+# booking guard that refuses past slots (the 2026-07-27 fixture bug, in
+# test form). DAY is always tomorrow, so these stay bookable forever.
+DAY = (date.today() + timedelta(days=1)).isoformat()
+START = f"{DAY}T10:00:00"
+# Spoken form of START, derived so these template assertions never rot.
+# Ordinal rendering itself is pinned by test_spoken_datetime_renders_ordinals.
+SECOND_START = f"{DAY}T11:00:00"
 LAWYER_SLOTS = {
     "service_type": "initial_consultation",
     "slot_start": START,
@@ -61,8 +67,8 @@ class ScriptedRunner:
             windows
             or [
                 FreeWindow(
-                    datetime.fromisoformat("2026-07-27T09:00:00"),
-                    datetime.fromisoformat("2026-07-27T12:00:00"),
+                    datetime.fromisoformat(f"{DAY}T09:00:00"),
+                    datetime.fromisoformat(f"{DAY}T12:00:00"),
                 )
             ]
         )
@@ -133,7 +139,7 @@ def test_confirm_yes_commits_and_carries_event_id_with_policy_duration():
     assert confirmation.event_id is None
     assert confirmation.reply == (
         "To confirm: a 60-minute initial consultation by video, "
-        "Monday July twenty seventh at 10 AM — shall I book it?"
+        f"{_spoken_datetime(START)} — shall I book it?"
     )
     assert calendar.inserted == []
 
@@ -144,7 +150,7 @@ def test_confirm_yes_commits_and_carries_event_id_with_policy_duration():
     assert booked.event_id == "event-123"
     assert booked.reply == (
         "You're booked: a 60-minute initial consultation by video, "
-        "Monday July twenty seventh at 10 AM. See you then. Goodbye!"
+        f"{_spoken_datetime(START)}. See you then. Goodbye!"
     )
     event = calendar.inserted[0]
     assert (event["end"] - event["start"]).total_seconds() == 60 * 60
@@ -228,17 +234,21 @@ def test_commit_conflict_clips_windows_refreshes_digest_then_books_elsewhere():
         (window.start.isoformat(), window.end.isoformat())
         for window in runner.free_windows
     ] == [
-        ("2026-07-27T09:00:00", "2026-07-27T10:00:00"),
-        ("2026-07-27T11:00:00", "2026-07-27T12:00:00"),
+        (f"{DAY}T09:00:00", f"{DAY}T10:00:00"),
+        (f"{DAY}T11:00:00", f"{DAY}T12:00:00"),
     ]
     assert runner.config.digest == digest_from_windows(
         runner.free_windows,
         "America/Chicago",
     )
-    assert runner.config.digest == (
+    _day = date.fromisoformat(DAY)
+    # The digest opens with a live "Today is ..." anchor (wall clock, so it is
+    # asserted structurally); the window rendering is pinned exactly.
+    assert runner.config.digest.startswith("Today is ")
+    assert runner.config.digest.endswith(
         "All times are America/Chicago; business hours are 08:00–18:00.\n"
         "A visit must fit inside one listed half-open free window:\n"
-        "- Monday July 27 (2026-07-27): 09:00–10:00 (fits ≤60m), "
+        f"- {_day:%A %B} {_day.day} ({DAY}): 09:00–10:00 (fits ≤60m), "
         "11:00–12:00 (fits ≤60m)"
     )
 
@@ -283,8 +293,8 @@ def test_calendar_errors_return_not_booked_apology_without_raising(failure_point
                 "slot_start": START,
                 "duration_minutes": 60,
             },
-            "You're booked: clogged drain on Monday July twenty seventh at "
-            "10 AM for 60 minutes. See you then. Goodbye!",
+            f"You're booked: clogged drain on {_spoken_datetime(START)} "
+            "for 60 minutes. See you then. Goodbye!",
         ),
         (
             "escape",
@@ -370,3 +380,10 @@ def test_ambiguous_confirmation_answer_grants_budget_grace():
     assert runner._grace_turns == 1
     assert reply.done is False
     assert runner.inputs[-1] == "hmm, let me think about that"
+
+
+def test_spoken_datetime_renders_ordinals():
+    """Pure function, fixed input: pins the spoken ordinal/hour rendering that
+    the flow assertions above now derive rather than hardcode."""
+    assert _spoken_datetime("2026-07-27T10:00:00") == "Monday July twenty seventh at 10 AM"
+    assert _spoken_datetime("2026-07-01T13:05:00") == "Wednesday July first at 1:05 PM"

@@ -7,7 +7,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
@@ -326,6 +327,57 @@ def load_free_windows(availability: dict) -> list[FreeWindow]:
     ]
 
 
+def anchor_availability(availability: dict, *, now: datetime | None = None) -> dict:
+    """Shift a static availability fixture onto upcoming days.
+
+    A frozen fixture goes stale the moment its week passes: on 2026-07-27 the
+    plumber scheduler was still offering July 17-23, so every slot a caller
+    could accept was in the past. The calendar component therefore anchors to
+    the current day at launch and prefers upcoming days.
+
+    The shift is a whole number of WEEKS, so each day keeps its weekday and the
+    fixture's weekend/business-day shape (which the scheduling evals encode)
+    survives. Availability that already starts in the future — every live
+    calendar snapshot, which begins at tomorrow — is returned untouched.
+    Best-effort: malformed input is returned as-is rather than raising, because
+    scheduling must degrade rather than break a live call.
+    """
+
+    try:
+        days = availability.get("days") or {}
+        if not days:
+            return availability
+        current = (now or datetime.now(ZoneInfo(availability["timezone"]))).date()
+        first_day = min(date.fromisoformat(day) for day in days)
+        earliest_allowed = current + timedelta(days=1)
+        if first_day >= earliest_allowed:
+            return availability
+        weeks = -(-(earliest_allowed - first_day).days // 7)  # ceil division
+        shift = timedelta(weeks=weeks)
+    except Exception:
+        log.exception("availability anchoring failed; using it unshifted")
+        return availability
+
+    def _shift(value: str) -> str:
+        return (datetime.fromisoformat(value) + shift).isoformat()
+
+    shifted_days: dict[str, list[dict[str, str]]] = {}
+    for day, windows in days.items():
+        shifted_day = (date.fromisoformat(day) + shift).isoformat()
+        shifted_days[shifted_day] = [
+            {"start": _shift(window["start"]), "end": _shift(window["end"])}
+            for window in windows
+        ]
+    anchored = dict(availability)
+    anchored["days"] = shifted_days
+    log.info(
+        "availability anchored forward %d week(s): now starts %s",
+        weeks,
+        min(shifted_days),
+    )
+    return anchored
+
+
 def _render_availability_window(window: dict) -> str:
     start = datetime.fromisoformat(window["start"])
     end = datetime.fromisoformat(window["end"])
@@ -333,10 +385,21 @@ def _render_availability_window(window: dict) -> str:
     return f"{start:%H:%M}–{end:%H:%M} (fits ≤{capacity_minutes}m)"
 
 
-def availability_digest(availability: dict) -> str:
-    """Render availability for the goal-region supervisor prompt."""
+def availability_digest(availability: dict, *, now: datetime | None = None) -> str:
+    """Render availability for the goal-region supervisor prompt.
 
+    The digest opens with today's date so the supervisor can resolve relative
+    days ("Monday", "tomorrow") against a known anchor instead of guessing,
+    and can notice if it is ever handed days that contradict it.
+    """
+
+    try:
+        current = now or datetime.now(ZoneInfo(availability["timezone"]))
+    except Exception:
+        current = now or datetime.now()
     lines = [
+        f"Today is {current:%A %B} {current.day}, {current:%Y} ({current.date().isoformat()}); "
+        f"the current time is {current:%H:%M}. Only ever offer or book times after now.",
         f"All times are {availability['timezone']}; business hours are 08:00–18:00.",
         "A visit must fit inside one listed half-open free window:",
     ]
@@ -614,6 +677,9 @@ def _load_scheduler_inputs() -> tuple[Path, RegionConfig, list[FreeWindow]]:
     availability = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(availability, dict):
         raise ValueError("availability must be a JSON object")
+    # Anchor to the moment the calendar launches: a fixture written last week
+    # must not offer last week's days (2026-07-27 regression).
+    availability = anchor_availability(availability)
     windows = load_free_windows(availability)
     config = scheduler_region_config(availability_digest(availability))
     return path, config, windows

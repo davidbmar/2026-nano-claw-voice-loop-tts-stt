@@ -205,9 +205,18 @@ class BookingFlow:
         if not isinstance(value, str):
             raise CalendarError("validated appointment start is unavailable")
         try:
-            return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError as exc:
             raise CalendarError("validated appointment start is malformed") from exc
+        # Last line of defense before a calendar write: a visit can only be
+        # booked in the future. On 2026-07-27 a stale availability fixture had
+        # the scheduler confidently offering days from the previous week; a
+        # deterministic refusal turns that class of data rot into a caught
+        # error instead of a silently wrong booking.
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        if parsed < now:
+            raise CalendarError("validated appointment start is in the past")
+        return parsed
 
     def _render_template(self, template: str, slots: dict) -> str:
         values = dict(slots)
