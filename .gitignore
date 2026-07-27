@@ -69,3 +69,4 @@ lux-service/LuxTTS/
 lux-service/.verified
 logs/
 nohup.out
+.loopback-voice.wav

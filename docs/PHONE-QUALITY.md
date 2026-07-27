@@ -60,6 +60,23 @@ streamed sentences were already spoken; the rewritten tail was deliberately
 not spoken (never double-speak) and the assistant_turn payload carries
 `preparedStreamMismatch: true`.
 
+## Real-voice loopback fixture (required for Silero validation)
+
+Synthetic TTS caller audio scores low on the neural VAD (Silero correctly
+doubts it's human — on one Kokoro question only ~0.9s of a 2.6s sentence
+crossed 0.5 probability), so a text-prompt loopback cannot validate
+`NANO_CLAW_PHONE_VAD=silero`. Use a real-speech recording instead:
+
+    scripts/phone_loopback_test.py path/to/voice.wav   # mono 8k/16k PCM
+
+To (re)build a fixture, extract a clean utterance from a recorded call tap
+(e.g. `/app/data/phone-taps/<call>/inbound.wav` on the data volume) and
+keep it OUT of git — it is a real caller's voice. The conventional local
+path is `.loopback-voice.wav` (gitignored). Validated 2026-07-27: silero
+on the live line captured a 3.8s real utterance fully with an exact
+transcript, after the v5 context-prefix fix; energy VAD remains the
+automatic fallback when the model is unavailable.
+
 ## Enable and report a tap
 
 Set the variables in the voice server's environment, then restart that
