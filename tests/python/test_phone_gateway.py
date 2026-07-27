@@ -1144,3 +1144,80 @@ def test_phone_config_reports_display_number(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_DISPLAY_NUMBER", "512-277-7311")
     _, body = _config_roundtrip("get")
     assert body["display_number"] == "512-277-7311"
+
+
+def test_degraded_stt_answer_apologizes_and_hangs_up(tmp_path, monkeypatch):
+    # The 07-26 incident: the node answered while the pipeline was dying and
+    # the caller talked into a line that couldn't hear. With STT unreachable
+    # at answer time, the line now speaks a canned apology (cached/piper —
+    # no service dependency) and hangs up instead.
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+
+    class DeadHttp:
+        async def get(self, *a, **k):
+            raise OSError("connection refused")
+
+    spoken = []
+    hangups = []
+
+    class StubCall:
+        default_greeting = "Hello from Space Channel!"
+        _http = DeadHttp()
+
+        async def speak(self, text):
+            spoken.append(text)
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(phone.PhoneCall, "create_async", staticmethod(fake_create))
+
+    async def fake_telnyx(http, cid, cmd, payload):
+        hangups.append((cid, cmd))
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_telnyx)
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-degraded"}}
+            )
+            await asyncio.sleep(0.1)  # let the apology task run
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    assert spoken == [phone.DEGRADED_ANSWER_LINE]
+    assert ("cc-degraded", "hangup") in hangups
+    kinds = [e["kind"] for e in call_log.read_timeline(conn, "cc-degraded")]
+    assert "degraded_answer" in kinds
+    turns = [
+        e["payload"]
+        for e in call_log.read_timeline(conn, "cc-degraded")
+        if e["kind"] == "assistant_turn"
+    ]
+    assert turns and turns[0]["mode"] == "error"
+
+
+def test_stt_reachable_fails_open_without_http():
+    async def exercise():
+        assert await phone._stt_reachable(None) is True
+
+    run(exercise())

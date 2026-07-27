@@ -1709,13 +1709,39 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 greeting = _compose_greeting(
                     _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
                 )
-                call_log.emit(
-                    _metrics_conn,
-                    cid,
-                    "assistant_turn",
-                    {"text": greeting, "mode": "greeting"},
-                )
-                asyncio.create_task(call.speak(greeting))
+                # Pre-answer health gate (07-26 incident: the node answered
+                # while the pipeline was dying and the caller talked into a
+                # line that couldn't hear). TTS-down is survivable — the
+                # greeting is cached and Piper runs in-process — but STT-down
+                # is fatal, so a dead STT gets a canned apology + hangup
+                # instead of a conversation that can never work.
+                if await _stt_reachable(getattr(call, "_http", None)):
+                    call_log.emit(
+                        _metrics_conn,
+                        cid,
+                        "assistant_turn",
+                        {"text": greeting, "mode": "greeting"},
+                    )
+                    asyncio.create_task(call.speak(greeting))
+                else:
+                    log.error(
+                        "[phone %s] STT unreachable at answer — apologizing"
+                        " and hanging up",
+                        cid[:8],
+                    )
+                    call_log.emit(
+                        _metrics_conn,
+                        cid,
+                        "degraded_answer",
+                        {"reason": "stt_unreachable"},
+                    )
+                    call_log.emit(
+                        _metrics_conn,
+                        cid,
+                        "assistant_turn",
+                        {"text": DEGRADED_ANSWER_LINE, "mode": "error"},
+                    )
+                    asyncio.create_task(_apologize_and_hangup(call, cid))
             elif event == "media" and call:
                 call.feed_media((msg.get("media") or {}).get("payload", ""))
             elif event == "stop":
@@ -1880,6 +1906,42 @@ async def _retention_sweep_context(app: web.Application):
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+DEGRADED_ANSWER_LINE = (
+    "I'm sorry — this line is having technical trouble right now. "
+    "Please call back in a few minutes."
+)
+
+
+async def _stt_reachable(http) -> bool:
+    """Fail-open pre-answer probe: only a definitive connection failure marks
+    the STT service down (any HTTP answer, even an error status, means the
+    service is there). ``http`` is the call's client; absent → assume healthy
+    so stubbed/test calls never trip the gate."""
+    if http is None:
+        return True
+    stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
+    try:
+        await http.get(f"{stt_url}/health", timeout=1.5)
+        return True
+    except Exception:
+        return False
+
+
+async def _apologize_and_hangup(call, cid: str) -> None:
+    """Degraded answer: canned apology (cache/piper-backed — no service
+    dependency) then hang up. Best-effort: media-only calls have no Telnyx
+    leg to hang up."""
+    try:
+        await call.speak(DEGRADED_ANSWER_LINE)
+    except Exception:
+        log.exception("[phone %s] degraded apology failed", cid[:8])
+    try:
+        await _telnyx_cmd(call._http, cid, "hangup", {})
+    except Exception:
+        log.exception("[phone %s] degraded hangup failed", cid[:8])
+    call.closed = True
 
 
 async def _warm_greeting_cache(app: web.Application) -> None:

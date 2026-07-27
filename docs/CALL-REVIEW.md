@@ -65,6 +65,7 @@ underneath.
 | `user_turn` | text (verbatim caller ASR) |
 | `assistant_turn` | text, mode (`persona`/`scheduler`/`greeting`/`idle`/`error`); persona adds complete + interrupted + model/modelRequested/modelFallback (the model that actually wrote the turn — differs from the request when the LLM fallback chain answered) + preparedStreamMismatch (present/true only when the server rewrote the reply after streamed sentences were already spoken — the tail was withheld); scheduler adds outcome, slots, rejected, supervisorMs, turnsUsed, maxTurns, eventId, done, model |
 | `barge_in` | — |
+| `degraded_answer` | reason (`stt_unreachable`) — the pre-answer health gate spoke a canned apology and hung up instead of answering with a pipeline that cannot hear |
 | `call_end` | — |
 
 Persona `assistant_turn.text` is accumulated at the point sentences are
