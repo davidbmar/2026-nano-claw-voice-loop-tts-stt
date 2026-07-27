@@ -65,14 +65,18 @@ class SileroVAD:
     EXIT = float(os.environ.get("NANO_CLAW_PHONE_VAD_EXIT", "0.35"))
 
     def __init__(self, sample_rate: int = 8000, upsample_phone_audio: bool = False) -> None:
-        # KNOWN BROKEN as of 2026-07-16: the 16k-upsampled path scores ~0.0
-        # on everything (silero v5 likely wants its 64-sample context prefix
-        # per chunk at 16k). The raw 8k path scores real callers correctly.
-        # Keep upsample opt-in for debugging only.
+        # Root-caused 2026-07-27: silero v5's ONNX expects every chunk to be
+        # PREFIXED with the tail of the previous chunk (64 samples at 16 kHz,
+        # 32 at 8 kHz) — feeding bare 512/256-sample chunks scores ~0.0 even
+        # on clear speech (live-tap probe: bare 0.002/0.410 max vs 0.999/0.993
+        # with the prefix). This was the "16k path scores 0.0" mystery, and
+        # why the bare 8k path only ever limped past the 0.5 threshold.
         self._upsample = upsample_phone_audio and sample_rate == 8000
         rate = 16000 if self._upsample else sample_rate
         self._sr = np.array(rate, dtype=np.int64)
         self._chunk = CHUNK_8K if rate == 8000 else 512
+        self._context_len = 64 if rate == 16000 else 32
+        self._context = np.zeros(self._context_len, dtype=np.float32)
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._buf = np.zeros(0, dtype=np.float32)
         self.prob = 0.0
@@ -96,10 +100,12 @@ class SileroVAD:
         )
         while len(self._buf) >= self._chunk:
             chunk, self._buf = self._buf[: self._chunk], self._buf[self._chunk:]
+            model_input = np.concatenate([self._context, chunk])
+            self._context = chunk[-self._context_len:]
             out, self._state = sess.run(
                 None,
                 {
-                    "input": chunk[np.newaxis, :],
+                    "input": model_input[np.newaxis, :],
                     "state": self._state,
                     "sr": self._sr,
                 },
