@@ -1193,12 +1193,15 @@ class PhoneCall:
                                     prepared_parts.append(delta)
                                     continue
                                 if mode == "prepared":
-                                    # A giant first delta is the server's
-                                    # held-response synthetic delta: the text
-                                    # may have been guard-rewritten, so the
-                                    # whole turn compiles at final instead of
-                                    # streaming pre-rewrite sentences.
-                                    if not saw_delta and len(delta) > 350:
+                                    # The server marks its held-response
+                                    # synthetic delta with held:true (the text
+                                    # may have been guard-rewritten) — compile
+                                    # at final instead of streaming it. The
+                                    # size heuristic remains as a fallback for
+                                    # servers predating the flag.
+                                    if obj.get("held") or (
+                                        not saw_delta and len(delta) > 350
+                                    ):
                                         saw_delta = True
                                         held_turn = True
                                         prepared_parts.append(delta)

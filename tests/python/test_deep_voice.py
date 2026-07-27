@@ -302,3 +302,20 @@ def test_web_set_speech_mode_accepts_batch():
         raise AssertionError("bogus mode accepted")
     except ValueError:
         pass
+
+
+def test_web_prepared_streaming_honors_held_flag():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    session.prepare_speech = compile_speech
+    rewritten = "The rewritten reply. It is authoritative."
+    response = FakeResponse(
+        [
+            ("delta", {"text": "Pre-rewrite text. More.", "held": True}),
+            ("final", {"response": rewritten}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == [c.text for c in compile_speech(rewritten).chunks]

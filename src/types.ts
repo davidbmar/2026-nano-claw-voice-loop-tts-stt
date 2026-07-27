@@ -191,7 +191,14 @@ export const SYSTEM_CACHE_MARKER = '\n[[cache-breakpoint]]\n';
  * One event in a streamed LLM completion.
  */
 export type StreamEvent =
-  | { type: 'text'; delta: string }
+  | {
+      type: 'text';
+      delta: string;
+      /** This delta is a held-response synthetic (whole guard-rewritten
+       * reply emitted at once) — consumers must not treat it as a live
+       * stream of stable prose. */
+      held?: boolean;
+    }
   | {
       type: 'deep_started';
       acknowledgement: string;

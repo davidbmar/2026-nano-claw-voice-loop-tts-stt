@@ -1849,8 +1849,11 @@ async def _consume_sse(
                             and isinstance(delta, str)
                             and delta
                         ):
-                            if not stream_saw_delta and len(delta) > 350:
-                                # The server's held-response synthetic delta:
+                            if obj.get("held") or (
+                                not stream_saw_delta and len(delta) > 350
+                            ):
+                                # The server's held-response synthetic delta
+                                # (held:true; size check covers older servers):
                                 # the text may still be guard-rewritten, so
                                 # this turn compiles at final instead.
                                 stream_held = True

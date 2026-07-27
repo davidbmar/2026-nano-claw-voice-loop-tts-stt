@@ -513,3 +513,22 @@ def test_deep_started_turn_holds_streaming_until_final(monkeypatch):
     )
     assert _texts(synthesized)[0] == "Let me think."
     assert _texts(synthesized)[1:] == [c.text for c in compile_speech(full).chunks]
+
+
+def test_prepared_streaming_honors_held_flag(monkeypatch):
+    # A held:true delta must never stream, even under the size heuristic —
+    # the final response (possibly guard-rewritten) is what gets spoken.
+    import json as jsonlib
+
+    from voice.speech_preparer import compile_speech
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    rewritten = "The rewritten reply. It is authoritative."
+    synthesized = _drive_stream(
+        _sse(
+            ("delta", jsonlib.dumps({"text": "Pre-rewrite text. More.", "held": True})),
+            ("final", jsonlib.dumps({"response": rewritten})),
+        )
+    )
+    assert _texts(synthesized) == [c.text for c in compile_speech(rewritten).chunks]

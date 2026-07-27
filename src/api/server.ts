@@ -941,7 +941,7 @@ export async function* stepLoopStream(
     text = coverageGuard.text;
     if (holdResponse && text) {
       firstTokenAt = Date.now();
-      yield { type: 'text', delta: text };
+      yield { type: 'text', delta: text, held: true };
     }
     if (voiceGuard.replaced) finishReason = 'analysis_voice_limit_fallback';
 
@@ -1113,8 +1113,13 @@ async function streamLoopToSSE(
   });
   try {
     for await (const ev of gen) {
-      if ((ev as StreamEvent).type === 'text')
-        sseWrite(res, 'delta', { text: (ev as { delta: string }).delta });
+      if ((ev as StreamEvent).type === 'text') {
+        const textEvent = ev as { delta: string; held?: boolean };
+        sseWrite(res, 'delta', {
+          text: textEvent.delta,
+          ...(textEvent.held && { held: true }),
+        });
+      }
       else if ((ev as StreamEvent).type === 'deep_started') sseWrite(res, 'deep_started', ev);
       else if ((ev as StreamEvent).type === 'deep_progress') sseWrite(res, 'deep_progress', ev);
       else if ((ev as ApiResponse).type === 'tool_pending') sseWrite(res, 'tool_pending', ev);
