@@ -22,6 +22,8 @@ Optional:
                                     is slow or unstable)
     NANO_CLAW_PHONE_STT_SIZE        Whisper size for phone turns (default
                                     base; "tiny" for low-powered nodes)
+    NANO_CLAW_PHONE_STT_STREAM      1 = transcribe incrementally while the
+                                    caller speaks; unset = one-shot STT
     NANO_CLAW_PHONE_CODEC           pcmu (default) or l16 (16 kHz wideband)
     NANO_CLAW_PHONE_RMS_MIN         minimum energy endpoint threshold
     NANO_CLAW_PHONE_RMS_RATIO       noise-floor multiplier for endpointing
@@ -87,6 +89,7 @@ from voice.speech_preparer import (
     StreamingSpeechCompiler,
     compile_speech,
 )
+from voice.streaming_stt import StreamingSTTSession
 from voice.text_chunker import TextChunker
 from voice.tts import is_cached as tts_is_cached
 from voice.tts import synthesize as tts_synthesize
@@ -548,6 +551,16 @@ def dynamic_endpoint_enabled() -> bool:
     return _cfg("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT") in ("1", "true", "yes")
 
 
+def phone_stt_stream_enabled() -> bool:
+    """Incremental STT is dark unless explicitly enabled."""
+    return _cfg("NANO_CLAW_PHONE_STT_STREAM").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 async def _telnyx_cmd(client: httpx.AsyncClient, cid: str, command: str, payload: dict) -> bool:
     """POST a Call Control command; never raises (a webhook must always 200)."""
     try:
@@ -613,6 +626,10 @@ class PhoneCall:
         self._tail_extensions = 0
         self._primed_len = 0
         self._primed_text = ""
+        self._stt_stream: StreamingSTTSession | None = None
+        self._stt_stream_failed = False
+        self._stt_stream_error_logged = False
+        self._stt_utterance_size: str | None = None
         echo_correlation = phone_echo_correlation()
         self.barge = BargeInDetector(
             rate_hz=rate,
@@ -734,6 +751,10 @@ class PhoneCall:
             self._turn_task.cancel()
         if self._idle_task and not self._idle_task.done():
             self._idle_task.cancel()
+        stt_stream = getattr(self, "_stt_stream", None)
+        self._stt_stream = None
+        if stt_stream is not None:
+            await stt_stream.close()
         try:
             await self._http.aclose()
         finally:
@@ -940,23 +961,107 @@ class PhoneCall:
     ) -> bytes | None:
         """Feed one decoded frame and capture endpoint state transitions."""
         tap = self.tap
-        if tap is None:
-            return self.endpointer.feed(pcm, is_speech=is_speech)
         was_in_utterance = self.endpointer.in_utterance
         utterance = self.endpointer.feed(pcm, is_speech=is_speech)
         is_in_utterance = self.endpointer.in_utterance
         rms = self.endpointer.current_rms
         floor = self.endpointer.noise_floor
         if not was_in_utterance and is_in_utterance:
-            tap.event("utterance_start", rms=rms, floor=floor)
-        if was_in_utterance and not is_in_utterance:
-            tap.event(
-                "utterance_end",
-                rms=rms,
-                floor=floor,
-                accepted=utterance is not None,
+            if tap:
+                tap.event("utterance_start", rms=rms, floor=floor)
+            # The endpointer has just promoted its short preroll into
+            # ``_frames``.  Tee that exact accumulated prefix into STT so the
+            # incremental and eventual one-shot paths see the same syllables.
+            frames = getattr(self.endpointer, "_frames", ())
+            initial_pcm = (
+                np.concatenate(frames).astype(np.int16).tobytes()
+                if frames
+                else pcm.astype(np.int16).tobytes()
             )
+            self._begin_stt_stream(initial_pcm)
+        elif was_in_utterance:
+            self._feed_stt_stream(pcm.astype(np.int16).tobytes())
+        if was_in_utterance and not is_in_utterance:
+            if tap:
+                tap.event(
+                    "utterance_end",
+                    rms=rms,
+                    floor=floor,
+                    accepted=utterance is not None,
+                )
+            if utterance is None:
+                self._abandon_stt_stream_nowait()
         return utterance
+
+    def _record_stt_pass(self, item: dict) -> None:
+        tap = self.tap
+        if tap is None:
+            return
+        tap.event(
+            "stt_pass",
+            pass_count=int(item.get("pass_count") or 0),
+            window_ms=float(item.get("window_ms") or 0.0),
+            ms=float(item.get("ms") or 0.0),
+        )
+
+    def _begin_stt_stream(self, initial_pcm: bytes) -> None:
+        """Start one utterance session and queue its endpointer preroll."""
+        if (
+            not phone_stt_stream_enabled()
+            or getattr(self, "_stt_stream", None) is not None
+        ):
+            return
+        self._stt_stream_failed = False
+        self._stt_stream_error_logged = False
+        self._stt_utterance_size = _cfg("NANO_CLAW_PHONE_STT_SIZE", "base")
+        stt_url = os.environ.get(
+            "STT_SERVICE_URL", "http://host.docker.internal:8200"
+        )
+        try:
+            self._stt_stream = StreamingSTTSession(
+                self._http,
+                stt_url,
+                sample_rate=phone_rate(),
+                model_size=self._stt_utterance_size,
+                on_pass=self._record_stt_pass,
+            )
+            self._stt_stream.feed_nowait(initial_pcm)
+        except Exception as exc:
+            self._mark_stt_stream_failed(exc)
+
+    def _feed_stt_stream(self, pcm: bytes) -> None:
+        stream = getattr(self, "_stt_stream", None)
+        if stream is not None and not getattr(self, "_stt_stream_failed", False):
+            stream.feed_nowait(pcm)
+
+    def _mark_stt_stream_failed(self, exc: BaseException) -> None:
+        self._stt_stream_failed = True
+        if not getattr(self, "_stt_stream_error_logged", False):
+            self._stt_stream_error_logged = True
+            log.warning(
+                "[phone %s] streaming STT failed; falling back to one-shot "
+                "for this utterance: %s",
+                self.call_id[:8],
+                exc,
+            )
+
+    def _abandon_stt_stream_nowait(self) -> None:
+        """Drop a rejected/cancelled utterance without blocking frame ingest."""
+        stream = getattr(self, "_stt_stream", None)
+        self._stt_stream = None
+        self._stt_stream_failed = False
+        self._stt_utterance_size = None
+        if stream is not None:
+            asyncio.create_task(stream.close())
+
+    async def _complete_stt_utterance(self) -> None:
+        """Release a kept dynamic session after the semantic tail is final."""
+        stream = getattr(self, "_stt_stream", None)
+        self._stt_stream = None
+        if stream is not None:
+            await stream.close()
+        self._stt_stream_failed = False
+        self._stt_utterance_size = None
 
     def _buffer_inbound(self, pcm: np.ndarray, is_speech: bool | None) -> None:
         if len(self._inbound_buffer) >= MAX_BUFFERED_INBOUND_FRAMES:
@@ -1010,6 +1115,10 @@ class PhoneCall:
         self.speaking = False  # speak() loop sees this and aborts
         frames = self.barge.take_frames()
         self.endpointer.prime(frames)
+        if frames:
+            self._begin_stt_stream(
+                np.concatenate(frames).astype(np.int16).tobytes()
+            )
         asyncio.create_task(self._flush_playback())
 
     def _reset_barge_in(self) -> None:
@@ -1141,6 +1250,7 @@ class PhoneCall:
                 text = await self._transcribe(pcm)
             if not text.strip():
                 self._tail_extensions = 0
+                await self._complete_stt_utterance()
                 return
             # Semantic tail check: a transcript ending mid-thought means the
             # short pause was a breath, not a turn end. Re-prime the
@@ -1169,6 +1279,7 @@ class PhoneCall:
                 )
                 return
             self._tail_extensions = 0
+            await self._complete_stt_utterance()
             log.info("[phone %s] caller: %s", self.call_id[:8], text)
             metrics_db.bump_call_turns(_metrics_conn, self.call_id)
             call_log.emit(_metrics_conn, self.call_id, "user_turn", {"text": text})
@@ -1543,6 +1654,39 @@ class PhoneCall:
         return list(plan.chunks)
 
     async def _transcribe(self, pcm: bytes) -> str:
+        stream = getattr(self, "_stt_stream", None)
+        if (
+            phone_stt_stream_enabled()
+            and stream is not None
+            and not getattr(self, "_stt_stream_failed", False)
+        ):
+            started = time.monotonic() if self.tap else None
+            try:
+                result = await stream.finish(
+                    keep_session=bool(getattr(self, "dynamic", False))
+                )
+            except Exception as exc:
+                self._mark_stt_stream_failed(exc)
+                await stream.close()
+                if getattr(self, "_stt_stream", None) is stream:
+                    self._stt_stream = None
+            else:
+                if not getattr(self, "dynamic", False):
+                    self._stt_stream = None
+                if self.tap and started is not None:
+                    self.tap.event(
+                        "stt_done",
+                        ms=(time.monotonic() - started) * 1000.0,
+                        text_len=len(result.text),
+                        streamed=True,
+                        committed_chars=result.committed_chars,
+                        finish_ms=result.finish_ms,
+                    )
+                return result.text
+
+        return await self._transcribe_one_shot(pcm)
+
+    async def _transcribe_one_shot(self, pcm: bytes) -> str:
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
         started = time.monotonic() if self.tap else None
         resp = await self._http.post(

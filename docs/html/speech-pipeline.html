@@ -43,14 +43,17 @@ assistant "what's that ticking?", it knows.</div>
 <div class="step"><div class="n">1</div><div><strong>You speak; the line listens for
 you to finish.</strong> A voice-activity detector watches the audio energy and calls
 your turn complete after a short natural silence. You can interrupt the assistant at
-any time just by talking — it stops mid-sentence and listens.</div></div>
+any time just by talking — it stops mid-sentence and listens. While you speak, local
+Whisper repeatedly checks the growing audio and keeps the words that consecutive
+passes agree on.</div></div>
 <div class="step"><div class="n">2</div><div><strong>Chime — you were heard.</strong>
 The acknowledgment plays immediately, before any processing begins.</div></div>
-<div class="step"><div class="n">3</div><div><strong>Ticking — transcription and
-thinking.</strong> A local Whisper model turns your speech into text (nothing leaves
-the machine for this). The text goes to two language models racing each other: a
-local model gets a head start, and a cloud model joins moments later if the local
-one is slow. Whichever produces words first wins the turn; the other is cancelled.</div></div>
+<div class="step"><div class="n">3</div><div><strong>Ticking — finish the tail,
+then think.</strong> Most transcription happened while you were talking, on this
+machine. Whisper now resolves only the short unstable tail. The text goes to two
+language models racing each other: a local model gets a head start, and a cloud
+model joins moments later if the local one is slow. Whichever produces words first
+wins the turn; the other is cancelled.</div></div>
 <div class="step"><div class="n">4</div><div><strong>Speaking begins before the
 thinking ends.</strong> As the winning model writes its reply, each completed
 sentence is immediately <em>compiled for the ear</em> and spoken — the assistant

@@ -192,6 +192,45 @@ def _print_barge_latency(
         )
 
 
+def _print_stt_timeline(events: list[dict[str, Any]]) -> None:
+    """Show incremental decode windows followed by each endpoint finish."""
+    stt_events = [
+        item
+        for item in events
+        if item.get("event") in ("stt_pass", "stt_done")
+    ]
+    print("\nSTT timeline")
+    if not stt_events:
+        print("  no stt events")
+        return
+    for item in stt_events:
+        if item.get("event") == "stt_pass":
+            print(
+                "  pass {pass_count}: window={window_ms:.0f} ms "
+                "decode={ms:.1f} ms".format(
+                    pass_count=int(item.get("pass_count", 0)),
+                    window_ms=float(item.get("window_ms", 0.0)),
+                    ms=float(item.get("ms", 0.0)),
+                )
+            )
+            continue
+        if item.get("streamed"):
+            print(
+                "  done: streamed committed={committed_chars} chars "
+                "finish={finish_ms:.1f} ms wall={ms:.1f} ms".format(
+                    committed_chars=int(item.get("committed_chars", 0)),
+                    finish_ms=float(item.get("finish_ms", 0.0)),
+                    ms=float(item.get("ms", 0.0)),
+                )
+            )
+        else:
+            print(
+                "  done: one-shot wall={:.1f} ms".format(
+                    float(item.get("ms", 0.0))
+                )
+            )
+
+
 def _barge_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Count barge candidates, commits, and each suppression reason."""
     candidates = [
@@ -258,6 +297,7 @@ def report(tap_dir: Path) -> int:
     frames_sent = [item for item in events if item.get("event") == "frames_sent"]
     barges = [item for item in events if item.get("event") == "barge_in"]
     print(f"\nTiming events: {len(events)}" + (f" ({malformed} malformed lines ignored)" if malformed else ""))
+    _print_stt_timeline(events)
     _print_gap_histogram(_inter_sentence_gaps(frames_sent))
     _print_pacing(frames_sent)
     _print_barge_summary(events)

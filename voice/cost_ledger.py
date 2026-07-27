@@ -856,15 +856,43 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
                 except Exception:
                     log.exception("cost ledger call finalization failed")
 
-        async def _transcribe(self, pcm: bytes) -> str:
+        def _bill_stt_delta(self, pcm: bytes, *, new_utterance: bool) -> None:
+            if new_utterance:
+                self._stt_billed_bytes = 0
+                self._stt_billing_model = (
+                    getattr(self, "_stt_utterance_size", None)
+                    or _phone_cfg("NANO_CLAW_PHONE_STT_SIZE", "base")
+                )
+            billed = int(getattr(self, "_stt_billed_bytes", 0))
+            delta = max(0, len(pcm) - billed)
             rate = phone_module.phone_rate()
-            if rate:
+            if rate and delta:
+                billing_model = getattr(
+                    self,
+                    "_stt_billing_model",
+                    _phone_cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
+                )
                 add_units(
                     self.call_id,
                     STT,
-                    len(pcm) / (2.0 * rate),
+                    delta / (2.0 * rate),
                     "audio_seconds",
-                    model=f"whisper/{_phone_cfg('NANO_CLAW_PHONE_STT_SIZE', 'base')}",
+                    model=f"whisper/{billing_model}",
+                )
+            self._stt_billed_bytes = max(billed, len(pcm))
+
+        async def _transcribe(self, pcm: bytes) -> str:
+            # Normal phone turns are billed by _run_turn, including a short
+            # dynamic continuation that deliberately skips another STT call.
+            # Keep direct use (and older adapters/tests) billable as before.
+            task = asyncio.current_task()
+            billing_tasks = getattr(self, "_stt_billing_tasks", set())
+            if task not in billing_tasks:
+                self._bill_stt_delta(
+                    pcm,
+                    new_utterance=not bool(
+                        getattr(self, "_tail_extensions", 0)
+                    ),
                 )
             return await super()._transcribe(pcm)
 
@@ -886,9 +914,20 @@ def install_phone_tracking(phone_module, conn_getter: Callable[[], object | None
             return speech
 
         async def _run_turn(self, pcm: bytes) -> None:
+            self._bill_stt_delta(
+                pcm,
+                new_utterance=not bool(getattr(self, "_tail_extensions", 0)),
+            )
+            task = asyncio.current_task()
+            billing_tasks = getattr(self, "_stt_billing_tasks", None)
+            if billing_tasks is None:
+                billing_tasks = set()
+                self._stt_billing_tasks = billing_tasks
+            billing_tasks.add(task)
             try:
                 return await super()._run_turn(pcm)
             finally:
+                billing_tasks.discard(task)
                 flow_session = getattr(self, "flow", None)
                 if flow_session is None:
                     begin_call(self.call_id, "conversation")

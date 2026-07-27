@@ -62,6 +62,35 @@ streamed sentences were already spoken; the rewritten tail was deliberately
 not spoken (never double-speak) and the assistant_turn payload carries
 `preparedStreamMismatch: true`.
 
+## Streaming STT (LocalAgreement-2)
+
+`NANO_CLAW_PHONE_STT_STREAM=1` opts phone calls into incremental Whisper
+decoding; it is `0`/off by default during live validation. The endpointer tees
+the same PCM it is already retaining into the STT service in roughly 500 ms
+batches. After about 700 ms of new audio, Whisper re-decodes the current
+uncommitted window. When two consecutive hypotheses start with the same token
+prefix, LocalAgreement-2 commits that prefix, carries it as Whisper's
+`initial_prompt`, and trims its audio from later windows. Transcription
+therefore happens mostly while the caller is speaking rather than entirely
+after endpoint silence.
+
+Dynamic-endpoint continuations keep the same session. A provisional transcript
+such as “tell me about” can be finalized for the semantic-tail check, then new
+audio continues with the already committed prefix instead of re-decoding the
+merged utterance. The session closes only once the semantic tail is complete.
+Any start, feed, or finish error logs one warning and falls back to the
+unchanged one-shot `/transcribe` request with the endpointer's full PCM, so the
+turn is not lost. Stream sessions expire after 60 seconds idle.
+
+The tap exposes the incremental timeline:
+
+- `stt_pass` records `pass_count`, the uncommitted `window_ms`, and decode
+  `ms`.
+- A successful streamed `stt_done` adds `streamed: true`,
+  `committed_chars`, and `finish_ms`; its existing `ms` remains the phone-side
+  wall time waiting at the endpoint.
+- One-shot and fail-open turns retain the original `stt_done` shape.
+
 ## Real-voice loopback fixture (required for Silero validation)
 
 Synthetic TTS caller audio scores low on the neural VAD (Silero correctly
@@ -123,6 +152,9 @@ deployment's data policy.
   nominally 20 ms intervals. The summed surplus should stay near the configured
   prebuffer instead of growing with answer length; a negative surplus or high
   p95/max interval points to starvation or jitter.
+- **STT timeline** lists each incremental decode window and its cost, followed
+  by the final tail latency and how many transcript characters stabilized
+  before endpointing.
 - **Barge-in decisions** counts candidate votes, committed interruptions, and
   suppressions by reason (`low_conf`, `echo`, or `short`) for this call.
 - **Barge-in to last outbound frame** is signed. A positive value means a

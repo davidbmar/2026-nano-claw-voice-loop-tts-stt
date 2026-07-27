@@ -19,12 +19,15 @@ assistant answers — including what the little sounds mean.
 
 1. **You speak; the line listens for you to finish.** A voice-activity
    detector calls your turn complete after a short natural silence. You can
-   interrupt the assistant at any time just by talking.
+   interrupt the assistant at any time just by talking. While you speak,
+   local Whisper repeatedly checks the growing audio and keeps the words that
+   consecutive passes agree on.
 2. **Chime — you were heard.** Plays immediately, before any processing.
-3. **Ticking — transcription and thinking.** Local Whisper turns speech
-   into text (on-machine). The text goes to two language models racing:
-   a local model gets a head start, a cloud model joins moments later if
-   the local one is slow. First words win; the loser is cancelled.
+3. **Ticking — finish the tail, then think.** Most transcription happened
+   while you were talking, on this machine. Whisper now resolves only the
+   short unstable tail. The text goes to two language models racing: a local
+   model gets a head start, a cloud model joins moments later if the local one
+   is slow. First words win; the loser is cancelled.
 4. **Speaking begins before the thinking ends.** Each completed sentence is
    immediately *compiled for the ear* and spoken while the model writes the
    rest: deliberate pauses after sentences, commas, and dashes (with a
