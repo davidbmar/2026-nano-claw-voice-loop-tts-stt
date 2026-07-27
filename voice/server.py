@@ -2785,6 +2785,11 @@ async def flow_set_handler(request: web.Request) -> web.Response:
     mode = raw_mode.strip().lower()
     if not set_flow_mode(mode):
         return web.Response(status=400, text=f"unknown mode: {mode}")
+    # Survive restarts: without this the next container boot re-reads
+    # NANO_CLAW_VOICE_FLOW from .env and silently reverts the mode.
+    from voice import phone as phone_module
+
+    phone_module.persist_runtime_setting("NANO_CLAW_VOICE_FLOW", mode)
     return web.json_response(_flow_api_payload())
 
 

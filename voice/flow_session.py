@@ -144,6 +144,49 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
     },
 }
 DEFAULT_FLOW_MODE = "spacechannel"
+
+# Spoken phone greeting per mode, so the intro always matches the brain that
+# answers (07-27 bug: every restart re-read NANO_CLAW_VOICE_FLOW and the line
+# played the Space Channel intro over Document Intelligence answers).
+# Scheduler modes carry their own flow greeting and never consult this table;
+# the recording notice is appended separately by the phone layer.
+_MODE_GREETINGS: dict[str, str] = {
+    "spacechannel": (
+        "You've reached Space Channel. Ask me about rocket launches, "
+        "U F O cases, space news, podcasts, or live shows."
+    ),
+    "intelligence": (
+        "You've reached the document intelligence assistant. Ask me anything "
+        "about the documents currently loaded."
+    ),
+    "riff": (
+        "You've reached the Riff codebase assistant. Ask me about the Riff "
+        "source."
+    ),
+    "nanoclaw": (
+        "You've reached the nano-claw codebase assistant. Ask me how this "
+        "voice system works."
+    ),
+    "intelligence-platform": (
+        "You've reached the intelligence-platform codebase assistant. Ask me "
+        "about that codebase."
+    ),
+    "replicantpm": (
+        "You've reached the Replicant product assistant. How can I help?"
+    ),
+}
+_GENERIC_GREETING = (
+    "Hello! You've reached the nano-claw voice assistant. How can I help?"
+)
+
+
+def flow_mode_greeting(mode: str | None = None) -> str:
+    """Phone greeting matching the active (or given) assistant mode."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        active = DEFAULT_FLOW_MODE
+    return _MODE_GREETINGS.get(active, _GENERIC_GREETING)
 _flow_mode: str | None = None
 # Keep the provider-verified dropdown registry centralized here. These exact
 # IDs were checked against the live provider /v1/models endpoints on 2026-07-17.

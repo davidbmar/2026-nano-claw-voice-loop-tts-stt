@@ -55,10 +55,13 @@ from aiohttp import web
 
 from voice import call_log, metrics_db, silero_vad, voice_catalog
 from voice.flow_session import (
+    FLOW_MODES,
     FlowSession,
     active_scheduling_domain,
+    flow_mode_greeting,
     get_flow_mode,
     get_flow_profile,
+    set_flow_mode,
 )
 from voice.phone_audio import (
     FRAME_MS,
@@ -89,12 +92,11 @@ log = logging.getLogger("nano-claw.phone")
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 TELNYX_API = "https://api.telnyx.com/v2"
 
-DEFAULT_GREETING = (
-    "You've reached Space Channel. Ask me about rocket launches, "
-    "U F O cases, space news, podcasts, or live shows."
-)
+# Back-compat alias; the live greeting now follows the active mode so the
+# intro can never promise a persona the brain isn't running.
+DEFAULT_GREETING = flow_mode_greeting("spacechannel")
 IDLE_PROMPT_TEXT = "Hi — are you still there?"
-IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling Space Channel — goodbye!"
+IDLE_GOODBYE_TEXT = "It sounds like you've stepped away. Thanks for calling — goodbye!"
 DEFAULT_RECORD_NOTICE = "This call may be recorded for quality and training."
 MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
 FRAME_S = FRAME_MS / 1000.0
@@ -197,6 +199,7 @@ _SETTINGS_KEYS = (
     "NANO_CLAW_PHONE_STT_SIZE",
     "NANO_CLAW_PHONE_SPEECH_PREPARATION",
     "NANO_CLAW_PHONE_VAD",
+    "NANO_CLAW_VOICE_FLOW",
 )
 
 
@@ -231,7 +234,20 @@ def _valid_setting(name: str, value: str) -> bool:
         return value in ("1", "raw", "batch")
     if name == "NANO_CLAW_PHONE_VAD":
         return value in VAD_MODES
+    if name == "NANO_CLAW_VOICE_FLOW":
+        return value in FLOW_MODES
     return False
+
+
+def persist_runtime_setting(name: str, value: str) -> None:
+    """Write-through for line settings owned by other modules (e.g. the
+    console MODE selector in voice/server.py) so they survive restarts the
+    same way the phone settings do. Silently ignores unknown or invalid
+    values — persistence must never break the setter that calls it."""
+    if name not in _SETTINGS_KEYS or not _valid_setting(name, str(value)):
+        return
+    _overrides[name] = str(value)
+    _persist_overrides()
 
 
 def _persist_overrides() -> None:
@@ -271,6 +287,12 @@ def _load_persisted_overrides() -> None:
             log.warning("phone settings: invalid %s=%r dropped", name, value)
             continue
         _overrides[name] = value
+    # The console MODE selector persists here too; re-apply it so a restart
+    # boots into the mode the user last chose, not the .env factory default
+    # (07-27 bug: Space Channel intro over Document Intelligence answers).
+    persisted_mode = _overrides.get("NANO_CLAW_VOICE_FLOW")
+    if persisted_mode:
+        set_flow_mode(persisted_mode)
     if _overrides:
         log.info(
             "phone settings restored from %s: %s",
@@ -550,7 +572,9 @@ class PhoneCall:
             self.flow = _flow
         self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
-        self.default_greeting = self.flow.greeting if self.flow else DEFAULT_GREETING
+        self.default_greeting = (
+            self.flow.greeting if self.flow else flow_mode_greeting()
+        )
         self._call_end_emitted = False
         self._thinking_cue_task: asyncio.Task | None = None
         self._thinking_cue_stop: asyncio.Event | None = None
@@ -1962,7 +1986,7 @@ async def _warm_greeting_cache(app: web.Application) -> None:
         except ValueError:
             speed = 1.0
         greeting = _compose_greeting(
-            _cfg("NANO_CLAW_PHONE_GREETING") or DEFAULT_GREETING
+            _cfg("NANO_CLAW_PHONE_GREETING") or flow_mode_greeting()
         )
         texts = [
             getattr(unit, "text", unit) for unit in PhoneCall._speech_units(greeting)
