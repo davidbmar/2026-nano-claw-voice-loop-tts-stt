@@ -81,6 +81,7 @@ from voice.speech_preparer import (
     compile_speech,
 )
 from voice.text_chunker import TextChunker
+from voice.tts import is_cached as tts_is_cached
 from voice.tts import synthesize as tts_synthesize
 
 log = logging.getLogger("nano-claw.phone")
@@ -1881,6 +1882,54 @@ async def _retention_sweep_context(app: web.Application):
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def _warm_greeting_cache(app: web.Application) -> None:
+    """Pre-synthesize the greeting at boot so pickup is instant.
+
+    The 2026-07-26 incident opened with 32s of dead air: a cold TTS
+    synthesizing the same fixed greeting the line speaks on every call.
+    Retries while the native TTS services finish starting; fallback renders
+    are never cached (tts.synthesize guarantees that), so retrying until
+    ``is_cached`` proves the real voice landed.
+    """
+
+    async def warm() -> None:
+        loop = asyncio.get_running_loop()
+        voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+        try:
+            speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
+        except ValueError:
+            speed = 1.0
+        greeting = _compose_greeting(
+            _cfg("NANO_CLAW_PHONE_GREETING") or DEFAULT_GREETING
+        )
+        texts = [
+            getattr(unit, "text", unit) for unit in PhoneCall._speech_units(greeting)
+        ]
+        texts = [text for text in texts if isinstance(text, str) and text.strip()]
+        for attempt in range(1, 7):
+            try:
+                for text in texts:
+                    if not tts_is_cached(text, voice, speed):
+                        await loop.run_in_executor(
+                            None, tts_synthesize, text, voice, speed
+                        )
+                if all(tts_is_cached(text, voice, speed) for text in texts):
+                    log.info(
+                        "[phone] greeting cache warm: %d units (attempt %d)",
+                        len(texts),
+                        attempt,
+                    )
+                    return
+            except Exception:
+                log.exception("[phone] greeting warm-up attempt %d failed", attempt)
+            await asyncio.sleep(20)
+        log.warning(
+            "[phone] greeting cache never warmed — first pickup synthesizes live"
+        )
+
+    app["phone_greeting_warm_task"] = asyncio.create_task(warm())
+
+
 def register_phone_routes(app: web.Application) -> None:
     """Attach gateway routes when NANO_CLAW_PHONE=1 (no-op otherwise)."""
     global _metrics_conn
@@ -1901,6 +1950,7 @@ def register_phone_routes(app: web.Application) -> None:
     # the token check and metrics connection.
     from voice import call_review
 
+    app.on_startup.append(_warm_greeting_cache)
     app.router.add_post("/api/phone/incoming", incoming_handler)
     app.router.add_get("/ws/phone-media", media_ws_handler)
     app.router.add_get("/api/calls", calls_handler)

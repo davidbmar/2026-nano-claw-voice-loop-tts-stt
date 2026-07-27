@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -167,21 +169,13 @@ def _synthesize_piper(text: str, voice_id: str) -> bytes:
     return _resample_to_48k(b"".join(raw_parts), native_rate)
 
 
-def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
-    """Kokoro path: fetch from the native service, resample to 48kHz.
-
-    Falls back to the Piper default voice if the service is unavailable so the
-    voice loop is never silent (degraded-mode convention).
-    """
+def _synthesize_kokoro_engine(text: str, voice_id: str, speed: float) -> bytes:
+    """Kokoro engine render (raises when the service is unavailable —
+    synthesize() owns the piper fallback so fallbacks are never cached)."""
     from voice import kokoro_client
 
-    try:
-        pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
-        return _resample_to_48k(pcm, rate)
-    except (kokoro_client.KokoroUnavailable, ValueError) as exc:
-        log.warning("Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
-                    voice_id, exc, DEFAULT_VOICE)
-        return _synthesize_piper(text, DEFAULT_VOICE)
+    pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
+    return _resample_to_48k(pcm, rate)
 
 
 # Lux (voice cloning) prepends a voiced onset burst — plus dead air — to every
@@ -233,21 +227,13 @@ def _trim_lux_onset(pcm: bytes) -> bytes:
     return pcm[cut_windows * win * 2:] if cut_windows > 0 else pcm
 
 
-def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
-    """LuxTTS path: fetch from the native cloning service, resample if needed.
-
-    Falls back to the Piper default voice if the service is unavailable so the
-    voice loop is never silent (degraded-mode convention).
-    """
+def _synthesize_lux_engine(text: str, voice_id: str, speed: float) -> bytes:
+    """LuxTTS engine render (raises when the service is unavailable —
+    synthesize() owns the piper fallback so fallbacks are never cached)."""
     from voice import lux_client
 
-    try:
-        pcm, rate = lux_client.synthesize(text, voice_id, speed)
-        return _trim_lux_onset(_resample_to_48k(pcm, rate))
-    except (lux_client.LuxUnavailable, ValueError) as exc:
-        log.warning("LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
-                    voice_id, exc, DEFAULT_VOICE)
-        return _synthesize_piper(text, DEFAULT_VOICE)
+    pcm, rate = lux_client.synthesize(text, voice_id, speed)
+    return _trim_lux_onset(_resample_to_48k(pcm, rate))
 
 
 def _with_sentence_gap(
@@ -276,6 +262,50 @@ def _with_sentence_gap(
     return pcm
 
 
+# Engine-render cache: fixed lines (the greeting, the recording notice, idle
+# and error prompts) are re-synthesized on every call, so a cold or degraded
+# TTS becomes caller-audible dead air — the 2026-07-26 incident opened with
+# 32s of silence synthesizing the same greeting the line speaks every pickup.
+# Keyed on (normalized text, voice, speed); pauses/declick are applied AFTER
+# the cache so jittered pause targets still hit. Fallback renders are never
+# cached (a warm-up during service startup must not pin piper audio to a
+# real voice's key). Bounded LRU; dynamic reply sentences rarely repeat and
+# simply age out.
+try:
+    _SYNTH_CACHE_CAP = max(0, int(os.environ.get("NANO_CLAW_TTS_CACHE_ENTRIES", "48")))
+except ValueError:
+    _SYNTH_CACHE_CAP = 48
+_synth_cache: "OrderedDict[tuple[str, str, float], bytes]" = OrderedDict()
+_synth_cache_lock = threading.Lock()
+
+
+def clear_synth_cache() -> None:
+    with _synth_cache_lock:
+        _synth_cache.clear()
+
+
+def is_cached(text: str, voice_id: str, speed: float) -> bool:
+    key = (normalize_for_speech(text), voice_id, float(speed))
+    with _synth_cache_lock:
+        return key in _synth_cache
+
+
+def _cache_get(key: tuple) -> bytes | None:
+    with _synth_cache_lock:
+        pcm = _synth_cache.get(key)
+        if pcm is not None:
+            _synth_cache.move_to_end(key)
+        return pcm
+
+
+def _cache_put(key: tuple, pcm: bytes) -> None:
+    with _synth_cache_lock:
+        _synth_cache[key] = pcm
+        _synth_cache.move_to_end(key)
+        while len(_synth_cache) > _SYNTH_CACHE_CAP:
+            _synth_cache.popitem(last=False)
+
+
 def synthesize(
     text: str,
     voice_id: str = "",
@@ -288,16 +318,41 @@ def synthesize(
     - LuxTTS voices → native voice-cloning service (48kHz, uses `speed`).
     - Piper voices  → local Piper (ignores `speed`; it is the fast option).
     - Unknown id    → Piper default.
+
+    Engine renders are cached (see the cache note above); a service outage
+    falls back to Piper audibly but leaves the cache untouched.
     """
-    from voice import voice_catalog
+    from voice import kokoro_client, lux_client, voice_catalog
 
     text = normalize_for_speech(text)
     entry = voice_catalog.lookup(voice_id) if voice_id else None
-    if entry and entry["engine"] == "kokoro":
-        pcm = _synthesize_kokoro(text, voice_id, speed)
-    elif entry and entry["engine"] == "luxtts":
-        pcm = _synthesize_lux(text, voice_id, speed)
-    else:
-        piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
-        pcm = _synthesize_piper(text, piper_id)
+    key = (text, voice_id, float(speed))
+    pcm = _cache_get(key)
+    if pcm is None:
+        cacheable = True
+        if entry and entry["engine"] == "kokoro":
+            try:
+                pcm = _synthesize_kokoro_engine(text, voice_id, speed)
+            except (kokoro_client.KokoroUnavailable, ValueError) as exc:
+                log.warning(
+                    "Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE,
+                )
+                pcm = _synthesize_piper(text, DEFAULT_VOICE)
+                cacheable = False
+        elif entry and entry["engine"] == "luxtts":
+            try:
+                pcm = _synthesize_lux_engine(text, voice_id, speed)
+            except (lux_client.LuxUnavailable, ValueError) as exc:
+                log.warning(
+                    "LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE,
+                )
+                pcm = _synthesize_piper(text, DEFAULT_VOICE)
+                cacheable = False
+        else:
+            piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
+            pcm = _synthesize_piper(text, piper_id)
+        if cacheable and pcm and _SYNTH_CACHE_CAP > 0:
+            _cache_put(key, pcm)
     return _with_sentence_gap(text, pcm, pause_after_ms)
