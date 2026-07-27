@@ -538,6 +538,12 @@ def test_all_completion_paths_and_partial_error_rules(monkeypatch, tmp_path):
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = True
         session._scheduler_flow = Flow()
+        # The handler re-reads the runtime mode per turn (live gate); this
+        # test wires the flow onto the session directly, so satisfy the gate
+        # without depending on the global flow-mode configuration.
+        monkeypatch.setattr(
+            server, "active_scheduling_domain", lambda mode: "test-domain"
+        )
         assert await server._handle_scheduler_request(
             ws, session, "scheduler user"
         )
