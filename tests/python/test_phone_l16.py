@@ -27,10 +27,12 @@ def test_pcm48k_to_l16_frames_are_raw_20ms_pcm16():
     frames = pcm48k_to_l16_frames(source.tobytes())
 
     assert frames
-    assert all(len(frame) == 640 for frame in frames[:-1])
-    assert 0 < len(frames[-1]) <= 640
+    # Every frame is a full 20 ms — sub-frame payloads glitch carrier-side
+    # playout into ticks at chunk ends; the tail is zero-padded instead.
+    assert all(len(frame) == 640 for frame in frames)
     decoded = np.frombuffer(b"".join(frames), dtype=np.int16)
-    assert np.array_equal(decoded, expected)
+    assert np.array_equal(decoded[: len(expected)], expected)
+    assert not np.any(decoded[len(expected):])
 
 
 def _endpoint_wall_clock_ms(rate_hz: int) -> int:

@@ -571,19 +571,34 @@ class BargeInDetector:
         return frames
 
 
+def _pad_to_frames(samples: np.ndarray, frame_samples: int) -> np.ndarray:
+    """Zero-pad so the transport never sends a sub-frame payload.
+
+    Chunk PCM lengths are arbitrary (speech + jittered pause), so the final
+    frame used to be a random partial — down to a few samples — which
+    carrier-side playout pads or glitches into an audible tick at every
+    chunk end. Chunk ends are declick-faded to silence, so padding with
+    zeros is inaudible by construction.
+    """
+    pad = (-len(samples)) % frame_samples
+    if pad:
+        samples = np.concatenate([samples, np.zeros(pad, dtype=samples.dtype)])
+    return samples
+
+
 def pcm48k_to_ulaw_frames(pcm48k_bytes: bytes) -> list[bytes]:
-    """48 kHz PCM16 bytes (TTS output) → list of 20 ms μ-law frames."""
+    """48 kHz PCM16 bytes (TTS output) → list of full 20 ms μ-law frames."""
     pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
-    pcm8k = resample_48k_to_8k(pcm48k)
+    pcm8k = _pad_to_frames(resample_48k_to_8k(pcm48k), FRAME_SAMPLES)
     ulaw = ulaw_encode(pcm8k)
     return [ulaw[i : i + FRAME_SAMPLES] for i in range(0, len(ulaw), FRAME_SAMPLES)]
 
 
 def pcm48k_to_l16_frames(pcm48k_bytes: bytes) -> list[bytes]:
-    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in 20 ms Telnyx frames."""
+    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in full 20 ms Telnyx frames."""
     pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
-    pcm16k = resample_48k_to_16k(pcm48k)
     frame_samples = 16000 * FRAME_MS // 1000
+    pcm16k = _pad_to_frames(resample_48k_to_16k(pcm48k), frame_samples)
     return [
         pcm16k[i : i + frame_samples].tobytes()
         for i in range(0, len(pcm16k), frame_samples)
