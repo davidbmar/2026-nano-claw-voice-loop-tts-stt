@@ -1,6 +1,16 @@
 import numpy as np
+import pytest
 
 from voice import tts, kokoro_client, lux_client
+
+
+@pytest.fixture(autouse=True)
+def isolated_synth_cache():
+    # The engine-render cache is module-global; without clearing it, one
+    # test's successful render hides the next test's engine behavior.
+    tts.clear_synth_cache()
+    yield
+    tts.clear_synth_cache()
 
 
 def _pcm(n, rate):
