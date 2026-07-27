@@ -334,7 +334,11 @@ def test_barge_in_clears_buffer_once_and_stops_playback(monkeypatch):
             playback = asyncio.create_task(call._speak_chunk("long answer"))
             await asyncio.wait_for(ws.media_sent.wait(), timeout=1)
 
-            feed_pcm(call, tone(300, 240))
+            # 400ms: task 086 raised the barge sustain default to 350ms so a
+            # cough can't cancel a reply. This test's subject is the
+            # clear-once/stop-playback behavior AFTER a commit, so it feeds a
+            # burst that clears the current threshold.
+            feed_pcm(call, tone(300, 400))
             await asyncio.wait_for(ws.clear_sent.wait(), timeout=1)
             await playback
             await call._flush_playback()  # one-shot even if requested again

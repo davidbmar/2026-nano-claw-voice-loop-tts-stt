@@ -64,9 +64,13 @@ from voice.flow_session import (
     set_flow_mode,
 )
 from voice.phone_audio import (
+    DEFAULT_BARGE_TRIGGER_MS,
+    DEFAULT_BARGE_VAD_ENTER,
+    DEFAULT_ECHO_CORRELATION,
     FRAME_MS,
     BargeInDetector,
     DEFAULT_PHONE_GAIN_TARGET_DBFS,
+    EchoReferenceGate,
     SentencePeakNormalizer,
     UtteranceEndpointer,
     pcm48k_to_l16_frames,
@@ -382,6 +386,82 @@ def barge_in_enabled() -> bool:
     return _cfg("NANO_CLAW_PHONE_BARGE_IN") in ("1", "true", "yes")
 
 
+def _clamped_phone_float(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Read one finite phone setting and clamp it to an operator-safe range."""
+    raw = _cfg(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        _warn_config_fallback(name, raw, default)
+        return default
+    if not math.isfinite(value):
+        _warn_config_fallback(name, raw, default)
+        return default
+    return float(np.clip(value, minimum, maximum))
+
+
+def _clamped_phone_int(
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """Read one integer phone setting and clamp it to its supported range."""
+    raw = _cfg(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        _warn_config_fallback(name, raw, default)
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def phone_barge_vad_enter() -> float:
+    """Raw Silero probability required for a barge vote."""
+    return _clamped_phone_float(
+        "NANO_CLAW_PHONE_BARGE_VAD_ENTER",
+        DEFAULT_BARGE_VAD_ENTER,
+        0.5,
+        0.95,
+    )
+
+
+def phone_barge_trigger_ms() -> int:
+    """Sustained barge-vote duration required to interrupt playback."""
+    return _clamped_phone_int(
+        "NANO_CLAW_PHONE_BARGE_TRIGGER_MS",
+        DEFAULT_BARGE_TRIGGER_MS,
+        120,
+        1_500,
+    )
+
+
+def phone_echo_correlation() -> float:
+    """Normalized outbound-reference correlation that identifies echo."""
+    return _clamped_phone_float(
+        "NANO_CLAW_PHONE_ECHO_CORR",
+        DEFAULT_ECHO_CORRELATION,
+        0.0,
+        1.0,
+    )
+
+
+def phone_echo_gate_enabled() -> bool:
+    """Echo defense defaults on whenever phone barge-in is enabled."""
+    default = "1" if barge_in_enabled() else "0"
+    return _cfg("NANO_CLAW_PHONE_ECHO_GATE", default).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def phone_speech_mode() -> str:
     """"prepared" (sentence-streaming compilation, the default), "batch"
     (compile only after the full reply — the pre-streaming behavior, kept
@@ -533,7 +613,21 @@ class PhoneCall:
         self._tail_extensions = 0
         self._primed_len = 0
         self._primed_text = ""
-        self.barge = BargeInDetector(rate_hz=phone_rate())
+        echo_correlation = phone_echo_correlation()
+        self.barge = BargeInDetector(
+            rate_hz=rate,
+            trigger_ms=phone_barge_trigger_ms(),
+            vad_enter=phone_barge_vad_enter(),
+            echo_corr_threshold=echo_correlation,
+        )
+        self.echo_gate = (
+            EchoReferenceGate(
+                rate_hz=rate,
+                correlation_threshold=echo_correlation,
+            )
+            if phone_echo_gate_enabled()
+            else None
+        )
         # Neural VAD (one streaming instance per call; None = energy mode)
         self.vad_mode = get_vad_mode()
         if self.vad_mode == "silero":
@@ -798,8 +892,26 @@ class PhoneCall:
         if self.speaking:
             # Barge-in (NANO_CLAW_PHONE_BARGE_IN=1): listen for the caller
             # talking over us; otherwise stay half-duplex.
-            if barge_in_enabled() and self.barge.feed(pcm, is_speech=is_speech):
-                self._interrupt()
+            if barge_in_enabled():
+                echo_correlation = (
+                    self.echo_gate.feed_inbound(pcm) if self.echo_gate else None
+                )
+                committed = self.barge.feed(
+                    pcm,
+                    is_speech=is_speech,
+                    speech_prob=self.vad.prob if self.vad else None,
+                    echo_correlation=echo_correlation,
+                )
+                if committed:
+                    self._interrupt()
+                elif self.tap and self.barge.last_candidate:
+                    candidate = self.barge.last_candidate
+                    self.tap.event(
+                        "barge_candidate",
+                        reason=candidate.reason,
+                        prob=candidate.prob,
+                        corr=candidate.corr,
+                    )
             return
 
         # A completed task's callback normally replays first, but finish it
@@ -900,6 +1012,25 @@ class PhoneCall:
         self.endpointer.prime(frames)
         asyncio.create_task(self._flush_playback())
 
+    def _reset_barge_in(self) -> None:
+        """Start a reply with empty sustain and inbound comparison windows."""
+        self.barge.reset()
+        echo_gate = getattr(self, "echo_gate", None)
+        if echo_gate:
+            echo_gate.reset_inbound()
+
+    def _feed_echo_reference(self, frame: bytes, codec: str) -> None:
+        """Tee one successfully sent transport frame into the echo gate."""
+        echo_gate = getattr(self, "echo_gate", None)
+        if echo_gate is None:
+            return
+        pcm = (
+            np.frombuffer(frame, dtype=np.int16)
+            if codec == "l16"
+            else ulaw_decode(frame)
+        )
+        echo_gate.feed_outbound(pcm)
+
     async def _flush_playback(self) -> None:
         """Clear the bounded prebuffer surplus queued by frame pacing.
 
@@ -972,9 +1103,10 @@ class PhoneCall:
         buffering, and barge-in semantics stay untouched. The stop event is
         checked before every frame so cue audio can never interleave with a
         reply that is starting."""
+        codec = phone_codec()
         frames = (
             pcm48k_to_l16_frames(pcm48k)
-            if phone_codec() == "l16"
+            if codec == "l16"
             else pcm48k_to_ulaw_frames(pcm48k)
         )
         pacer = _phone_frame_pacer()
@@ -989,6 +1121,7 @@ class PhoneCall:
             await self.ws.send_json(
                 {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
             )
+            self._feed_echo_reference(frame, codec)
             if self.tap:
                 self.tap.outbound_frame(frame)
 
@@ -1114,7 +1247,7 @@ class PhoneCall:
 
         self._playback_flush_sent = False
         self.speaking = True
-        self.barge.reset()
+        self._reset_barge_in()
         chunker = TextChunker()
         first_spoken_at: float | None = None
         reply_complete = False
@@ -1537,6 +1670,7 @@ class PhoneCall:
                 await self.ws.send_json(
                     {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
                 )
+                self._feed_echo_reference(frame, codec)
                 if tap and send_times is not None:
                     sent_at = pacer.now()
                     tap.outbound_frame(frame)
@@ -1618,7 +1752,7 @@ class PhoneCall:
             return
         self._playback_flush_sent = False
         self.speaking = True
-        self.barge.reset()
+        self._reset_barge_in()
         try:
             await self._speak_sentences(self._speech_units(text))
         finally:
