@@ -462,10 +462,10 @@ class Session:
         log.info("Voice set: %s (speed=%.2f)", self.voice_id, self.speed)
 
     def set_speech_mode(self, mode: str) -> None:
-        """Select the reversible raw/prepared path for subsequent turns."""
+        """Select raw / prepared (streaming) / batch for subsequent turns."""
 
-        if mode not in {"raw", "prepared"}:
-            raise ValueError("speech mode must be raw or prepared")
+        if mode not in {"raw", "prepared", "batch"}:
+            raise ValueError("speech mode must be raw, prepared, or batch")
         self.speech_mode = mode
         log.info("Speech preparation mode set: %s", mode)
 

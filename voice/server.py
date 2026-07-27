@@ -34,7 +34,12 @@ from voice.flow_session import (
     set_region_model,
 )
 from voice.text_chunker import TextChunker
-from voice.speech_preparer import SPEECH_COMPILER_VERSION, SpeechPlan
+from voice.speech_preparer import (
+    NORMALIZER_VERSION,
+    SPEECH_COMPILER_VERSION,
+    SpeechPlan,
+    StreamingSpeechCompiler,
+)
 from voice.processing_audio import processing_chime
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
@@ -90,7 +95,24 @@ METRICS = metrics_db.init_db()
 
 def _speech_default_mode() -> str:
     enabled = os.environ.get("NANO_CLAW_SPEECH_PREPARATION", "1").strip().lower()
-    return "raw" if enabled in {"0", "false", "off", "no", "raw"} else "prepared"
+    if enabled in {"0", "false", "off", "no", "raw"}:
+        return "raw"
+    if enabled == "batch":
+        return "batch"
+    return "prepared"
+
+
+def _speech_compile_env_params() -> tuple[int, int]:
+    """(max_words, max_chunk_duration_ms) for the browser speech compiler."""
+    try:
+        max_words = int(os.environ.get("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
+    except ValueError:
+        max_words = 18
+    try:
+        max_duration = int(os.environ.get("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
+    except ValueError:
+        max_duration = 2500
+    return max_words, max_duration
 
 
 def _ws_audio_enabled() -> bool:
@@ -1688,8 +1710,17 @@ async def _consume_sse(
     first_delta = None
     first_audio = None
     chunker = TextChunker()
-    prepared_mode = getattr(session, "speech_mode", "raw") == "prepared"
+    speech_mode = getattr(session, "speech_mode", "raw")
+    prepared_mode = speech_mode in ("prepared", "batch")
+    streaming_prepared = speech_mode == "prepared"
     prepared_parts: list[str] = []
+    # Streaming prepared speech: sentences compile and play while the model
+    # writes. held_turn falls back to compile-at-final when the server may
+    # rewrite the reply (deep turns, held-response synthetic deltas).
+    stream_compiler: StreamingSpeechCompiler | None = None
+    stream_emitted: list[Any] = []
+    stream_held = False
+    stream_saw_delta = False
     loop = asyncio.get_running_loop()
     total_bytes = 0
     event = ""
@@ -1738,6 +1769,35 @@ async def _consume_sse(
             session._deep_projection_pending = False
             await ws.send_json({"type": "deep_projection_ready"})
 
+    async def send_streaming_plan_summary() -> None:
+        """The single per-turn speech_plan message, built from what actually
+        streamed (normalizations aren't tracked per-feed, hence 0)."""
+        if getattr(ws, "closed", False):
+            return
+        await ws.send_json(
+            {
+                "type": "speech_plan",
+                "compilerVersion": SPEECH_COMPILER_VERSION,
+                "normalizerVersion": NORMALIZER_VERSION,
+                "mode": "deterministic",
+                "actsProvenance": "text_only",
+                "guaranteeLevel": "text_structural",
+                "chunkCount": len(stream_emitted),
+                "normalizationCount": 0,
+                "estimatedDurationMs": sum(
+                    chunk.estimated_duration_ms + chunk.pause_after_ms
+                    for chunk in stream_emitted
+                ),
+            }
+        )
+
+    async def speak_streamed_chunks(chunks) -> None:
+        for planned in chunks:
+            stream_emitted.append(planned)
+            await speak_chunk(
+                planned.text, prepared_chunk=planned, emit_text=False
+            )
+
     async def speak_complete_prepared(source_text: str) -> None:
         """Compile once, then play every declared chunk in order."""
 
@@ -1783,10 +1843,33 @@ async def _consume_sse(
                     if prepared_mode:
                         prepared_parts.append(delta)
                         await ws.send_json({"type": "agent_reply_delta", "text": delta})
+                        if (
+                            streaming_prepared
+                            and not stream_held
+                            and isinstance(delta, str)
+                            and delta
+                        ):
+                            if not stream_saw_delta and len(delta) > 350:
+                                # The server's held-response synthetic delta:
+                                # the text may still be guard-rewritten, so
+                                # this turn compiles at final instead.
+                                stream_held = True
+                            else:
+                                if stream_compiler is None:
+                                    words, duration = _speech_compile_env_params()
+                                    stream_compiler = StreamingSpeechCompiler(
+                                        max_words_per_chunk=words,
+                                        max_chunk_duration_ms=duration,
+                                    )
+                                await speak_streamed_chunks(
+                                    stream_compiler.feed(delta)
+                                )
+                            stream_saw_delta = True
                     else:
                         for chunk in chunker.push(delta):
                             await speak_chunk(chunk)
                 elif ev == "deep_started":
+                    stream_held = True
                     acknowledgement = obj.get(
                         "acknowledgement", "Let me think deeply about this."
                     )
@@ -1854,9 +1937,18 @@ async def _consume_sse(
                 elif ev == "tool_pending":
                     session._deep_projection_pending = False
                     if prepared_mode:
-                        prepared_text = "".join(prepared_parts).strip()
-                        if prepared_text:
-                            await speak_complete_prepared(prepared_text)
+                        if (
+                            streaming_prepared
+                            and stream_compiler is not None
+                            and not stream_held
+                        ):
+                            # Sentences already streamed; only flush the tail.
+                            await speak_streamed_chunks(stream_compiler.finish(None))
+                            await send_streaming_plan_summary()
+                        else:
+                            prepared_text = "".join(prepared_parts).strip()
+                            if prepared_text:
+                                await speak_complete_prepared(prepared_text)
                     else:
                         tail = chunker.flush()
                         if tail:
@@ -1892,7 +1984,31 @@ async def _consume_sse(
                             if isinstance(response_text, str) and response_text.strip()
                             else "".join(prepared_parts).strip()
                         )
-                        if prepared_text:
+                        if (
+                            streaming_prepared
+                            and stream_compiler is not None
+                            and not stream_held
+                        ):
+                            fed = stream_compiler.fed_text.strip()
+                            if (
+                                stream_emitted
+                                and prepared_text
+                                and prepared_text != fed
+                                and not prepared_text.startswith(fed)
+                            ):
+                                # Server rewrote the reply after sentences were
+                                # already spoken — never double-speak.
+                                log.warning(
+                                    "Prepared stream: final response diverged"
+                                    " from streamed deltas — tail withheld"
+                                )
+                                await send_streaming_plan_summary()
+                            else:
+                                await speak_streamed_chunks(
+                                    stream_compiler.finish(prepared_text or None)
+                                )
+                                await send_streaming_plan_summary()
+                        elif prepared_text:
                             await speak_complete_prepared(prepared_text)
                     else:
                         tail = chunker.flush()

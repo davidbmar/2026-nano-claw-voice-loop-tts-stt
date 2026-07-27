@@ -213,3 +213,92 @@ def test_deep_projection_barge_in_is_suppressed_until_answer_audio():
         run(server._suppress_deep_projection_barge_in(websocket, session))
         is False
     )
+
+
+# ── Web console: streaming prepared speech ──────────────────────────────────
+
+
+def _drain_sse(session, response):
+    ws = FakeWebSocket()
+
+    async def exercise():
+        await server._consume_sse(ws, session, response)
+
+    run(exercise())
+    return ws
+
+
+def test_web_prepared_streaming_speaks_sentences_before_final():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    full = "One is done. Two is next."
+
+    class GatedResponse:
+        async def aiter_lines(self):
+            for line in (
+                "event: delta",
+                'data: {"text": "One is done. Two is next. "}',
+                "",
+            ):
+                yield line
+            for _ in range(200):
+                if session.chunks:
+                    break
+                await asyncio.sleep(0.005)
+            assert session.chunks, "nothing was spoken before final arrived"
+            final = json.dumps({"response": full})
+            for line in ("event: final", f"data: {final}", ""):
+                yield line
+
+    ws = _drain_sse(session, GatedResponse())
+    assert session.chunks == [c.text for c in compile_speech(full).chunks]
+    plans = [m for m in ws.messages if m.get("type") == "speech_plan"]
+    assert plans and plans[-1]["chunkCount"] == len(session.chunks)
+    # The transcript still received the raw deltas.
+    assert any(m.get("type") == "agent_reply_delta" for m in ws.messages)
+
+
+def test_web_prepared_streaming_mismatch_never_double_speaks():
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    response = FakeResponse(
+        [
+            ("delta", {"text": "Alpha beta gamma. Delta epsilon "}),
+            ("final", {"response": "A completely rewritten reply."}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == ["Alpha beta gamma."]
+
+
+def test_web_batch_mode_speaks_only_at_final():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "batch"
+    session.prepare_speech = compile_speech
+    full = "One is done. Two is next. Three lands."
+    response = FakeResponse(
+        [
+            ("delta", {"text": "One is done. Two is next. "}),
+            ("delta", {"text": "Three lands."}),
+            ("final", {"response": full}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == [c.text for c in compile_speech(full).chunks]
+
+
+def test_web_set_speech_mode_accepts_batch():
+    from voice.webrtc import Session
+
+    session = Session.__new__(Session)
+    session.set_speech_mode("batch")
+    assert session.speech_mode == "batch"
+    try:
+        session.set_speech_mode("bogus")
+        raise AssertionError("bogus mode accepted")
+    except ValueError:
+        pass
