@@ -50,6 +50,16 @@ source `measured_peak_dbfs`, and `applied_gain_db`. The `tts_48k.wav` tap stays
 before normalization, so the event explains the gain between that source and
 the resampler rather than hiding the original TTS level.
 
+Streaming prepared speech changes the expected ordering on multi-sentence
+turns: the first `synth_start` now precedes `agent_done`, because sentences
+compile and synthesize while the model is still writing. `thinking_cue_start`
+/ `thinking_cue_stop` (with `ticks`) bracket the acknowledgment-chime +
+clock-tick window between utterance accept and first speech. A rare
+`prepared_stream_mismatch` event means the server rewrote the reply after
+streamed sentences were already spoken; the rewritten tail was deliberately
+not spoken (never double-speak) and the assistant_turn payload carries
+`preparedStreamMismatch: true`.
+
 ## Enable and report a tap
 
 Set the variables in the voice server's environment, then restart that

@@ -312,3 +312,204 @@ def test_phone_hangup_cancels_active_pipeline_synthesis():
     cancelled, pipelines = run(exercise())
     assert cancelled
     assert pipelines == set()
+
+
+# ── Streaming prepared speech (sentence-level compilation) ──────────────────
+
+
+def _drive_stream(lines_source, tap_events=None, synth_gate=None):
+    """Run _stream_reply against a fake SSE source; return synthesized units.
+
+    PhoneCall must be constructed inside the loop (its constructor spawns
+    the idle watchdog task). ``synth_gate`` is set the moment the first unit
+    reaches synthesis — used to hold `final` back and prove streaming.
+    """
+    from types import SimpleNamespace
+
+    class FakeResponse:
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            async for line in lines_source():
+                yield line
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class FakeHttp:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+        async def aclose(self):
+            return None
+
+    async def exercise():
+        call = PhoneCall(object(), "prepared-stream")
+        await call._http.aclose()
+        call._http = FakeHttp()
+        if tap_events is not None:
+            call.tap = SimpleNamespace(
+                event=lambda name, **kw: tap_events.append((name, kw)),
+                outbound_frame=lambda frame: None,
+                close=lambda: None,
+            )
+        synthesized = []
+
+        async def synthesize(sentence):
+            if synth_gate is not None:
+                synth_gate.set()
+            synthesized.append(sentence)
+            await asyncio.sleep(0)
+            return b"pcm"
+
+        async def play(audio):
+            await asyncio.sleep(0)
+
+        call._synthesize_sentence = synthesize
+        call._play_synthesized = play
+        try:
+            await asyncio.wait_for(call._stream_reply("caller"), timeout=5)
+        finally:
+            await call.close()
+        return synthesized
+
+    return run(exercise())
+
+
+def _texts(units):
+    return [getattr(unit, "text", unit) for unit in units]
+
+
+def _sse(*events):
+    async def source():
+        for name, payload in events:
+            yield f"event: {name}"
+            yield f"data: {payload}"
+            yield ""
+
+    return source
+
+
+def test_prepared_streaming_speaks_before_final(monkeypatch):
+    # The proof that streaming streams: `final` is held back until the first
+    # sentence has already reached synthesis. Batch mode would deadlock here
+    # (the wait_for timeout in the driver is the tripwire).
+    import json as jsonlib
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    gate = asyncio.Event()
+    final = jsonlib.dumps({"response": "One is done. Two is next."})
+
+    async def source():
+        yield "event: delta"
+        yield 'data: {"text": "One is done. Two is next. "}'
+        yield ""
+        await gate.wait()
+        yield "event: final"
+        yield f"data: {final}"
+        yield ""
+
+    synthesized = _drive_stream(source, synth_gate=gate)
+    assert _texts(synthesized) == ["One is done.", "Two is next."]
+
+
+def test_prepared_streaming_final_equal_matches_batch(monkeypatch):
+    import json as jsonlib
+
+    from voice.speech_preparer import compile_speech
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    full = "The launch is Friday. Gates open early, so come out. Bring water."
+    synthesized = _drive_stream(
+        _sse(
+            ("delta", '{"text": "The launch is Friday. Gates open "}'),
+            ("delta", '{"text": "early, so come out. Bring water."}'),
+            ("final", jsonlib.dumps({"response": full})),
+        )
+    )
+    assert _texts(synthesized) == [c.text for c in compile_speech(full).chunks]
+    # Streamed chunks + finish tail: only the last unit carries the tail pad.
+    assert synthesized[-1].pause_after_ms == FINAL_TAIL_PAD_MS
+    assert all(
+        unit.pause_after_ms != FINAL_TAIL_PAD_MS for unit in synthesized[:-1]
+    )
+
+
+def test_prepared_streaming_mismatch_never_double_speaks(monkeypatch):
+    import json as jsonlib
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    tap_events = []
+    synthesized = _drive_stream(
+        _sse(
+            ("delta", '{"text": "Alpha beta gamma. Delta epsilon "}'),
+            ("final", jsonlib.dumps({"response": "A completely rewritten reply."})),
+        ),
+        tap_events=tap_events,
+    )
+    # Only the streamed prefix was spoken; the rewritten reply never plays.
+    assert _texts(synthesized) == ["Alpha beta gamma."]
+    assert any(name == "prepared_stream_mismatch" for name, _ in tap_events)
+
+
+def test_prepared_streaming_giant_first_delta_compiles_at_final(monkeypatch):
+    # A held-response turn arrives as one giant synthetic delta right before
+    # final; its text may have been guard-rewritten, so nothing streams.
+    import json as jsonlib
+
+    from voice.speech_preparer import compile_speech
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    big = ("This reply was held and rewritten by the server guards. " * 8).strip()
+    synthesized = _drive_stream(
+        _sse(
+            ("delta", jsonlib.dumps({"text": big})),
+            ("final", jsonlib.dumps({"response": big})),
+        )
+    )
+    assert _texts(synthesized) == [c.text for c in compile_speech(big).chunks]
+
+
+def test_batch_mode_still_compiles_only_at_final(monkeypatch):
+    import json as jsonlib
+
+    from voice.speech_preparer import compile_speech
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "batch")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    full = "One is done. Two is next. Three lands."
+    synthesized = _drive_stream(
+        _sse(
+            ("delta", '{"text": "One is done. Two is next. "}'),
+            ("delta", '{"text": "Three lands."}'),
+            ("final", jsonlib.dumps({"response": full})),
+        )
+    )
+    assert _texts(synthesized) == [c.text for c in compile_speech(full).chunks]
+
+
+def test_deep_started_turn_holds_streaming_until_final(monkeypatch):
+    import json as jsonlib
+
+    from voice.speech_preparer import compile_speech
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", "1")
+    monkeypatch.setenv("NANO_CLAW_PAUSE_JITTER", "0")
+    full = "Deep answer one. Deep answer two."
+    synthesized = _drive_stream(
+        _sse(
+            ("deep_started", '{"acknowledgement": "Let me think."}'),
+            ("delta", '{"text": "Pre-guard partial text. "}'),
+            ("final", jsonlib.dumps({"response": full})),
+        )
+    )
+    assert _texts(synthesized)[0] == "Let me think."
+    assert _texts(synthesized)[1:] == [c.text for c in compile_speech(full).chunks]

@@ -121,11 +121,12 @@
             <div class="pipe-row">
               <label
                 for="speech-mode-select"
-                title="Phone delivery: raw speaks whole sentences; prepared runs the speech compiler"
+                title="Phone delivery: prepared streams the speech compiler sentence-by-sentence; batch compiles after the full reply; raw skips the compiler"
                 >SPEECH</label
               >
               <select id="speech-mode-select" aria-label="Phone speech delivery mode">
-                <option value="prepared">Prepared (compiled)</option>
+                <option value="prepared">Prepared (streaming)</option>
+                <option value="batch">Prepared (batch)</option>
                 <option value="raw">Raw (whole sentences)</option>
               </select>
             </div>

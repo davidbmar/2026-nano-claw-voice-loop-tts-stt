@@ -625,6 +625,10 @@ def test_phone_config_toggles_speech_mode_live(monkeypatch):
     status, body = _config_roundtrip("post", payload={"speech_mode": "raw"})
     assert status == 200
     assert body["speech_mode"] == "raw"
+    # Batch keeps the pre-streaming compile-at-final behavior available.
+    status, body = _config_roundtrip("post", payload={"speech_mode": "batch"})
+    assert status == 200
+    assert body["speech_mode"] == "batch"
     # And back.
     _, body = _config_roundtrip("post", payload={"speech_mode": "prepared"})
     assert body["speech_mode"] == "prepared"

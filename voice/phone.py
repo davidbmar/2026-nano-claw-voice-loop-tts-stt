@@ -77,6 +77,7 @@ from voice.sentence_pipeline import SentencePipeline
 from voice.speech_preparer import (
     SPEECH_COMPILER_VERSION,
     SpeechChunk,
+    StreamingSpeechCompiler,
     compile_speech,
 )
 from voice.text_chunker import TextChunker
@@ -226,7 +227,7 @@ def _valid_setting(name: str, value: str) -> bool:
     if name == "NANO_CLAW_PHONE_STT_SIZE":
         return value in ("tiny", "base", "small", "medium")
     if name == "NANO_CLAW_PHONE_SPEECH_PREPARATION":
-        return value in ("1", "raw")
+        return value in ("1", "raw", "batch")
     if name == "NANO_CLAW_PHONE_VAD":
         return value in VAD_MODES
     return False
@@ -359,13 +360,34 @@ def barge_in_enabled() -> bool:
 
 
 def phone_speech_mode() -> str:
-    """Prepared speech is the default; raw remains an instant rollback."""
+    """"prepared" (sentence-streaming compilation, the default), "batch"
+    (compile only after the full reply — the pre-streaming behavior, kept
+    as an escape hatch), or "raw" (no speech compiler at all)."""
 
     value = _cfg(
         "NANO_CLAW_PHONE_SPEECH_PREPARATION",
         _cfg("NANO_CLAW_SPEECH_PREPARATION", "1"),
     ).lower()
-    return "raw" if value in ("0", "false", "off", "no", "raw") else "prepared"
+    if value in ("0", "false", "off", "no", "raw"):
+        return "raw"
+    if value == "batch":
+        return "batch"
+    return "prepared"
+
+
+def _speech_compile_params() -> tuple[int, int]:
+    """(max_words, max_chunk_duration_ms) for the speech compiler."""
+    try:
+        max_words = int(_cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
+    except ValueError:
+        _warn_config_fallback("NANO_CLAW_SPEECH_MAX_WORDS", _cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"), 18)
+        max_words = 18
+    try:
+        max_duration = int(_cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
+    except ValueError:
+        _warn_config_fallback("NANO_CLAW_SPEECH_MAX_CHUNK_MS", _cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"), 2500)
+        max_duration = 2500
+    return max_words, max_duration
 
 
 def _phone_gain_normalizer() -> SentencePeakNormalizer:
@@ -1075,6 +1097,9 @@ class PhoneCall:
         # Which model actually wrote the turn (fallback-aware, from the API's
         # debug payload); requested is present only when a fallback answered.
         turn_model: dict[str, str | None] = {"served": None, "requested": None}
+        # Streaming prepared speech: set when the final response diverged from
+        # the streamed deltas (guard rewrite) — surfaced on the turn event.
+        stream_flags = {"mismatch": False}
 
         def record_turn_model(obj: dict) -> None:
             debug = obj.get("debug")
@@ -1131,8 +1156,25 @@ class PhoneCall:
                     event = ""
                     data_lines: list[str] = []
                     last_processing_cue = 0.0
-                    prepared = phone_speech_mode() == "prepared"
-                    prepared_parts: list[str] = []
+                    mode = phone_speech_mode()
+                    prepared_parts: list[str] = []  # batch mode + held turns
+                    speech_compiler: StreamingSpeechCompiler | None = None
+                    yielded_prepared = False
+                    # A held turn buffers everything and compiles at final —
+                    # used when the server may rewrite the reply after
+                    # streaming (deep turns, held-response synthetic deltas).
+                    held_turn = False
+                    saw_delta = False
+
+                    def mark_first_spoken() -> None:
+                        nonlocal first_spoken_at
+                        if first_spoken_at is None:
+                            first_spoken_at = time.monotonic()
+                            log.info(
+                                "[phone %s] first sentence at %.1fs",
+                                self.call_id[:8], first_spoken_at - t0,
+                            )
+
                     async for raw in resp.aiter_lines():
                         if self.closed or not self.speaking:
                             return  # hangup or barge-in: stop consuming the stream
@@ -1145,19 +1187,39 @@ class PhoneCall:
                             obj = json.loads(event_payload)
                             if ev == "delta":
                                 delta = obj.get("text", "")
-                                if prepared:
-                                    if isinstance(delta, str):
+                                if not isinstance(delta, str) or not delta:
+                                    continue
+                                if mode == "batch" or held_turn:
+                                    prepared_parts.append(delta)
+                                    continue
+                                if mode == "prepared":
+                                    # A giant first delta is the server's
+                                    # held-response synthetic delta: the text
+                                    # may have been guard-rewritten, so the
+                                    # whole turn compiles at final instead of
+                                    # streaming pre-rewrite sentences.
+                                    if not saw_delta and len(delta) > 350:
+                                        saw_delta = True
+                                        held_turn = True
                                         prepared_parts.append(delta)
+                                        continue
+                                    saw_delta = True
+                                    if speech_compiler is None:
+                                        words, duration = _speech_compile_params()
+                                        speech_compiler = StreamingSpeechCompiler(
+                                            max_words_per_chunk=words,
+                                            max_chunk_duration_ms=duration,
+                                        )
+                                    for unit in speech_compiler.feed(delta):
+                                        mark_first_spoken()
+                                        yielded_prepared = True
+                                        yield unit
                                     continue
                                 for chunk in chunker.push(delta):
-                                    if first_spoken_at is None:
-                                        first_spoken_at = time.monotonic()
-                                        log.info(
-                                            "[phone %s] first sentence at %.1fs",
-                                            self.call_id[:8], first_spoken_at - t0,
-                                        )
+                                    mark_first_spoken()
                                     yield chunk
                             elif ev == "deep_started":
+                                held_turn = True
                                 acknowledgement = obj.get(
                                     "acknowledgement",
                                     "Let me think deeply about this.",
@@ -1183,20 +1245,59 @@ class PhoneCall:
                                 record_turn_model(obj)
                                 record_agent_done()
                                 reply_complete = True
-                                if prepared:
-                                    response_text = obj.get("response", "")
-                                    source_text = (
-                                        response_text.strip()
-                                        if isinstance(response_text, str)
-                                        and response_text.strip()
-                                        else "".join(prepared_parts).strip()
-                                    )
-                                    for unit in self._speech_units(source_text):
-                                        yield unit
-                                else:
+                                response_text = obj.get("response", "")
+                                response_text = (
+                                    response_text.strip()
+                                    if isinstance(response_text, str)
+                                    else ""
+                                )
+                                if mode == "raw":
                                     tail = chunker.flush()
                                     if tail:
                                         yield tail
+                                elif (
+                                    mode == "batch"
+                                    or held_turn
+                                    or speech_compiler is None
+                                ):
+                                    source_text = (
+                                        response_text
+                                        or "".join(prepared_parts).strip()
+                                    )
+                                    for unit in self._speech_units(source_text):
+                                        mark_first_spoken()
+                                        yield unit
+                                else:
+                                    fed = speech_compiler.fed_text.strip()
+                                    if (
+                                        yielded_prepared
+                                        and response_text
+                                        and response_text != fed
+                                        and not response_text.startswith(fed)
+                                    ):
+                                        # The server rewrote the reply after
+                                        # we already spoke streamed sentences.
+                                        # Never double-speak: the streamed
+                                        # prefix is what the caller heard.
+                                        stream_flags["mismatch"] = True
+                                        if tap:
+                                            tap.event(
+                                                "prepared_stream_mismatch",
+                                                fed_len=len(fed),
+                                                final_len=len(response_text),
+                                            )
+                                        log.warning(
+                                            "[phone %s] final response diverged"
+                                            " from streamed deltas — tail not"
+                                            " spoken",
+                                            self.call_id[:8],
+                                        )
+                                    else:
+                                        for unit in speech_compiler.finish(
+                                            response_text or None
+                                        ):
+                                            mark_first_spoken()
+                                            yield unit
                             elif ev == "tool_pending":
                                 record_turn_model(obj)
                                 yield (
@@ -1235,6 +1336,11 @@ class PhoneCall:
                         "model": turn_model["served"],
                         "modelRequested": turn_model["requested"],
                         "modelFallback": bool(turn_model["requested"]),
+                        **(
+                            {"preparedStreamMismatch": True}
+                            if stream_flags["mismatch"]
+                            else {}
+                        ),
                     },
                 )
             if not self.interrupted:
@@ -1254,18 +1360,9 @@ class PhoneCall:
     def _speech_units(text: str) -> list[str | SpeechChunk]:
         """Compile one complete phone response, retaining the raw rollback."""
 
-        if phone_speech_mode() != "prepared":
+        if phone_speech_mode() == "raw":
             return PhoneCall._sentences(text)
-        try:
-            max_words = int(_cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
-        except ValueError:
-            _warn_config_fallback("NANO_CLAW_SPEECH_MAX_WORDS", _cfg("NANO_CLAW_SPEECH_MAX_WORDS", "18"), 18)
-            max_words = 18
-        try:
-            max_duration = int(_cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
-        except ValueError:
-            _warn_config_fallback("NANO_CLAW_SPEECH_MAX_CHUNK_MS", _cfg("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"), 2500)
-            max_duration = 2500
+        max_words, max_duration = _speech_compile_params()
         try:
             plan = compile_speech(
                 text,
@@ -1729,13 +1826,15 @@ async def config_set_handler(request: web.Request) -> web.Response:
         _overrides["NANO_CLAW_PHONE_STT_SIZE"] = size
     if "speech_mode" in body:
         mode = str(body["speech_mode"]).strip().lower()
-        if mode not in ("prepared", "raw"):
+        if mode not in ("prepared", "batch", "raw"):
             return web.Response(status=400, text=f"unknown speech mode: {mode}")
-        # "raw" speaks whole sentences (no clause fragmentation); "prepared"
-        # runs the speech compiler. Read per response, so it applies to the
-        # next agent turn even mid-call. Lets the console A/B the two live.
+        # "prepared" streams the speech compiler sentence-by-sentence;
+        # "batch" compiles only after the full reply (the pre-streaming
+        # behavior, kept as an escape hatch); "raw" skips the compiler.
+        # Read per response, so it applies to the next agent turn even
+        # mid-call. Lets the console A/B the modes live.
         _overrides["NANO_CLAW_PHONE_SPEECH_PREPARATION"] = (
-            "1" if mode == "prepared" else "raw"
+            "1" if mode == "prepared" else mode
         )
 
     _persist_overrides()

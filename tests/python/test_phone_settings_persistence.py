@@ -147,6 +147,26 @@ def test_vad_choice_persists_and_reloads(phone_env, monkeypatch):
     assert phone.get_vad_mode() == "energy"
 
 
+def test_batch_speech_mode_persists_and_reloads(phone_env):
+    async def exercise():
+        client = TestClient(TestServer(_app()))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/phone/config", json={"speech_mode": "batch"}
+            )
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    run(exercise())
+    saved = json.loads(phone_env.read_text(encoding="utf-8"))
+    assert saved["NANO_CLAW_PHONE_SPEECH_PREPARATION"] == "batch"
+    phone._overrides.clear()
+    phone._load_persisted_overrides()
+    assert phone.phone_speech_mode() == "batch"
+
+
 def test_settings_file_only_ever_contains_known_keys(phone_env):
     phone._overrides["NANO_CLAW_PHONE_VOICE"] = "lux_george"
     phone._overrides["NOT_A_SETTING"] = "leak"

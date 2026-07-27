@@ -63,7 +63,7 @@ underneath.
 |---|---|
 | `call_start` | codec, vad, voice, engine (TTS catalog engine), sttSize, speed, model (null → server default chain), mode (`persona`/`scheduler`), flowDomain, sessionId |
 | `user_turn` | text (verbatim caller ASR) |
-| `assistant_turn` | text, mode (`persona`/`scheduler`/`greeting`/`idle`/`error`); persona adds complete + interrupted + model/modelRequested/modelFallback (the model that actually wrote the turn — differs from the request when the LLM fallback chain answered); scheduler adds outcome, slots, rejected, supervisorMs, turnsUsed, maxTurns, eventId, done, model |
+| `assistant_turn` | text, mode (`persona`/`scheduler`/`greeting`/`idle`/`error`); persona adds complete + interrupted + model/modelRequested/modelFallback (the model that actually wrote the turn — differs from the request when the LLM fallback chain answered) + preparedStreamMismatch (present/true only when the server rewrote the reply after streamed sentences were already spoken — the tail was withheld); scheduler adds outcome, slots, rejected, supervisorMs, turnsUsed, maxTurns, eventId, done, model |
 | `barge_in` | — |
 | `call_end` | — |
 

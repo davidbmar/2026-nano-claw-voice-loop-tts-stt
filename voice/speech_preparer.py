@@ -15,10 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import html
+import logging
 import os
 import random
 import re
 from typing import Callable, Literal
+
+log = logging.getLogger("nano-claw.speech")
 
 
 SPEECH_COMPILER_VERSION = "nanoclaw-speech-v1"
@@ -47,10 +50,6 @@ def _clause_min_words() -> int:
         return 3
 
 
-_CLAUSE_PAUSES_ON = _clause_pauses_enabled()
-_CLAUSE_MIN_WORDS = _clause_min_words()
-
-
 def _pause_ms(name: str, default: int) -> int:
     try:
         return max(0, min(2000, int(os.environ.get(name, str(default)))))
@@ -64,16 +63,18 @@ def _pause_ms(name: str, default: int) -> int:
 # (see prosody research; values are typical human reading pauses). Each is
 # env-tunable so cadence can be adjusted by ear without a rebuild. The pitch
 # move noted alongside (fall/rise) is rendered by the TTS from the punctuation
-# itself, not by this table.
-_PAUSE_AFTER_MS = {
-    "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 600),        # fall
-    "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 600),    # rise
-    "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 600),  # fall, energetic
-    "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 400),  # level/slight fall
-    "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 400),          # level
-    "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 270),          # slight rise, "more coming"
-    "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 270),        # mid-clause split
-}
+# itself, not by this table. Read per call (cold path) so tests and live
+# tuning never need an import-order-sensitive module reload.
+def _pause_table() -> dict[str, int]:
+    return {
+        "period": _pause_ms("NANO_CLAW_PAUSE_PERIOD_MS", 600),        # fall
+        "question": _pause_ms("NANO_CLAW_PAUSE_QUESTION_MS", 600),    # rise
+        "exclamation": _pause_ms("NANO_CLAW_PAUSE_EXCLAMATION_MS", 600),  # fall, energetic
+        "semicolon": _pause_ms("NANO_CLAW_PAUSE_SEMICOLON_MS", 400),  # level/slight fall
+        "colon": _pause_ms("NANO_CLAW_PAUSE_COLON_MS", 400),          # level
+        "comma": _pause_ms("NANO_CLAW_PAUSE_COMMA_MS", 270),          # slight rise, "more coming"
+        "clause": _pause_ms("NANO_CLAW_PAUSE_CLAUSE_MS", 270),        # mid-clause split
+    }
 
 
 def _jitter_fraction() -> float:
@@ -87,15 +88,13 @@ def _jitter_fraction() -> float:
     return max(0.0, min(0.5, pct))
 
 
-_PAUSE_JITTER = _jitter_fraction()
-
-
 def _jitter_pause(ms: int) -> int:
     """Apply the anti-metronome wobble to one cadence pause. Never touches the
     final transport tail (that is a fixed guard, not conversational cadence)."""
-    if _PAUSE_JITTER <= 0 or ms <= 0:
+    jitter = _jitter_fraction()
+    if jitter <= 0 or ms <= 0:
         return ms
-    factor = 1.0 + random.uniform(-_PAUSE_JITTER, _PAUSE_JITTER)
+    factor = 1.0 + random.uniform(-jitter, jitter)
     return max(0, int(round(ms * factor)))
 
 ChunkKind = Literal["statement", "question", "list_item", "heading", "continuation"]
@@ -356,6 +355,59 @@ def _clean_inline(text: str) -> str:
 def _structured_segments(source: str) -> list[_Segment]:
     """Preserve paragraph/list boundaries that visual cleanup normally loses."""
 
+    return _parse_segments(source)[0]
+
+
+_STRUCT_LINE = re.compile(r"^(?:#{1,6}\s*.+|\d{1,2}[.)]\s+.+|[-*•]\s+.+)$")
+
+
+def _open_tail_raw(source: str) -> str:
+    """Return the raw text of the still-growable tail region, or "".
+
+    Streaming feeds arbitrary prefixes; a later delta can only rewrite text
+    that is not yet sealed by a structural boundary. Sealed: everything up to
+    the last blank line, and any heading/list line terminated by a newline.
+    Open: a trailing paragraph (even newline-terminated — the next line would
+    join it with a space), a heading/list line still missing its newline, and
+    anything ending in a bare carriage return (half of a split CRLF).
+    """
+
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip():
+        return ""
+    if re.search(r"\n[ \t]*\n[ \t]*$", normalized):
+        return ""  # sealed by a trailing blank line
+    lines = normalized.split("\n")
+    tail: list[str] = []
+    if normalized.endswith("\n"):
+        lines = lines[:-1]  # split artifact of the final newline
+    else:
+        # The last line has no newline yet — it is still growing. A growing
+        # structural line stands alone; a growing paragraph (or an ambiguous
+        # whitespace-only line that may yet become content) joins the
+        # paragraph lines before it.
+        last = lines[-1]
+        lines = lines[:-1]
+        if _STRUCT_LINE.match(last.strip()):
+            return last
+        tail.append(last)
+    # Walk back over newline-terminated lines: paragraph lines stay open
+    # (a future line would join them with a space); a confirmed blank line
+    # or a structural line seals everything before it.
+    for line in reversed(lines):
+        if not line.strip():
+            break
+        if _STRUCT_LINE.match(line.strip()):
+            break
+        tail.append(line)
+    if not any(part.strip() for part in tail):
+        return ""
+    return "\n".join(reversed(tail))
+
+
+def _parse_segments(source: str) -> tuple[list[_Segment], str]:
+    """Segments plus the raw text of the open (still-growable) tail region."""
+
     lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     segments: list[_Segment] = []
     paragraph: list[str] = []
@@ -430,7 +482,10 @@ def _structured_segments(source: str) -> list[_Segment]:
         merged.append(current)
         index += 1
 
-    return merged or [_Segment(_clean_inline(source), "statement")]
+    if not merged:
+        fallback = _clean_inline(source)
+        return [_Segment(fallback, "statement")], _open_tail_raw(source)
+    return merged, _open_tail_raw(source)
 
 
 def normalize_spoken_forms(text: str) -> tuple[str, tuple[NormalizationRecord, ...]]:
@@ -602,8 +657,9 @@ def _split_clauses(text: str) -> list[str]:
     ``_CLAUSE_MIN_WORDS`` words, so short appositives ("Well, sure") and lists of
     one-word items stay whole instead of turning staccato. Joining the pieces
     back with a single space reproduces the original text exactly."""
-    if not _CLAUSE_PAUSES_ON:
+    if not _clause_pauses_enabled():
         return [text]
+    clause_min_words = _clause_min_words()
     pieces: list[str] = []
     last_cut = 0
     for match in re.finditer(r"[,;]", text):
@@ -612,7 +668,7 @@ def _split_clauses(text: str) -> list[str]:
         right = text[cut:].strip()
         # Commas need the list/appositive guard; a semicolon is always a
         # deliberate break, so it splits whenever both sides are non-empty.
-        min_words = 1 if match.group() == ";" else _CLAUSE_MIN_WORDS
+        min_words = 1 if match.group() == ";" else clause_min_words
         if _word_count(left) >= min_words and _word_count(right) >= min_words:
             pieces.append(left)
             last_cut = cut
@@ -694,24 +750,125 @@ def _boundary_pause(
 ) -> int:
     # Read the actual terminal punctuation first, then fall back to the chunk
     # kind for splits that carry no punctuation of their own.
+    table = _pause_table()
     last = text.rstrip()[-1:] if text.rstrip() else ""
     if last == ",":
-        return _PAUSE_AFTER_MS["comma"]
+        return table["comma"]
     if last == ";":
-        return _PAUSE_AFTER_MS["semicolon"]
+        return table["semicolon"]
     if last == ":":
-        return _PAUSE_AFTER_MS["colon"]
+        return table["colon"]
     if last == "?":
-        return _PAUSE_AFTER_MS["question"]
+        return table["question"]
     if last == "!":
-        return _PAUSE_AFTER_MS["exclamation"]
+        return table["exclamation"]
     if last == ".":
-        return _PAUSE_AFTER_MS["period"]
+        return table["period"]
     # No terminal punctuation: a heading/list item reads like a full stop; any
     # other mid-clause split gets the short clause pause.
     if kind in ("heading", "list_item") or next_kind == "list_item":
-        return _PAUSE_AFTER_MS["period"]
-    return _PAUSE_AFTER_MS["clause"]
+        return table["period"]
+    return table["clause"]
+
+
+def _expand_sentences(
+    sentences: list[str],
+    segment_kind: ChunkKind,
+    max_words: int,
+    *,
+    first_index: int = 0,
+) -> list[tuple[str, ChunkKind]]:
+    """Expand normalized sentences into ordered (text, kind) units.
+
+    ``first_index`` is the sentence's position within its full segment so a
+    streamed prefix reproduces the batch continuation-kind decisions exactly.
+    """
+
+    units: list[tuple[str, ChunkKind]] = []
+    for sentence_index, sentence in enumerate(sentences, start=first_index):
+        sentence = _ensure_terminal(sentence)
+        sentence_kind: ChunkKind = segment_kind
+        if sentence_index and segment_kind in ("heading", "list_item"):
+            sentence_kind = "continuation"
+        # Break prose sentences at commas/semicolons so each clause gets its
+        # cadence pause. Headings and list items keep their structure whole.
+        clauses = (
+            _split_clauses(sentence)
+            if sentence_kind in ("statement", "question", "continuation")
+            else [sentence]
+        )
+        for clause in clauses:
+            for piece in _split_long_sentence(clause, max_words):
+                piece = _ensure_terminal(piece)
+                if piece:
+                    units.append((piece, _sentence_kind(piece, sentence_kind)))
+    return units
+
+
+def _expand_units(
+    source_text: str, max_words: int
+) -> tuple[list[tuple[str, ChunkKind]], list[NormalizationRecord]]:
+    """The full batch text→units pipeline (segments → normalize → expand)."""
+
+    units: list[tuple[str, ChunkKind]] = []
+    all_records: list[NormalizationRecord] = []
+    for segment in _structured_segments(source_text):
+        normalized, records = normalize_spoken_forms(segment.text)
+        if normalized:
+            all_records.extend(records)
+            sentences = _split_sentences(normalized) or [normalized]
+            units.extend(_expand_sentences(sentences, segment.kind, max_words))
+    return units, all_records
+
+
+def _build_chunks(
+    units: list[tuple[str, ChunkKind]],
+    *,
+    max_duration: int,
+    sequence_offset: int = 0,
+    more_coming: bool = False,
+) -> list[SpeechChunk]:
+    """Turn ordered units into SpeechChunks.
+
+    ``more_coming=True`` means later units exist beyond this batch: the last
+    unit here gets its punctuation pause, never the final transport tail.
+    (Safe because pauses are punctuation-local — ``_boundary_pause`` only
+    consults ``next_kind`` for units without terminal punctuation, which
+    ``_ensure_terminal`` rules out.) Jitter draws exactly one random sample
+    per non-final chunk, in unit order, matching the batch draw sequence.
+    """
+
+    chunks: list[SpeechChunk] = []
+    for index, (text, kind) in enumerate(units):
+        if index + 1 < len(units):
+            next_text, next_kind = units[index + 1]
+        elif more_coming:
+            next_text, next_kind = "", None  # non-None: punctuation pause path
+        else:
+            next_text, next_kind = None, None
+        sequence = sequence_offset + index
+        words = max(1, _word_count(text))
+        estimate = min(max_duration, max(600, round(words / 2.7 * 1000)))
+        chunks.append(
+            SpeechChunk(
+                chunk_id=f"chunk_{sequence}",
+                sequence=sequence,
+                text=text,
+                kind=kind,
+                estimated_duration_ms=estimate,
+                pause_after_ms=_pause_after(text, kind, next_text, next_kind),
+                is_final=not more_coming and index == len(units) - 1,
+            )
+        )
+    return chunks
+
+
+def _clamp_max_words(max_words_per_chunk: int) -> int:
+    return max(8, min(40, int(max_words_per_chunk)))
+
+
+def _clamp_max_duration(max_chunk_duration_ms: int) -> int:
+    return max(1_200, min(8_000, int(max_chunk_duration_ms)))
 
 
 def compile_speech(
@@ -724,54 +881,11 @@ def compile_speech(
 
     if not isinstance(source_text, str):
         raise TypeError("source_text must be a string")
-    max_words = max(8, min(40, int(max_words_per_chunk)))
-    max_duration = max(1_200, min(8_000, int(max_chunk_duration_ms)))
+    max_words = _clamp_max_words(max_words_per_chunk)
+    max_duration = _clamp_max_duration(max_chunk_duration_ms)
 
-    normalized_segments: list[_Segment] = []
-    all_records: list[NormalizationRecord] = []
-    for segment in _structured_segments(source_text):
-        normalized, records = normalize_spoken_forms(segment.text)
-        if normalized:
-            normalized_segments.append(_Segment(normalized, segment.kind))
-            all_records.extend(records)
-
-    units: list[tuple[str, ChunkKind]] = []
-    for segment in normalized_segments:
-        sentences = _split_sentences(segment.text) or [segment.text]
-        for sentence_index, sentence in enumerate(sentences):
-            sentence = _ensure_terminal(sentence)
-            sentence_kind = segment.kind
-            if sentence_index and segment.kind in ("heading", "list_item"):
-                sentence_kind = "continuation"
-            # Break prose sentences at commas/semicolons so each clause gets its
-            # cadence pause. Headings and list items keep their structure whole.
-            clauses = (
-                _split_clauses(sentence)
-                if sentence_kind in ("statement", "question", "continuation")
-                else [sentence]
-            )
-            for clause in clauses:
-                for piece in _split_long_sentence(clause, max_words):
-                    piece = _ensure_terminal(piece)
-                    if piece:
-                        units.append((piece, _sentence_kind(piece, sentence_kind)))
-
-    chunks: list[SpeechChunk] = []
-    for sequence, (text, kind) in enumerate(units):
-        next_text, next_kind = units[sequence + 1] if sequence + 1 < len(units) else (None, None)
-        words = max(1, _word_count(text))
-        estimate = min(max_duration, max(600, round(words / 2.7 * 1000)))
-        chunks.append(
-            SpeechChunk(
-                chunk_id=f"chunk_{sequence}",
-                sequence=sequence,
-                text=text,
-                kind=kind,
-                estimated_duration_ms=estimate,
-                pause_after_ms=_pause_after(text, kind, next_text, next_kind),
-                is_final=sequence == len(units) - 1,
-            )
-        )
+    units, all_records = _expand_units(source_text, max_words)
+    chunks = _build_chunks(units, max_duration=max_duration)
 
     return SpeechPlan(
         source_text=source_text,
@@ -779,3 +893,153 @@ def compile_speech(
         chunks=tuple(chunks),
         normalizations=tuple(all_records),
     )
+
+
+def _tail_holds_markup(raw: str) -> bool:
+    """True when the open tail contains markup a future delta could close.
+
+    ``_clean_inline`` rewrites paired constructs (code fences, links, bold),
+    so text inside an unclosed pair is not stable yet. Counting is
+    conservative: a stray odd asterisk merely delays emission until the
+    segment closes; it can never produce wrong speech.
+    """
+
+    if raw.count("```") % 2:
+        return True
+    if raw.count("`") % 2:
+        return True
+    if raw.count("[") != raw.count("]"):
+        return True
+    if raw.count("*") % 2:
+        return True
+    return False
+
+
+class StreamingSpeechCompiler:
+    """Sentence-level streaming front end for :func:`compile_speech`.
+
+    ``feed(delta)`` accumulates model deltas and returns SpeechChunks for the
+    units that are already *stable* — recomputed from the whole buffer every
+    call, so list numbering, label merges, and paragraph joins can never
+    drift from what batch compilation of the final text would produce. The
+    stability frontier holds back: the open (still-growable) tail region,
+    the last sentence of an open paragraph, short label-like segments that
+    may merge with a follower, and tails containing unclosed markup.
+
+    Invariant (tested): for ANY partitioning of the text into deltas,
+    ``feed*() + finish(None)`` yields chunks identical to
+    ``compile_speech(whole_text).chunks`` with jitter disabled. Emission is
+    strictly in order and each chunk draws jitter exactly once, so the
+    random draw sequence also matches batch — do not reorder or re-emit.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_words_per_chunk: int = DEFAULT_MAX_WORDS,
+        max_chunk_duration_ms: int = DEFAULT_MAX_CHUNK_DURATION_MS,
+    ) -> None:
+        # Pinned at construction: one turn must never mix two configs.
+        self._max_words = _clamp_max_words(max_words_per_chunk)
+        self._max_duration = _clamp_max_duration(max_chunk_duration_ms)
+        self._buffer = ""
+        self._emitted_texts: list[str] = []
+        self._finished = False
+
+    @property
+    def fed_text(self) -> str:
+        return self._buffer
+
+    @property
+    def emitted_count(self) -> int:
+        return len(self._emitted_texts)
+
+    def feed(self, delta: str) -> list[SpeechChunk]:
+        if self._finished or not isinstance(delta, str) or not delta:
+            return []
+        self._buffer += delta
+        units = self._stable_units()
+        new_units = units[len(self._emitted_texts):]
+        if not new_units:
+            return []
+        chunks = _build_chunks(
+            new_units,
+            max_duration=self._max_duration,
+            sequence_offset=len(self._emitted_texts),
+            more_coming=True,
+        )
+        self._emitted_texts.extend(text for text, _ in new_units)
+        return chunks
+
+    def finish(self, final_text: str | None = None) -> list[SpeechChunk]:
+        """Flush the remainder; the last chunk gets the final transport tail.
+
+        ``final_text`` replaces the fed buffer as the authoritative source
+        (the API's ``final.response`` can extend the streamed deltas). Units
+        already emitted are never re-spoken: on any divergence between what
+        was emitted and the final recompute, only units BEYOND the emitted
+        count are produced and the divergence is logged.
+        """
+
+        if self._finished:
+            return []
+        self._finished = True
+        source = final_text if final_text is not None else self._buffer
+        units, _records = _expand_units(source, self._max_words)
+        common = 0
+        for emitted, (text, _kind) in zip(self._emitted_texts, units):
+            if emitted != text:
+                break
+            common += 1
+        if common < len(self._emitted_texts):
+            log.warning(
+                "speech stream divergence at unit %d (emitted %d, recomputed %d)",
+                common,
+                len(self._emitted_texts),
+                len(units),
+            )
+        remaining = units[len(self._emitted_texts):]
+        chunks = _build_chunks(
+            remaining,
+            max_duration=self._max_duration,
+            sequence_offset=len(self._emitted_texts),
+            more_coming=False,
+        )
+        self._emitted_texts.extend(text for text, _ in remaining)
+        return chunks
+
+    def _stable_units(self) -> list[tuple[str, ChunkKind]]:
+        segments, open_raw = _parse_segments(self._buffer)
+        if not segments:
+            return []
+        hold_from = len(segments)
+        if open_raw:
+            hold_from -= 1
+        elif segments[-1].label_like and _word_count(segments[-1].text) <= 10:
+            # A closed short label may still merge with a future statement.
+            hold_from -= 1
+
+        units: list[tuple[str, ChunkKind]] = []
+        for segment in segments[:hold_from]:
+            normalized, _records = normalize_spoken_forms(segment.text)
+            if normalized:
+                sentences = _split_sentences(normalized) or [normalized]
+                units.extend(_expand_sentences(sentences, segment.kind, self._max_words))
+
+        # Partial emission from the open tail: everything but its last
+        # sentence is stable (no normalization pattern spans two sentence
+        # terminals; the held last sentence absorbs single-boundary patterns).
+        if open_raw and hold_from == len(segments) - 1:
+            tail = segments[-1]
+            may_merge = tail.label_like and _word_count(tail.text) <= 10
+            if not may_merge and not _tail_holds_markup(open_raw):
+                normalized, _records = normalize_spoken_forms(tail.text)
+                if normalized:
+                    sentences = _split_sentences(normalized)
+                    if len(sentences) >= 2:
+                        units.extend(
+                            _expand_sentences(
+                                sentences[:-1], tail.kind, self._max_words
+                            )
+                        )
+        return units
