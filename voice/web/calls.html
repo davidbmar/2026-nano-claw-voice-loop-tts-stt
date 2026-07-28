@@ -253,6 +253,27 @@
       padding: 0 0.9rem 0.4rem;
     }
 
+    /* Audio inspector */
+    #inspect-card { margin-top: 1.6rem; padding: 1rem 1.2rem; }
+    #inspect-canvas { width: 100%; display: block; border-radius: 8px;
+      background: rgba(0,0,0,.25); cursor: crosshair; margin-top: .5rem; }
+    .inspect-summary { font-size: .8rem; color: var(--muted); line-height: 1.7; }
+    .inspect-summary b { color: var(--text); font-weight: 600; }
+    .inspect-summary .warn { color: var(--accent); }
+    .inspect-summary .ok { color: var(--good); }
+    .inspect-words { font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: .72rem; color: var(--faint); margin-top: .4rem;
+      max-height: 4.5rem; overflow-y: auto; line-height: 1.8; }
+    .inspect-words span { padding: 0 .15rem; border-radius: 3px; }
+    .inspect-words span.now { background: rgba(var(--accent-rgb), .35); color: var(--text); }
+    .inspect-controls { display: flex; align-items: center; gap: .9rem;
+      margin-top: .6rem; flex-wrap: wrap; font-size: .78rem; color: var(--faint); }
+    .inspect-time { font-family: "SFMono-Regular", Consolas, monospace; color: var(--accent-2); }
+    .inspect-toggle { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
+    .inspect-hint { color: var(--faint); }
+    .inspect-detail { margin-top: .5rem; font-size: .78rem; color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace; min-height: 1.2rem; }
+
     /* Cost summary */
     #cost-card { margin-top: 1.6rem; padding: 1rem 1.2rem; }
     #cost-card .swatch {
@@ -339,6 +360,21 @@
         <summary id="log-summary">Call log</summary>
         <div id="log-lines"></div>
       </details>
+      <div id="inspect-card" class="glass" style="display:none">
+        <div class="lbl">Audio inspector — outbound leg</div>
+        <div id="inspect-summary" class="inspect-summary"></div>
+        <canvas id="inspect-canvas" height="150"></canvas>
+        <div id="inspect-words" class="inspect-words"></div>
+        <div class="inspect-controls">
+          <button class="ghost" id="inspect-play">▶ Play</button>
+          <span class="inspect-time" id="inspect-time">0.00s</span>
+          <label class="inspect-toggle">
+            <input type="checkbox" id="inspect-words-toggle"> align words (Whisper)
+          </label>
+          <span class="inspect-hint">click the waveform to seek · hover a seam for its edge scores</span>
+        </div>
+        <div id="inspect-detail" class="inspect-detail"></div>
+      </div>
       <div id="cost-card" class="glass" style="display:none">
         <div class="lbl">Cost breakdown</div>
         <table id="cost-table"></table>
@@ -695,6 +731,171 @@
       card.style.display = "block";
     }
 
+    // ── Audio inspector ──────────────────────────────────────────────────
+    // Everything here lives in AUDIO time: outbound.wav is the concatenation
+    // of frames actually sent, so its clock differs from the tap's wall clock
+    // whenever the line was silent. Seams come from the analyzer (detected in
+    // the waveform), never from summing per-sentence durations.
+    const inspect = { data: null, audio: null, pk: null, hover: null };
+
+    async function loadInspector(callPk, availability) {
+      const card = $("inspect-card");
+      inspect.pk = callPk;
+      inspect.data = null;
+      inspect.hover = null;
+      $("inspect-detail").textContent = "";
+      $("inspect-words").textContent = "";
+      if (!availability.outbound) { card.style.display = "none"; return; }
+      const wordsOn = $("inspect-words-toggle").checked;
+      const resp = await api(`/api/calls/${callPk}/inspect${wordsOn ? "?words=1" : ""}`);
+      if (!resp.ok) { card.style.display = "none"; return; }
+      const data = await resp.json();
+      if (!data.available) { card.style.display = "none"; return; }
+      inspect.data = data;
+      card.style.display = "block";
+      renderInspectSummary(data);
+      drawInspector();
+      renderWords(0);
+      attachInspectAudio(callPk);
+    }
+
+    function pct(v) { return (v * 100).toFixed(1) + "%"; }
+
+    function esc(value) {
+      const node = document.createElement("span");
+      node.textContent = String(value == null ? "" : value);
+      return node.innerHTML;
+    }
+
+    function renderInspectSummary(d) {
+      const e = d.edgeSummary || {};
+      const fin = e.fadeIn || {}, fout = e.fadeOut || {};
+      const b = d.bands || {};
+      const harshClass = d.harshCount ? "warn" : "ok";
+      $("inspect-summary").innerHTML =
+        `<b>${d.seams.length}</b> seams over <b>${d.durationS.toFixed(1)}s</b> · ` +
+        `<span class="${harshClass}">${d.harshCount} harsh</span> ` +
+        `(edge &gt;15% of local peak)<br>` +
+        `chunk <b>onset</b> level: median ${pct(fin.median || 0)}, p90 ${pct(fin.p90 || 0)}, worst ${pct(fin.worst || 0)} · ` +
+        `<b>tail</b>: median ${pct(fout.median || 0)}, p90 ${pct(fout.p90 || 0)}, worst ${pct(fout.worst || 0)}<br>` +
+        `spectral balance — under 1kHz <b>${pct(b.sub1k || 0)}</b>, ` +
+        `1–4kHz ${pct(b.b1k4k || 0)}, 4–7kHz ${pct(b.b4k7k || 0)} ` +
+        `<span class="inspect-hint">(consonants live in 2–4kHz)</span>`;
+    }
+
+    function drawInspector() {
+      const d = inspect.data;
+      if (!d) return;
+      const canvas = $("inspect-canvas");
+      const width = canvas.clientWidth || 900;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = width * dpr;
+      canvas.height = 150 * dpr;
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, 150);
+      const dur = d.durationS || 1;
+      const x = (t) => (t / dur) * width;
+
+      // energy envelope
+      const env = d.envelope || [];
+      const peak = Math.max(1, ...env);
+      ctx.fillStyle = "rgba(120, 200, 255, .55)";
+      for (let i = 0; i < env.length; i++) {
+        const h = (env[i] / peak) * 120;
+        const px = (i / env.length) * width;
+        ctx.fillRect(px, 135 - h, Math.max(1, width / env.length), h);
+      }
+
+      // seams: green = clean fade, red = harsh edge
+      (d.seams || []).forEach((s) => {
+        const x0 = x(s.gapStart), x1 = x(s.gapEnd);
+        ctx.fillStyle = s.harsh ? "rgba(255, 90, 90, .30)" : "rgba(82, 245, 168, .18)";
+        ctx.fillRect(x0, 8, Math.max(1.5, x1 - x0), 127);
+        ctx.strokeStyle = s.harsh ? "#ff5a5a" : "rgba(82,245,168,.7)";
+        ctx.lineWidth = s.harsh ? 2 : 1;
+        ctx.beginPath(); ctx.moveTo(x0, 8); ctx.lineTo(x0, 135); ctx.stroke();
+      });
+
+      // playhead
+      if (inspect.audio && !isNaN(inspect.audio.currentTime)) {
+        const px = x(inspect.audio.currentTime);
+        ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, 150); ctx.stroke();
+      }
+      ctx.fillStyle = "rgba(255,255,255,.35)";
+      ctx.font = "10px monospace";
+      ctx.fillText("0s", 2, 147);
+      ctx.fillText(dur.toFixed(1) + "s", width - 34, 147);
+    }
+
+    function seamAt(t) {
+      const d = inspect.data;
+      if (!d) return null;
+      const tol = (d.durationS || 1) * 0.004;
+      return (d.seams || []).find(
+        (s) => t >= s.gapStart - tol && t <= s.gapEnd + tol
+      ) || null;
+    }
+
+    function renderWords(t) {
+      const d = inspect.data;
+      const box = $("inspect-words");
+      if (!d || !d.words || !d.words.length) { box.textContent = ""; return; }
+      box.innerHTML = d.words
+        .map((w) => {
+          const on = t >= w.start && t <= w.end;
+          return `<span class="${on ? "now" : ""}" data-t="${w.start}">${esc(w.w)}</span>`;
+        })
+        .join(" ");
+    }
+
+    function attachInspectAudio(callPk) {
+      const canvas = $("inspect-canvas");
+      const button = $("inspect-play");
+      if (!inspect.audio) {
+        inspect.audio = new Audio();
+        inspect.audio.preload = "none";
+        inspect.audio.addEventListener("timeupdate", () => {
+          $("inspect-time").textContent = inspect.audio.currentTime.toFixed(2) + "s";
+          drawInspector();
+          renderWords(inspect.audio.currentTime);
+        });
+        inspect.audio.addEventListener("ended", () => { button.textContent = "▶ Play"; });
+        canvas.addEventListener("click", (event) => {
+          const d = inspect.data;
+          if (!d) return;
+          const rect = canvas.getBoundingClientRect();
+          const t = ((event.clientX - rect.left) / rect.width) * d.durationS;
+          if (inspect.audio.src) inspect.audio.currentTime = Math.max(0, t);
+          const seam = seamAt(t);
+          $("inspect-detail").textContent = seam
+            ? `seam @ ${seam.gapStart.toFixed(3)}s — gap ${seam.gapMs}ms · ` +
+              `tail ${pct(seam.fadeOut)} · onset ${pct(seam.fadeIn)}` +
+              (seam.harsh ? "  ← HARSH EDGE (likely audible tick)" : "  (clean)")
+            : `t = ${t.toFixed(3)}s — no seam here`;
+          drawInspector();
+        });
+        button.addEventListener("click", async () => {
+          if (!inspect.audio.src && inspect.pk != null) {
+            const resp = await api(`/api/calls/${inspect.pk}/audio/outbound`);
+            if (!resp.ok) return;
+            const url = URL.createObjectURL(await resp.blob());
+            objectUrls.push(url);
+            inspect.audio.src = url;
+          }
+          if (inspect.audio.paused) { inspect.audio.play(); button.textContent = "❚❚ Pause"; }
+          else { inspect.audio.pause(); button.textContent = "▶ Play"; }
+        });
+        $("inspect-words-toggle").addEventListener("change", () => {
+          if (inspect.pk != null) loadInspector(inspect.pk, { outbound: true });
+        });
+        window.addEventListener("resize", drawInspector);
+      }
+      if (inspect.audio.src) { inspect.audio.pause(); inspect.audio.currentTime = 0; }
+      button.textContent = "▶ Play";
+    }
+
     function renderLogs(timings) {
       const card = $("log-card");
       const lines = $("log-lines");
@@ -755,6 +956,7 @@
       for (const event of body.events) timeline.appendChild(renderEvent(event));
       renderLogs(body.timings);
       renderCost(body.cost, body.costMeta);
+      loadInspector(callPk, body.audio || {});
       $("list-view").style.display = "none";
       $("detail-view").style.display = "block";
       attachAudio(callPk, body.audio || {});

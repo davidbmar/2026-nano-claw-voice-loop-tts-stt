@@ -585,11 +585,27 @@ async def transcribe(request: Request):
         _model_load_ms.get(size, 0.0),
     )
 
+    # Opt-in word timing for the call-review audio inspector: aligning words
+    # against the energy envelope is how a seam gets pinned to a syllable.
+    want_words = str(request.headers.get("X-Word-Timestamps", "")).strip() in (
+        "1", "true", "yes",
+    )
     lock = _model_locks.setdefault(size, threading.Lock())
     with lock:
         first_use = _model_use_counts.get(size, 0) == 0
-        segments, _info = model.transcribe(samples, beam_size=5, language="en")
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        segments, _info = model.transcribe(
+            samples, beam_size=5, language="en", word_timestamps=want_words
+        )
+        if want_words:
+            hypothesis = _hypothesis_from_segments(segments)
+            words = [
+                {"w": token.text, "start": round(token.start, 3), "end": round(token.end, 3)}
+                for token in hypothesis.tokens
+            ]
+            text = hypothesis.text
+        else:
+            words = []
+            text = " ".join(seg.text.strip() for seg in segments).strip()
         _model_use_counts[size] = _model_use_counts.get(size, 0) + 1
     elapsed = time.perf_counter() - start
 
@@ -607,6 +623,7 @@ async def transcribe(request: Request):
         "text": text,
         "duration_s": round(duration_s, 2),
         "processing_ms": int(elapsed * 1000),
+        **({"words": words} if want_words else {}),
     }
 
 

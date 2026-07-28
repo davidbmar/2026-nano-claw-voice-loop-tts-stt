@@ -14,6 +14,7 @@ the phone gateway convention.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from voice import call_log, cost_ledger, phone
+from voice import audio_inspect, call_log, cost_ledger, phone
 from voice.phone_tap import DEFAULT_TAP_ROOT
 
 log = logging.getLogger("call_review")
@@ -147,6 +148,75 @@ async def timeline_handler(request: web.Request) -> web.Response:
     )
 
 
+async def inspect_handler(request: web.Request) -> web.Response:
+    """Seam/energy analysis for one call, with optional word alignment.
+
+    Word timing needs a Whisper pass over the whole outbound leg, so it is
+    opt-in via ?words=1 and cached on disk beside the tap — the seam view
+    itself renders instantly without it.
+    """
+    if not phone._token_ok(request):
+        return web.Response(status=403, text="bad token")
+    conn = phone._metrics_conn
+    if conn is None:
+        return web.json_response({"error": "db unavailable"}, status=404)
+    call = _resolve_call(conn, request.match_info["call_pk"])
+    if call is None:
+        return web.json_response({"error": "unknown call"}, status=404)
+    tap_dir = _tap_root() / call["call_id"]
+
+    loop = asyncio.get_running_loop()
+    payload = await loop.run_in_executor(None, audio_inspect.summarize, tap_dir)
+    if not payload.get("available"):
+        return web.json_response(
+            {"available": False, "reason": "no outbound audio tap for this call"}
+        )
+    if request.query.get("words") in ("1", "true", "yes"):
+        payload["words"] = await _word_alignment(tap_dir)
+    return web.json_response(payload)
+
+
+async def _word_alignment(tap_dir: Path) -> list[dict]:
+    """Whisper word timings for the outbound leg; cached, never fatal."""
+    cache = tap_dir / "outbound_words.json"
+    if cache.is_file():
+        try:
+            return json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            log.warning("word-alignment cache unreadable at %s", cache)
+
+    loop = asyncio.get_running_loop()
+    pcm, rate = await loop.run_in_executor(
+        None, audio_inspect.audio_bytes_for_stt, tap_dir
+    )
+    if not pcm:
+        return []
+    stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(
+                f"{stt_url}/transcribe",
+                content=pcm,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-Sample-Rate": str(rate),
+                    "X-Model-Size": phone._cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
+                    "X-Word-Timestamps": "1",
+                },
+            )
+        words = (resp.json() or {}).get("words") or []
+    except Exception:
+        log.exception("word alignment failed for %s", tap_dir)
+        return []
+    try:
+        cache.write_text(json.dumps(words), encoding="utf-8")
+    except OSError:
+        pass  # health-ok: the cache is an optimization, not a requirement
+    return words
+
+
 async def audio_handler(request: web.Request) -> web.Response:
     """Stream one recorded audio leg (inbound/outbound/tts) as a WAV file."""
     if not phone._token_ok(request):
@@ -170,3 +240,4 @@ def register_call_review_routes(app: web.Application) -> None:
     """Attach the review API next to the phone gateway routes."""
     app.router.add_get("/api/calls/{call_pk}/timeline", timeline_handler)
     app.router.add_get("/api/calls/{call_pk}/audio/{leg}", audio_handler)
+    app.router.add_get("/api/calls/{call_pk}/inspect", inspect_handler)
