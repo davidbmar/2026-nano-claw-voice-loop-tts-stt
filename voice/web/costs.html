@@ -644,9 +644,31 @@
       banner.classList.toggle("error", Boolean(isError));
     }
 
+    // /api/costs carries real spend and customer counts, so it takes the same
+    // operator token as /api/calls. The key is shared with calls.html, so
+    // unlocking either page unlocks both — most visits never see a prompt.
+    const TOKEN_KEY = "nc-phone-token";
+
+    async function fetchCosts(retrying) {
+      let token = retrying ? "" : localStorage.getItem(TOKEN_KEY) || "";
+      if (!token) {
+        token = (window.prompt("Phone ops token (NANO_CLAW_PHONE_TOKEN):") || "").trim();
+        if (!token) throw new Error("operator token required");
+        localStorage.setItem(TOKEN_KEY, token);
+      }
+      const response = await fetch("/api/costs", {
+        headers: { Accept: "application/json", "X-NC-Phone-Token": token },
+      });
+      if (response.status === 403 && !retrying) {
+        localStorage.removeItem(TOKEN_KEY);
+        return fetchCosts(true);
+      }
+      return response;
+    }
+
     async function load() {
       try {
-        const response = await fetch("/api/costs", { headers: { "Accept": "application/json" } });
+        const response = await fetchCosts(false);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         DATA = await response.json();
         MODELS = Array.isArray(DATA.models) ? DATA.models : [];

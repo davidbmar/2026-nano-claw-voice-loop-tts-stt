@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from aiohttp.test_utils import make_mocked_request
 
 from voice import cost_ledger, metrics_db, phone, region_providers, server
 from voice.region_providers import AnthropicProvider, OpenAICompatProvider
@@ -340,7 +341,13 @@ def test_empty_database_api_and_cost_page_render(monkeypatch):
     assert "/api/costs" in paths
     assert "/costs" in paths
 
-    response = asyncio.run(server.costs_handler(None))
+    # /api/costs now takes the operator token — it carries real spend and
+    # customer counts, so it is operator data like /api/calls.
+    monkeypatch.setenv("NANO_CLAW_PHONE_TOKEN", "ops-token")
+    costs_request = make_mocked_request(
+        "GET", "/api/costs", headers={"X-NC-Phone-Token": "ops-token"}
+    )
+    response = asyncio.run(server.costs_handler(costs_request))
     assert response.status == 200
     payload = json.loads(response.text)
     assert payload["status"] == "awaiting_call_data"

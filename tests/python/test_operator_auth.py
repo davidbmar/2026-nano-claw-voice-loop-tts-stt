@@ -124,3 +124,49 @@ def test_telnyx_webhook_is_never_guarded():
 def test_phone_media_websocket_is_never_guarded():
     response = _run("GET", "/ws/phone-media", {}, PASSWORD)
     assert response.status == 200
+
+
+# ── Operator-data endpoints ──────────────────────────────────
+# /api/metrics and /api/costs were readable by anyone: metrics published live
+# session IDs, the serving model, and token counts; costs published real spend
+# and customer counts. Both now take the same operator token as /api/calls.
+#
+# The session-ID publication mattered beyond the data itself — it is what would
+# have made a session-scoped lookup route genuinely reachable rather than
+# theoretically guessable.
+
+OPS_DATA_PATHS = ("/api/metrics", "/api/costs")
+
+
+@pytest.mark.parametrize("path", OPS_DATA_PATHS)
+def test_ops_data_requires_token(path):
+    from voice import server
+
+    async def exercise():
+        request = make_mocked_request("GET", path, headers={})
+        handler = (
+            server.metrics_handler if path == "/api/metrics" else server.costs_handler
+        )
+        return await handler(request)
+
+    with mock.patch.dict(os.environ, {"NANO_CLAW_PHONE_TOKEN": "ops-token"}, clear=False):
+        response = asyncio.run(exercise())
+    assert response.status == 403
+
+
+@pytest.mark.parametrize("path", OPS_DATA_PATHS)
+def test_ops_data_allows_correct_token(path):
+    from voice import server
+
+    async def exercise():
+        request = make_mocked_request(
+            "GET", path, headers={"X-NC-Phone-Token": "ops-token"}
+        )
+        handler = (
+            server.metrics_handler if path == "/api/metrics" else server.costs_handler
+        )
+        return await handler(request)
+
+    with mock.patch.dict(os.environ, {"NANO_CLAW_PHONE_TOKEN": "ops-token"}, clear=False):
+        response = asyncio.run(exercise())
+    assert response.status == 200

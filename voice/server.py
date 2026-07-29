@@ -2729,7 +2729,26 @@ async def models_handler(request: web.Request) -> web.Response:
         return web.json_response(resp.json())
 
 
+def _ops_token_ok(request: web.Request) -> bool:
+    """Operator-data gate, shared with /api/calls (see voice.call_review).
+
+    Imported lazily like every other `phone` use in this module: call_review
+    imports server for the metrics connection, so a module-level import would
+    be circular.
+    """
+
+    from voice import phone
+
+    return phone._token_ok(request)
+
+
 async def metrics_handler(request: web.Request) -> web.Response:
+    # Per-turn rows carry live session IDs, the serving model, and token
+    # counts.  Anonymous readers used to get all of it, which also published
+    # the very session IDs that make a session-scoped lookup route dangerous.
+    # Transcripts were already stripped below; this closes the rest.
+    if not _ops_token_ok(request):
+        return web.Response(status=403, text="bad token")
     if METRICS is None:
         return web.json_response({"recent": [], "byModel": []})
     recent = [
@@ -2743,8 +2762,15 @@ async def metrics_handler(request: web.Request) -> web.Response:
 
 
 async def costs_handler(request: web.Request) -> web.Response:
-    """Return the privacy-safe cost ledger aggregation used by ``/costs``."""
+    """Return the privacy-safe cost ledger aggregation used by ``/costs``.
 
+    Privacy-safe means no caller identities, not public: the report still
+    carries call/customer counts and real spend, so it takes the same operator
+    token as /api/calls.
+    """
+
+    if not _ops_token_ok(request):
+        return web.Response(status=403, text="bad token")
     return web.json_response(cost_ledger.build_report(METRICS))
 
 
