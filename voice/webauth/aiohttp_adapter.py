@@ -57,7 +57,37 @@ SENSITIVE_PATH_PREFIXES = (
     "/api/auth/",
     "/api/conversations",
     "/api/history",
+    # Operator controls.  Mutating any of these changes behaviour for EVERY
+    # caller on this deployment — phone-line voice/model/STT, assistant mode,
+    # scheduler model — so they get the same CSRF and no-store treatment as
+    # the auth routes.
+    #
+    # Listed as exact paths and NEVER as the "/api/phone/" prefix: that would
+    # also capture /api/phone/incoming, the Telnyx webhook, which carries its
+    # own token and can present neither a browser origin nor an operator
+    # secret.  Guarding it would silently kill every inbound call.
+    "/api/phone/config",
+    "/api/phone/vad",
+    "/api/voice/flow",
+    "/api/voice/region-model",
 )
+
+# Unsafe requests to these paths additionally require the operator secret.
+#
+# The same-origin check below is CSRF mitigation ONLY: it stops another site's
+# page from forging a request, because a browser will not let script set
+# Origin or Sec-Fetch-Site.  It stops nothing else — any direct HTTP client
+# can send those three headers verbatim.  Until this guard existed, these
+# routes were reachable anonymously from the public internet.
+OPERATOR_PATHS = frozenset(
+    {
+        "/api/phone/config",
+        "/api/phone/vad",
+        "/api/voice/flow",
+        "/api/voice/region-model",
+    }
+)
+OPERATOR_HEADER = "X-NC-Operator"
 
 # GIS documents these four browser origins.  No googleusercontent image origin
 # is allowed: the UI uses local initials and never renders Google's picture
@@ -148,6 +178,32 @@ def _needs_mutation_guard(request: web.Request) -> bool:
     )
 
 
+def _operator_secret() -> str:
+    """The shared operator password, or "" when the deployment has not set one."""
+
+    return os.environ.get("NANO_CLAW_OPERATOR_PASSWORD", "").strip()
+
+
+def _needs_operator_auth(request: web.Request) -> bool:
+    return (
+        request.method.upper() not in SAFE_METHODS and request.path in OPERATOR_PATHS
+    )
+
+
+def _operator_authorized(request: web.Request) -> bool:
+    """Constant-time check of the operator header against the configured secret.
+
+    Fails CLOSED when no secret is configured: an unset password disables
+    operator mutations rather than leaving them open to anyone.  Reads (GET)
+    are untouched, so the console still renders its current configuration.
+    """
+
+    secret = _operator_secret()
+    if not secret:
+        return False
+    return secrets.compare_digest(request.headers.get(OPERATOR_HEADER, ""), secret)
+
+
 def _same_origin_request(request: web.Request) -> bool:
     return (
         _origin_matches_request(request)
@@ -198,6 +254,15 @@ async def request_security_middleware(
         response: web.StreamResponse = web.json_response(
             {"error": "request_rejected"}, status=403
         )
+        return _decorate_response(request, response)
+    if _needs_operator_auth(request) and not _operator_authorized(request):
+        if not _operator_secret():
+            log.error(
+                "operator mutation refused for %s: NANO_CLAW_OPERATOR_PASSWORD "
+                "is unset — set it to enable the console's configuration controls",
+                request.path,
+            )
+        response = web.json_response({"error": "operator_auth_required"}, status=403)
         return _decorate_response(request, response)
     try:
         response = await handler(request)

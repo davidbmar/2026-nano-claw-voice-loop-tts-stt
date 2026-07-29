@@ -88,6 +88,52 @@ function flushClientTelemetry(keepalive) {
   if (_clientTelemetryQueue.length) scheduleClientTelemetryFlush();
 }
 
+// ── Operator-authenticated configuration writes ──────────────
+// POSTs to /api/phone/config, /api/phone/vad, /api/voice/flow, and
+// /api/voice/region-model change behaviour for EVERY caller on this
+// deployment — phone-line voice/model/STT, assistant mode, scheduler model.
+// The server requires a shared operator password (NANO_CLAW_OPERATOR_PASSWORD)
+// on top of the same-origin CSRF headers, because same-origin alone stops only
+// other websites, not a direct HTTP client.
+//
+// The password is NEVER baked into this file: this script is served publicly,
+// so anything in it is readable by anyone. It only ever lives in sessionStorage
+// after the operator types it, and is gone when the tab closes.
+var SS_OPERATOR_KEY = 'nc_operator_secret';
+
+function operatorSecret(forcePrompt) {
+  var stored = forcePrompt ? '' : sessionStorage.getItem(SS_OPERATOR_KEY) || '';
+  if (stored) return stored;
+  var entered =
+    window.prompt('Operator password — these settings affect every caller:') || '';
+  entered = entered.trim();
+  if (entered) sessionStorage.setItem(SS_OPERATOR_KEY, entered);
+  return entered;
+}
+
+// POST an operator setting. A 403 clears the cached password and re-prompts
+// once, so a typo is recoverable without a page reload.
+function operatorFetch(url, body, retrying) {
+  var secret = operatorSecret(!!retrying);
+  if (!secret) return Promise.reject(new Error('operator password required'));
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-NC-Auth': '1',
+      'X-NC-Operator': secret,
+    },
+    body: JSON.stringify(body),
+  }).then(function (r) {
+    if (r.status === 403 && !retrying) {
+      sessionStorage.removeItem(SS_OPERATOR_KEY);
+      return operatorFetch(url, body, true);
+    }
+    return r;
+  });
+}
+
 function queueClientTelemetry(timestamp, message) {
   if (!CLIENT_TELEMETRY_ON) return;
   _clientTelemetryQueue.push({
@@ -985,10 +1031,8 @@ fetch('/api/phone/vad')
     vadSelect.disabled = true;
   });
 vadSelect.addEventListener('change', function () {
-  fetch('/api/phone/vad', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: vadSelect.value }),
+  operatorFetch('/api/phone/vad', { mode: vadSelect.value }).catch(function () {
+    statusText.textContent = 'VAD profile unchanged — operator password required';
   });
 });
 
@@ -1057,11 +1101,7 @@ function loadPhoneConfig() {
 }
 
 function pushPhoneConfig(partial) {
-  fetch('/api/phone/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(partial),
-  })
+  operatorFetch('/api/phone/config', partial)
     .then(function (r) {
       return r.ok ? r.json() : null;
     })
@@ -1069,6 +1109,11 @@ function pushPhoneConfig(partial) {
       if (cfg) {
         applyPhoneConfig(cfg);
       }
+    })
+    .catch(function () {
+      // Password refused or dismissed: re-read the server's real state so the
+      // dropdowns never show a change that did not land.
+      loadPhoneConfig();
     });
 }
 
@@ -1218,11 +1263,7 @@ function loadFlowConfig() {
 flowSelect.addEventListener('change', function () {
   updateModeAbstract(flowSelect.value);
   flowSelect.disabled = true;
-  fetch('/api/voice/flow', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: flowSelect.value }),
-  })
+  operatorFetch('/api/voice/flow', { mode: flowSelect.value })
     .then(function (r) {
       if (!r.ok) throw new Error('flow update failed');
       return r.json();
@@ -1317,11 +1358,7 @@ function loadRegionModelConfig() {
 
 regionModelSelect.addEventListener('change', function () {
   regionModelSelect.disabled = true;
-  fetch('/api/voice/region-model', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: regionModelSelect.value }),
-  })
+  operatorFetch('/api/voice/region-model', { model: regionModelSelect.value })
     .then(function (r) {
       if (!r.ok) throw new Error('scheduler model update failed');
       return r.json();

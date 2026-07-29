@@ -1062,6 +1062,21 @@ def test_flow_api_payload_contains_lawyer_and_only_checks_calendar_settings(
     assert server._flow_api_payload()["availability_ok"] is False
 
 
+# /api/voice/flow and /api/voice/region-model change the assistant mode and
+# scheduler model for EVERY caller on the deployment, so they now require the
+# operator password on top of the same-origin CSRF headers. The guard itself is
+# covered in tests/python/test_operator_auth.py; these constants let the flow
+# integration test drive the endpoints as the console does.
+OPERATOR_PASSWORD = "test-operator-secret"
+OPERATOR_HEADERS = {
+    "Origin": "http://localhost:9090",
+    "Host": "localhost:9090",
+    "Sec-Fetch-Site": "same-origin",
+    "X-NC-Auth": "1",
+    "X-NC-Operator": OPERATOR_PASSWORD,
+}
+
+
 def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_path):
     availability = tmp_path / "availability.json"
     availability.write_text(json.dumps({
@@ -1071,6 +1086,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "scheduler")
     monkeypatch.setenv("NANO_CLAW_FLOW_AVAILABILITY", str(availability))
     monkeypatch.setenv("NANO_CLAW_PHONE", "0")
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_PASSWORD", OPERATOR_PASSWORD)
     monkeypatch.delenv("SCHED_EVAL_MODEL", raising=False)
 
     async def exercise():
@@ -1100,24 +1116,24 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             )
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "off"}
+                "/api/voice/flow", json={"mode": "off"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "spacechannel"
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "replicantpm"}
+                "/api/voice/flow", json={"mode": "replicantpm"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "replicantpm"
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "not-a-flow"}
+                "/api/voice/flow", json={"mode": "not-a-flow"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 400
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "scheduler"}
+                "/api/voice/flow", json={"mode": "scheduler"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             monkeypatch.setenv(
@@ -1137,13 +1153,13 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             }
 
             response = await client.post(
-                "/api/voice/region-model", json={"model": "xai/grok-4.3"}
+                "/api/voice/region-model", json={"model": "xai/grok-4.3"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "xai/grok-4.3"
 
             response = await client.post(
-                "/api/voice/region-model", json={"model": "grok-4-1-fast"}
+                "/api/voice/region-model", json={"model": "grok-4-1-fast"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 400
         finally:
