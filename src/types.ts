@@ -69,6 +69,30 @@ export interface AgentConfig {
   intelligenceScopeKey?: string;
   /** Render the answer for a screen or for immediate spoken delivery. */
   responseMode?: 'text' | 'voice';
+  /** Live pipeline configuration for this session, rendered into the base layer. */
+  runtimeSettings?: RuntimeSettings;
+}
+
+/**
+ * The caller-visible pipeline configuration, as a fixed allowlist.
+ *
+ * Deliberately not an open record: these values are rendered into the system
+ * prompt and may be spoken aloud, so every field is one we are willing to
+ * disclose. No caller identity, conversation IDs, internal URLs, or
+ * credentials. Values arrive sanitized from the voice server and are
+ * re-sanitized here — `set_model` and `set_voice` accept arbitrary strings, so
+ * an unsanitized value would be a prompt-injection channel.
+ */
+export interface RuntimeSettings {
+  surface: string;
+  mode: string;
+  chatModel: string;
+  voice: string;
+  speed: number;
+  sttModel: string;
+  speechMode: string;
+  analysisStyle: string;
+  schedulerModel: string;
 }
 
 /** Local evidence retrieval performed before the conversational model call. */

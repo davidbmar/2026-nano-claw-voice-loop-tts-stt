@@ -10,7 +10,14 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { AgentConfig, AnalysisStyle, ToolCall, StreamEvent, LLMResponse } from '../types';
+import {
+  AgentConfig,
+  AnalysisStyle,
+  ToolCall,
+  StreamEvent,
+  LLMResponse,
+  RuntimeSettings,
+} from '../types';
 import { ProviderManager } from '../providers/index';
 import {
   Memory,
@@ -309,7 +316,8 @@ export function getAgentConfig(
   modelOverride?: string,
   profileId?: string,
   analysisStyleOverride?: AnalysisStyle,
-  responseMode?: 'text' | 'voice'
+  responseMode?: 'text' | 'voice',
+  runtimeSettings?: RuntimeSettings
 ): AgentConfig {
   initShared();
   const valid =
@@ -343,6 +351,44 @@ export function getAgentConfig(
       intelligenceScopeKey: collectionScopeKey(intelligence, knownProfile),
     }),
     ...(responseMode && { responseMode }),
+    ...(runtimeSettings && { runtimeSettings }),
+  };
+}
+
+/**
+ * Accept a runtime-settings payload only in the exact shape we render.
+ *
+ * Re-sanitized here rather than trusted from the voice server: these strings
+ * reach the system prompt, and the write boundaries behind them (`set_model`,
+ * `set_voice`, `POST /api/phone/config`) accept arbitrary text. Unknown fields
+ * are dropped, not passed through — the render set is closed by construction.
+ */
+// Identifiers plus what a catalog display name legitimately contains
+// ("Isabella (48k)"). Deliberately excludes newlines, '#', and '*' — the
+// characters that would let a value forge a heading or a new prompt section.
+const SAFE_SETTING_RE = /^[A-Za-z0-9._:/+() -]{1,64}$/;
+
+export function sanitizeRuntimeSettings(value: unknown): RuntimeSettings | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const text = (key: string): string => {
+    const candidate = raw[key];
+    if (typeof candidate !== 'string') return 'unknown';
+    const trimmed = candidate.trim();
+    if (!trimmed) return 'default';
+    return SAFE_SETTING_RE.test(trimmed) ? trimmed : 'unrecognized';
+  };
+  const speed = typeof raw.speed === 'number' && Number.isFinite(raw.speed) ? raw.speed : 1;
+  return {
+    surface: text('surface'),
+    mode: text('mode'),
+    chatModel: text('chatModel'),
+    voice: text('voice'),
+    speed: Math.min(4, Math.max(0.1, Math.round(speed * 100) / 100)),
+    sttModel: text('sttModel'),
+    speechMode: text('speechMode'),
+    analysisStyle: text('analysisStyle'),
+    schedulerModel: text('schedulerModel'),
   };
 }
 
@@ -1189,6 +1235,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     analysisStyle?: unknown;
     responseMode?: unknown;
     evalTrace?: unknown;
+    runtimeSettings?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -1235,7 +1282,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     body.model,
     profile,
     body.analysisStyle as AnalysisStyle | undefined,
-    body.responseMode as 'text' | 'voice' | undefined
+    body.responseMode as 'text' | 'voice' | undefined,
+    sanitizeRuntimeSettings(body.runtimeSettings)
   );
   if (wantsStream(req)) {
     const controller = new AbortController();

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -1301,6 +1302,56 @@ async def _refresh_agent_conversation_on_mode_switch(
     await _delete_agent_session(client, _agent_session_id(session))
 
 
+# Settings values reach the prompt, so they are a prompt-injection channel:
+# set_model and set_voice accept arbitrary strings today, and POST
+# /api/phone/config persists an arbitrary model globally. A planted value would
+# otherwise arrive inside the system prompt. Anything that is not a plain
+# identifier is replaced rather than rendered.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:/+-]{1,64}$")
+
+
+def _safe_id(value: object, fallback: str = "unrecognized") -> str:
+    text = value if isinstance(value, str) else ""
+    text = text.strip()
+    if not text:
+        return "default"
+    return text if _SAFE_ID_RE.match(text) else fallback
+
+
+def _runtime_settings(session: Session) -> dict:
+    """The live pipeline configuration for this session, as an allowlist.
+
+    Explicitly a fixed set of fields, never a dump of session state: this
+    payload lands in the model's prompt, so every field here is one we are
+    willing to have spoken aloud. No caller identity, no conversation IDs, no
+    internal URLs, no credentials.
+    """
+
+    voice_id = getattr(session, "voice_id", "") or ""
+    entry = voice_catalog.lookup(voice_id)
+    try:
+        speed = round(float(getattr(session, "speed", 1.0) or 1.0), 2)
+    except (TypeError, ValueError):
+        speed = 1.0
+    return {
+        "surface": "browser console",
+        "mode": _safe_id(get_flow_mode()),
+        "chatModel": _safe_id(getattr(session, "model", "")),
+        # The catalog's human name ("Isabella (48k)") so the model says
+        # something speakable instead of reading "lux_isabella" aloud. The
+        # catalog is our own static data, so its name is trusted and does not
+        # go through the identifier sanitizer (which would reject the spaces
+        # and parentheses in a perfectly legitimate display name). Only the
+        # unknown-voice fallback is caller-influenced, and that is sanitized.
+        "voice": str(entry.get("name") or "")[:64] if entry else _safe_id(voice_id),
+        "speed": speed,
+        "sttModel": _safe_id(getattr(session, "stt_size", "base")),
+        "speechMode": _safe_id(getattr(session, "speech_mode", "")),
+        "analysisStyle": _safe_id(getattr(session, "analysis_style", "")),
+        "schedulerModel": _safe_id(get_region_model()),
+    }
+
+
 async def _handle_agent_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1323,6 +1374,7 @@ async def _handle_agent_request(
                 "profile": get_flow_profile(),
                 "analysisStyle": getattr(session, "analysis_style", "topic_map"),
                 "responseMode": "voice",
+                "runtimeSettings": _runtime_settings(session),
                 **({"model": session.model} if session.model else {}),
             },
             headers={"Accept": "text/event-stream"},

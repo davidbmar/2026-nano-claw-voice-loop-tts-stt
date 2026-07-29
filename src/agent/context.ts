@@ -104,6 +104,42 @@ export class ContextBuilder {
     // strip the marker. The timestamp and anything below churn per turn.
     parts.push(SYSTEM_CACHE_MARKER);
 
+    // Live pipeline configuration. Deliberately BELOW the cache marker: these
+    // values change per session and would otherwise invalidate the cacheable
+    // persona+knowledge prefix on every turn. Small enough (~100 tokens) that
+    // carrying it every turn costs less than a lookup round-trip would.
+    //
+    // This belongs to the base layer conceptually — every profile composes
+    // base beneath its own persona, so every mode inherits self-knowledge of
+    // its settings rather than each persona re-declaring it.
+    if (this.config.runtimeSettings) {
+      const s = this.config.runtimeSettings;
+      parts.push('\n## Your current settings');
+      parts.push(
+        'This is how you are configured right now, on the ' +
+          `${s.surface}. When the user asks what your settings are, why you sound a ` +
+          'certain way, or how something is configured, answer from this list rather ' +
+          'than describing the control panel in general terms. Do not recite it ' +
+          'unprompted, and do not read the raw identifiers aloud as if they were ' +
+          'part of the conversation: say "I\'m on the fast local model" rather than ' +
+          '"ollama slash gemma four colon e two b". If a value reads as ' +
+          '"unrecognized" or "unknown", say you cannot tell rather than guessing. ' +
+          'You cannot change any of these yourself — the user changes them in the ' +
+          'console.'
+      );
+      parts.push(
+        [
+          `- Assistant mode: ${s.mode}`,
+          `- Chat model: ${s.chatModel}`,
+          `- Voice: ${s.voice} at ${s.speed}x speed`,
+          `- Speech recognition model: ${s.sttModel}`,
+          `- Speech delivery: ${s.speechMode}`,
+          `- Analysis style: ${s.analysisStyle}`,
+          `- Scheduler model: ${s.schedulerModel}`,
+        ].join('\n')
+      );
+    }
+
     if (this.config.responseMode === 'voice') {
       parts.push('\n## Spoken response contract');
       parts.push(
