@@ -7,6 +7,30 @@ import { logger } from '../utils/logger';
 // Re-export getConfigDir for external use
 export { getConfigDir } from '../utils/helpers';
 
+const EXPLICIT_TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const EXPLICIT_FALSE_VALUES = new Set(['0', 'false', 'no', 'off']);
+const BUILT_IN_TOOL_NAMES = ['shell', 'read_file', 'write_file'] as const;
+
+/**
+ * Parse an environment flag that gates a dangerous capability.
+ *
+ * Unset and empty values are always off. Recognized values are
+ * case-insensitive, but whitespace is not trimmed so deployment mistakes fail
+ * loudly instead of silently enabling a capability. Configuration examples
+ * should spell values as the words "true" or "false".
+ */
+export function requireExplicitBoolean(name: string, value: string | undefined): boolean {
+  if (value === undefined || value === '') return false;
+
+  const normalized = value.toLowerCase();
+  if (EXPLICIT_TRUE_VALUES.has(normalized)) return true;
+  if (EXPLICIT_FALSE_VALUES.has(normalized)) return false;
+
+  throw new ConfigError(
+    `${name} must be one of true, false, 1, 0, yes, no, on, or off; received ${JSON.stringify(value)}`
+  );
+}
+
 /**
  * Load configuration from file
  */
@@ -68,6 +92,7 @@ export function createDefaultConfig(): Config {
       },
     },
     tools: {
+      enabled: false,
       restrictToWorkspace: false,
     },
     channels: {},
@@ -121,11 +146,22 @@ export function mergeEnvConfig(config: Config): Config {
     } as never;
   }
 
-  // Knowledge-only mode: disable every tool so the agent answers purely
-  // from its prompt (used by voice personas grounded on a site digest).
-  const disableTools = ['1', 'true', 'yes'].includes(
-    (process.env.NANO_CLAW_DISABLE_TOOLS || '').toLowerCase()
+  // Dangerous capabilities require a positive enable at the process boundary.
+  // The legacy negative flag remains a kill switch for one migration release.
+  const enableTools = requireExplicitBoolean(
+    'NANO_CLAW_ENABLE_TOOLS',
+    process.env.NANO_CLAW_ENABLE_TOOLS
   );
+  const disableTools = requireExplicitBoolean(
+    'NANO_CLAW_DISABLE_TOOLS',
+    process.env.NANO_CLAW_DISABLE_TOOLS
+  );
+  if (enableTools && disableTools) {
+    throw new ConfigError(
+      'NANO_CLAW_ENABLE_TOOLS and NANO_CLAW_DISABLE_TOOLS conflict: tools cannot be both enabled and disabled'
+    );
+  }
+  const toolsEnabled = enableTools && !disableTools;
 
   const intelligenceUrl = process.env.NANO_CLAW_INTELLIGENCE_URL?.trim();
   const intelligenceEnabledValue = process.env.NANO_CLAW_INTELLIGENCE_ENABLED?.trim().toLowerCase();
@@ -211,7 +247,7 @@ export function mergeEnvConfig(config: Config): Config {
         }
       : existingProfiles;
 
-  return ConfigSchema.parse({
+  const merged = ConfigSchema.parse({
     ...config,
     providers: mergedProviders,
     agents: {
@@ -222,8 +258,21 @@ export function mergeEnvConfig(config: Config): Config {
       },
       ...(profiles && { profiles }),
     },
-    ...(disableTools && { tools: { ...config.tools, enabled: false } }),
+    tools: {
+      ...config.tools,
+      enabled: toolsEnabled,
+    },
   });
+
+  logger.info(
+    {
+      toolsEnabled: merged.tools.enabled,
+      registeredTools: merged.tools.enabled ? [...BUILT_IN_TOOL_NAMES] : [],
+    },
+    'Tool gate resolved'
+  );
+
+  return merged;
 }
 
 /**

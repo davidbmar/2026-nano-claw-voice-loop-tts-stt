@@ -111,9 +111,10 @@ export const AgentsConfigSchema = z.object({
  * Tools configuration schema
  */
 export const ToolsConfigSchema = z.object({
-  /** false = register no tools at all: the agent answers purely from its
-   * prompt (persona + knowledge). Env override: NANO_CLAW_DISABLE_TOOLS=1. */
-  enabled: z.boolean().optional().default(true),
+  /** Dangerous built-in tools default off. NANO_CLAW_ENABLE_TOOLS=true is
+   * required at the process boundary; NANO_CLAW_DISABLE_TOOLS=true remains a
+   * temporary legacy kill switch. */
+  enabled: z.boolean().optional().default(false),
   restrictToWorkspace: z.boolean().optional().default(false),
   allowedCommands: z.array(z.string()).optional(),
   deniedCommands: z.array(z.string()).optional(),

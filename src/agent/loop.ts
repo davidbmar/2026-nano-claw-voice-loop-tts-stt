@@ -75,8 +75,9 @@ export class AgentLoop {
    */
   private registerBuiltInTools(config: Config): void {
     const toolsConfig = config.tools;
-    // Knowledge-only mode: see NANO_CLAW_DISABLE_TOOLS / tools.enabled
-    if (toolsConfig?.enabled === false) return;
+    // mergeEnvConfig resolves the positive enable and legacy kill switch into
+    // this single fail-closed field. Only an explicit true registers tools.
+    if (toolsConfig?.enabled !== true) return;
 
     this.toolRegistry.register(
       new ShellTool(
