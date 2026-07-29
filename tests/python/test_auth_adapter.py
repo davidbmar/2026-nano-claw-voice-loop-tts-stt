@@ -318,7 +318,11 @@ def test_login_me_happy_path_and_session_cookie_policy(public_https):
         assert cookie["path"] == "/"
         assert cookie["samesite"] == "Lax"
         assert cookie["max-age"] == "604800"
-        assert bool(cookie["secure"]) is public_https
+        # The fake client's Host is the public deployment host, and a session
+        # cookie on a non-loopback host is ALWAYS Secure now — task 095 removed
+        # NANO_CLAW_PUBLIC_HTTPS as the sole gate, because a flag set wrong in
+        # one env file is exactly how the cookie went out in cleartext.
+        assert bool(cookie["secure"]) is True
         assert set(store.sessions) == {cookie.value}
 
         me = await client.get("/api/me")
@@ -331,10 +335,19 @@ def test_login_me_happy_path_and_session_cookie_policy(public_https):
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize(("configured", "secure"), [("0", False), ("1", True)])
-def test_public_https_environment_alone_drives_secure_cookie(
+@pytest.mark.parametrize(("configured", "secure"), [("0", True), ("1", True)])
+def test_public_host_gets_secure_cookie_whatever_the_flag_says(
     monkeypatch, configured, secure
 ):
+    """The env flag is no longer load-bearing for a public host.
+
+    This test previously asserted the opposite — that NANO_CLAW_PUBLIC_HTTPS
+    alone drove the Secure attribute. The live deployment ran with it set to 0,
+    which is how session cookies went out over plaintext. Task 095 moved the
+    invariant into the cookie setter: non-loopback host implies Secure, flag or
+    no flag. Both parameters therefore expect True.
+    """
+
     async def exercise():
         monkeypatch.setenv("NANO_CLAW_AUTH", "optional")
         monkeypatch.setenv(

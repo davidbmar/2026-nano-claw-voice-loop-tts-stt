@@ -16,6 +16,8 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
+from ipaddress import ip_address
 from typing import Any, Callable, Mapping
 
 from aiohttp import WSCloseCode, web
@@ -40,7 +42,8 @@ from .store import AuthStore, ResolvedSession
 
 log = logging.getLogger("webauth-aiohttp")
 
-SESSION_COOKIE_NAME = "nc_session"
+SESSION_COOKIE_NAME = "__Host-nc_session"
+LEGACY_SESSION_COOKIE_NAME = "nc_session"
 PRE_AUTH_COOKIE_NAME = "nc_pre_auth"
 
 AUTH_MODE_OFF = "off"
@@ -112,6 +115,7 @@ CONTENT_SECURITY_POLICY = (
 SECURITY_HEADERS = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
     "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "X-Content-Type-Options": "nosniff",
 }
 
@@ -140,6 +144,40 @@ def _request_host(request: web.Request) -> str:
         closing = value.find("]")
         return value[1:closing].lower() if closing > 0 else ""
     return value.rsplit(":", 1)[0].lower() if ":" in value else value.lower()
+
+
+def _is_localhost(host: str) -> bool:
+    """Return whether a normalized request host is a loopback development host."""
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _with_legacy_session_alias(request: web.Request) -> web.Request:
+    """Expose the one-release legacy cookie under the canonical session name.
+
+    Most auth consumers live in this adapter and accept both names directly.
+    The history handlers import ``SESSION_COOKIE_NAME``, though, so normalize a
+    legacy-only request at the middleware boundary until the compatibility
+    window closes.
+    """
+
+    cookies = request.cookies
+    legacy_value = cookies.get(LEGACY_SESSION_COOKIE_NAME)
+    if SESSION_COOKIE_NAME in cookies or legacy_value is None:
+        return request
+
+    alias = SimpleCookie()
+    alias[SESSION_COOKIE_NAME] = legacy_value
+    alias_header = alias[SESSION_COOKIE_NAME].OutputString()
+    headers = request.headers.copy()
+    existing = headers.get("Cookie", "")
+    headers["Cookie"] = f"{existing}; {alias_header}" if existing else alias_header
+    return request.clone(headers=headers)
 
 
 def trusted_client_ip(request: object) -> str | None:
@@ -250,6 +288,7 @@ async def request_security_middleware(
 ) -> web.StreamResponse:
     """Guard unsafe auth/history requests and add response security headers."""
 
+    request = _with_legacy_session_alias(request)
     if _needs_mutation_guard(request) and not _same_origin_request(request):
         response: web.StreamResponse = web.json_response(
             {"error": "request_rejected"}, status=403
@@ -416,30 +455,86 @@ class AiohttpAuthAdapter:
 
     def _set_cookie(
         self,
+        request: web.Request,
         response: web.StreamResponse,
         name: str,
         value: str,
         *,
         max_age: int,
     ) -> None:
+        secure = self._cookie_secure(request)
+        if name.startswith("__Host-") and not secure:
+            raise RuntimeError("__Host- cookies require a secure request context")
         response.set_cookie(
             name,
             value,
             max_age=max_age,
             path="/",
-            secure=self.public_https,
+            secure=secure,
             httponly=True,
             samesite="Lax",
         )
 
-    def _clear_cookie(self, response: web.StreamResponse, name: str) -> None:
+    def _cookie_secure(self, request: web.Request) -> bool:
+        """Enforce Secure for every cookie outside loopback development.
+
+        The deployment flag remains an operator declaration, but cannot relax
+        this invariant. HTTPS loopback requests are secure; plain HTTP
+        localhost remains available for the development console.
+        """
+
+        host = _request_host(request)
+        return request.secure if _is_localhost(host) else True
+
+    def _session_cookie_name(self, request: web.Request) -> str:
+        return (
+            SESSION_COOKIE_NAME
+            if self._cookie_secure(request)
+            else LEGACY_SESSION_COOKIE_NAME
+        )
+
+    @staticmethod
+    def _session_cookie(request: web.Request) -> tuple[str | None, str | None]:
+        for name in (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME):
+            value = request.cookies.get(name)
+            if value:
+                return name, value
+        return None, None
+
+    def _delete_cookie(
+        self,
+        response: web.StreamResponse,
+        name: str,
+        *,
+        request: web.Request | None,
+    ) -> None:
+        secure = name.startswith("__Host-") or (
+            self._cookie_secure(request)
+            if request is not None
+            else self.public_https
+        )
         response.del_cookie(
             name,
             path="/",
-            secure=self.public_https,
+            secure=secure,
             httponly=True,
             samesite="Lax",
         )
+
+    def _clear_cookie(
+        self,
+        response: web.StreamResponse,
+        name: str,
+        *,
+        request: web.Request | None = None,
+    ) -> None:
+        names = (
+            (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)
+            if name in (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)
+            else (name,)
+        )
+        for cookie_name in names:
+            self._delete_cookie(response, cookie_name, request=request)
 
     async def config_handler(self, request: web.Request) -> web.Response:
         if not self.enabled:
@@ -473,6 +568,7 @@ class AiohttpAuthAdapter:
             1, int((challenge.expires_at - now).total_seconds())
         )
         self._set_cookie(
+            request,
             response,
             PRE_AUTH_COOKIE_NAME,
             challenge.pre_auth_value,
@@ -602,13 +698,21 @@ class AiohttpAuthAdapter:
                 }
             }
         )
+        session_cookie_name = self._session_cookie_name(request)
         self._set_cookie(
+            request,
             response,
-            SESSION_COOKIE_NAME,
+            session_cookie_name,
             raw_token,
             max_age=max(1, int(self.absolute_ttl.total_seconds())),
         )
-        self._clear_cookie(response, PRE_AUTH_COOKIE_NAME)
+        if session_cookie_name == SESSION_COOKIE_NAME:
+            self._delete_cookie(
+                response, LEGACY_SESSION_COOKIE_NAME, request=request
+            )
+        else:
+            self._delete_cookie(response, SESSION_COOKIE_NAME, request=request)
+        self._clear_cookie(response, PRE_AUTH_COOKIE_NAME, request=request)
         return response
 
     async def _resolve_raw_token(
@@ -629,7 +733,7 @@ class AiohttpAuthAdapter:
         return identity
 
     async def me_handler(self, request: web.Request) -> web.Response:
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         if not raw_token:
             return _json_error("unauthenticated", 401)
         try:
@@ -642,12 +746,12 @@ class AiohttpAuthAdapter:
         if identity is None:
             await self.close_bound_sockets(raw_token)
             response = _json_error("unauthenticated", 401)
-            self._clear_cookie(response, SESSION_COOKIE_NAME)
+            self._clear_cookie(response, SESSION_COOKIE_NAME, request=request)
             return response
         return web.json_response({"user": dict(identity)})
 
     async def logout_handler(self, request: web.Request) -> web.Response:
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         store_failed = False
         if raw_token and self.store is not None:
             try:
@@ -670,7 +774,7 @@ class AiohttpAuthAdapter:
             if store_failed
             else web.json_response({"ok": True})
         )
-        self._clear_cookie(response, SESSION_COOKIE_NAME)
+        self._clear_cookie(response, SESSION_COOKIE_NAME, request=request)
         return response
 
     async def bind_websocket(
@@ -691,7 +795,7 @@ class AiohttpAuthAdapter:
         if not _origin_matches_request(request):
             raise web.HTTPForbidden(text="WebSocket origin rejected")
 
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         if not raw_token:
             identity = WebSocketIdentity(None, None, conversation_id)
             self._attach_websocket_identity(ws, identity)

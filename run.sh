@@ -223,6 +223,10 @@ fi
 # same-LAN, lower-latency deployment.
 NANO_CLAW_WS_AUDIO="${NANO_CLAW_WS_AUDIO:-1}"
 NANO_CLAW_MEMORY_DIR="${NANO_CLAW_MEMORY_DIR:-/app/data/memory}"
+# The deployed console terminates HTTPS at Cloudflare. Keep this explicit in
+# the container environment; cookie policy independently fails closed for
+# every non-localhost Host even if another launcher omits the declaration.
+NANO_CLAW_PUBLIC_HTTPS=1
 # The voice service cannot see riff's host-side .env or service-account path.
 # Forward only configured calendar values, and translate the credential path to
 # the read-only location mounted inside this container.
