@@ -6,10 +6,10 @@ integer ``phone_calls.id`` — the raw Telnyx call id contains characters
 that are hostile to URLs and the truncated session form is lossy — and
 resolved back to the raw ``call_id`` join key internally.
 
-Token-gated like the existing ``/api/calls`` log; the panel sends the
-shared token via the ``X-NC-Phone-Token`` header so it never lands in
-URLs. Read paths degrade to an ``error`` key rather than 5xx, matching
-the phone gateway convention.
+Operator-gated like the existing ``/api/calls`` log; the panel sends the
+dedicated read token via the ``X-NC-Operator-Read`` header so it never
+lands in URLs. Read paths degrade to an ``error`` key rather than 5xx,
+matching the phone gateway convention.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def _resolve_call(conn, raw_pk: str) -> dict | None:
 
 async def timeline_handler(request: web.Request) -> web.Response:
     """Full retrace payload for one call: events, cost, audio flags."""
-    if not phone._token_ok(request):
+    if not phone.require_operator_read(request):
         return web.Response(status=403, text="bad token")
     conn = phone._metrics_conn
     if conn is None:
@@ -155,7 +155,7 @@ async def inspect_handler(request: web.Request) -> web.Response:
     opt-in via ?words=1 and cached on disk beside the tap — the seam view
     itself renders instantly without it.
     """
-    if not phone._token_ok(request):
+    if not phone.require_operator_read(request):
         return web.Response(status=403, text="bad token")
     conn = phone._metrics_conn
     if conn is None:
@@ -219,7 +219,7 @@ async def _word_alignment(tap_dir: Path) -> list[dict]:
 
 async def audio_handler(request: web.Request) -> web.Response:
     """Stream one recorded audio leg (inbound/outbound/tts) as a WAV file."""
-    if not phone._token_ok(request):
+    if not phone.require_operator_read(request):
         return web.Response(status=403, text="bad token")
     conn = phone._metrics_conn
     if conn is None:

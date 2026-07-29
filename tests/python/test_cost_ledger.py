@@ -343,9 +343,9 @@ def test_empty_database_api_and_cost_page_render(monkeypatch):
 
     # /api/costs now takes the operator token — it carries real spend and
     # customer counts, so it is operator data like /api/calls.
-    monkeypatch.setenv("NANO_CLAW_PHONE_TOKEN", "ops-token")
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_READ_TOKEN", "ops-token")
     costs_request = make_mocked_request(
-        "GET", "/api/costs", headers={"X-NC-Phone-Token": "ops-token"}
+        "GET", "/api/costs", headers={"X-NC-Operator-Read": "ops-token"}
     )
     response = asyncio.run(server.costs_handler(costs_request))
     assert response.status == 200

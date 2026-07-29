@@ -2782,16 +2782,14 @@ async def models_handler(request: web.Request) -> web.Response:
 
 
 def _ops_token_ok(request: web.Request) -> bool:
-    """Operator-data gate, shared with /api/calls (see voice.call_review).
+    """Header-only operator-data gate shared with the call review API.
 
-    Imported lazily like every other `phone` use in this module: call_review
-    imports server for the metrics connection, so a module-level import would
-    be circular.
+    Imported lazily like every other ``phone`` use in this module.
     """
 
     from voice import phone
 
-    return phone._token_ok(request)
+    return phone.require_operator_read(request)
 
 
 async def metrics_handler(request: web.Request) -> web.Response:

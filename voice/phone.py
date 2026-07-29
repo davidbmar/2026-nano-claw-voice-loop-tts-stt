@@ -45,6 +45,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable
@@ -1923,13 +1924,52 @@ def _node() -> str:
 
 
 def _token_ok(request: web.Request) -> bool:
+    """Authenticate only the Telnyx webhook and media-stream surfaces."""
+
     expected = _cfg("NANO_CLAW_PHONE_TOKEN")
     if not expected:
         return False
-    # Telnyx webhook/media URLs carry ?token=; the call review panel sends a
-    # header instead so the token never lands in URLs or access logs.
+    # Telnyx webhook/media URLs must carry ?token= because Telnyx cannot set
+    # our custom header. Operator-data endpoints must use
+    # require_operator_read() instead.
     supplied = request.headers.get("X-NC-Phone-Token") or request.query.get("token")
-    return supplied == expected
+    return secrets.compare_digest(supplied or "", expected)
+
+
+OPERATOR_READ_HEADER = "X-NC-Operator-Read"
+OPERATOR_READ_TOKEN_ENV = "NANO_CLAW_OPERATOR_READ_TOKEN"
+
+
+def require_operator_read(request: web.Request) -> bool:
+    """Enforce header-only, fail-closed authentication for operator data.
+
+    ``NANO_CLAW_PHONE_TOKEN`` is accepted through the operator-read header
+    only as a one-release migration fallback. Query parameters are
+    deliberately never consulted here.
+    """
+
+    supplied = request.headers.get(OPERATOR_READ_HEADER, "")
+    expected = _cfg(OPERATOR_READ_TOKEN_ENV)
+    if expected:
+        return secrets.compare_digest(supplied, expected)
+
+    legacy = _cfg("NANO_CLAW_PHONE_TOKEN")
+    if legacy:
+        authorized = secrets.compare_digest(supplied, legacy)
+        if authorized:
+            log.warning(
+                "operator read for %s used deprecated NANO_CLAW_PHONE_TOKEN "
+                "fallback — set NANO_CLAW_OPERATOR_READ_TOKEN",
+                request.path,
+            )
+        return authorized
+
+    log.error(
+        "operator read refused for %s: NANO_CLAW_OPERATOR_READ_TOKEN is unset "
+        "— set it to enable operator-data reads",
+        request.path,
+    )
+    return False
 
 
 async def incoming_handler(request: web.Request) -> web.Response:
@@ -2063,8 +2103,8 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 async def calls_handler(request: web.Request) -> web.Response:
-    """Recent call log — token-gated: caller numbers are not public data."""
-    if not _token_ok(request):
+    """Recent call log — operator-gated: caller numbers are not public data."""
+    if not require_operator_read(request):
         return web.Response(status=403, text="bad token")
     try:
         conn = metrics_db.connect()

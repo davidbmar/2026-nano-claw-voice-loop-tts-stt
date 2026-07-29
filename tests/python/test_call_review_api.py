@@ -6,6 +6,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from voice import call_log, cost_ledger, metrics_db, phone
 
+OPERATOR_HEADERS = {"X-NC-Operator-Read": "operator-sekrit"}
+
 
 @pytest.fixture(autouse=True)
 def phone_env(monkeypatch, tmp_path):
@@ -13,6 +15,7 @@ def phone_env(monkeypatch, tmp_path):
     monkeypatch.setenv("TELNYX_API_KEY", "test-key")
     monkeypatch.setenv("NANO_CLAW_PHONE_WEBHOOK_BASE", "https://nano.example.com")
     monkeypatch.setenv("NANO_CLAW_PHONE_TOKEN", "sekrit")
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_READ_TOKEN", "operator-sekrit")
     # Seed events use tiny epoch timestamps; keep the startup retention
     # sweep from deleting them (sweep behavior is covered in test_call_log).
     monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "0")
@@ -87,7 +90,7 @@ def test_timeline_returns_call_events_cost_and_audio_flags(phone_env, tap_root):
         try:
             resp = await client.get(
                 f"/api/calls/{pk}/timeline",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             assert resp.status == 200
             body = await resp.json()
@@ -135,7 +138,7 @@ def test_timeline_cost_rows_carry_model(phone_env, tap_root):
         try:
             resp = await client.get(
                 f"/api/calls/{pk}/timeline",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             body = await resp.json()
             assert body["cost"][0]["model"] == "luxtts/lux_george"
@@ -145,15 +148,17 @@ def test_timeline_cost_rows_carry_model(phone_env, tap_root):
     run(_run())
 
 
-def test_timeline_query_token_also_accepted(phone_env):
+def test_timeline_query_token_is_rejected(phone_env):
     pk = _seed_call(phone_env)
 
     async def _run():
         client = TestClient(TestServer(make_app()))
         await client.start_server()
         try:
-            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
-            assert resp.status == 200
+            resp = await client.get(
+                f"/api/calls/{pk}/timeline?token=operator-sekrit"
+            )
+            assert resp.status == 403
         finally:
             await client.close()
 
@@ -166,12 +171,12 @@ def test_timeline_unknown_and_malformed_ids_return_404(phone_env):
         await client.start_server()
         try:
             resp = await client.get(
-                "/api/calls/9999/timeline", headers={"X-NC-Phone-Token": "sekrit"}
+                "/api/calls/9999/timeline", headers=OPERATOR_HEADERS
             )
             assert resp.status == 404
             resp = await client.get(
                 "/api/calls/not-a-number/timeline",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             assert resp.status == 404
         finally:
@@ -192,18 +197,18 @@ def test_audio_serves_wav_bytes_and_404s_missing_leg(phone_env, tap_root):
         try:
             resp = await client.get(
                 f"/api/calls/{pk}/audio/inbound",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             assert resp.status == 200
             assert await resp.read() == b"RIFFfakewav"
             resp = await client.get(
                 f"/api/calls/{pk}/audio/outbound",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             assert resp.status == 404
             resp = await client.get(
                 f"/api/calls/{pk}/audio/passwd",
-                headers={"X-NC-Phone-Token": "sekrit"},
+                headers=OPERATOR_HEADERS,
             )
             assert resp.status == 404
             resp = await client.get(f"/api/calls/{pk}/audio/inbound")
@@ -225,7 +230,9 @@ def test_audio_flags_reflect_existing_files(phone_env, tap_root):
         client = TestClient(TestServer(make_app()))
         await client.start_server()
         try:
-            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
+            resp = await client.get(
+                f"/api/calls/{pk}/timeline", headers=OPERATOR_HEADERS
+            )
             body = await resp.json()
             assert body["audio"] == {
                 "inbound": True,
@@ -244,7 +251,9 @@ def test_timeline_degrades_to_error_json_without_db(phone_env, monkeypatch):
         await client.start_server()
         try:
             monkeypatch.setattr(phone, "_metrics_conn", None)
-            resp = await client.get("/api/calls/1/timeline?token=sekrit")
+            resp = await client.get(
+                "/api/calls/1/timeline", headers=OPERATOR_HEADERS
+            )
             assert resp.status == 200
             body = await resp.json()
             assert body["error"] == "db unavailable"
@@ -272,7 +281,9 @@ def test_timeline_includes_wall_projected_timings(phone_env, tap_root):
         client = TestClient(TestServer(make_app()))
         await client.start_server()
         try:
-            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
+            resp = await client.get(
+                f"/api/calls/{pk}/timeline", headers=OPERATOR_HEADERS
+            )
             body = await resp.json()
             timings = body["timings"]
             assert [t["event"] for t in timings] == ["stt_done", "synth_done"]
@@ -293,7 +304,9 @@ def test_timeline_timings_empty_without_tap_dir(phone_env, tap_root):
         client = TestClient(TestServer(make_app()))
         await client.start_server()
         try:
-            resp = await client.get(f"/api/calls/{pk}/timeline?token=sekrit")
+            resp = await client.get(
+                f"/api/calls/{pk}/timeline", headers=OPERATOR_HEADERS
+            )
             body = await resp.json()
             assert body["timings"] == []
         finally:

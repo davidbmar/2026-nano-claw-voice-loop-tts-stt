@@ -6,11 +6,15 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-token="$(grep '^NANO_CLAW_PHONE_TOKEN=' "$root/.env" | cut -d= -f2)"
+token="$(sed -n 's/^NANO_CLAW_OPERATOR_READ_TOKEN=//p' "$root/.env" | tail -n 1)"
+if [ -z "$token" ]; then
+  # One-release migration fallback; the server still requires the new header.
+  token="$(sed -n 's/^NANO_CLAW_PHONE_TOKEN=//p' "$root/.env" | tail -n 1)"
+fi
 limit="${1:-25}"
 
 fetch() {
-  curl -sf -m 8 "https://$1/api/calls?token=$token" 2>/dev/null || echo '{"node":"'"$1"' (unreachable)","calls":[]}'
+  curl -sf -m 8 -H "X-NC-Operator-Read: $token" "https://$1/api/calls" 2>/dev/null || echo '{"node":"'"$1"' (unreachable)","calls":[]}'
 }
 
 {

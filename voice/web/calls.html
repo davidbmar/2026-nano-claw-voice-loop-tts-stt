@@ -320,9 +320,9 @@
     </header>
 
     <section id="token-gate" class="glass" style="display:none">
-      <label for="token-input">Phone ops token</label>
+      <label for="token-input">Operator read token</label>
       <div class="row">
-        <input id="token-input" type="password" autocomplete="off" placeholder="NANO_CLAW_PHONE_TOKEN">
+        <input id="token-input" type="password" autocomplete="off" placeholder="NANO_CLAW_OPERATOR_READ_TOKEN">
         <button class="primary" id="token-save">Unlock</button>
       </div>
     </section>
@@ -384,7 +384,7 @@
 
   <script>
     "use strict";
-    const TOKEN_KEY = "nc-phone-token";
+    const TOKEN_KEY = "nc-operator-read-token";
     const $ = (id) => document.getElementById(id);
     const state = $("state");
     const objectUrls = [];
@@ -399,7 +399,7 @@
     function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
 
     async function api(path) {
-      const resp = await fetch(path, { headers: { "X-NC-Phone-Token": token() } });
+      const resp = await fetch(path, { headers: { "X-NC-Operator-Read": token() } });
       if (resp.status === 403) {
         localStorage.removeItem(TOKEN_KEY);
         showGate();
@@ -412,7 +412,7 @@
       $("token-gate").style.display = "block";
       $("list-view").style.display = "none";
       $("detail-view").style.display = "none";
-      showState("Enter the phone ops token to view calls.", false);
+      showState("Enter the operator read token to view calls.", false);
     }
 
     function parseDbTime(text) {
@@ -597,6 +597,8 @@
         card.appendChild(audio);
         row.appendChild(card);
         try {
+          // Header-authenticate the fetch, then expose only a local Blob URL
+          // to <audio>; the operator credential never becomes part of src.
           const resp = await api(`/api/calls/${callPk}/audio/${leg}`);
           if (resp.ok) {
             const url = URL.createObjectURL(await resp.blob());
@@ -878,6 +880,7 @@
         });
         button.addEventListener("click", async () => {
           if (!inspect.audio.src && inspect.pk != null) {
+            // As above, the media element receives a credential-free Blob URL.
             const resp = await api(`/api/calls/${inspect.pk}/audio/outbound`);
             if (!resp.ok) return;
             const url = URL.createObjectURL(await resp.blob());

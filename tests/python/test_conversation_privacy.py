@@ -74,9 +74,9 @@ def test_metrics_writer_and_public_api_never_expose_transcripts(monkeypatch, tmp
 
     # /api/metrics now takes the operator token (it publishes live session IDs
     # and token counts); transcripts must stay absent either way.
-    monkeypatch.setenv("NANO_CLAW_PHONE_TOKEN", "ops-token")
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_READ_TOKEN", "ops-token")
     metrics_request = make_mocked_request(
-        "GET", "/api/metrics", headers={"X-NC-Phone-Token": "ops-token"}
+        "GET", "/api/metrics", headers={"X-NC-Operator-Read": "ops-token"}
     )
     response = run(server.metrics_handler(metrics_request))
     assert response.status == 200

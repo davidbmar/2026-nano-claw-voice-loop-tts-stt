@@ -129,7 +129,7 @@ def test_phone_media_websocket_is_never_guarded():
 # ── Operator-data endpoints ──────────────────────────────────
 # /api/metrics and /api/costs were readable by anyone: metrics published live
 # session IDs, the serving model, and token counts; costs published real spend
-# and customer counts. Both now take the same operator token as /api/calls.
+# and customer counts. Both now take the same operator read token as /api/calls.
 #
 # The session-ID publication mattered beyond the data itself — it is what would
 # have made a session-scoped lookup route genuinely reachable rather than
@@ -149,7 +149,11 @@ def test_ops_data_requires_token(path):
         )
         return await handler(request)
 
-    with mock.patch.dict(os.environ, {"NANO_CLAW_PHONE_TOKEN": "ops-token"}, clear=False):
+    env = {
+        "NANO_CLAW_OPERATOR_READ_TOKEN": "ops-token",
+        "NANO_CLAW_PHONE_TOKEN": "phone-token",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
         response = asyncio.run(exercise())
     assert response.status == 403
 
@@ -160,13 +164,17 @@ def test_ops_data_allows_correct_token(path):
 
     async def exercise():
         request = make_mocked_request(
-            "GET", path, headers={"X-NC-Phone-Token": "ops-token"}
+            "GET", path, headers={"X-NC-Operator-Read": "ops-token"}
         )
         handler = (
             server.metrics_handler if path == "/api/metrics" else server.costs_handler
         )
         return await handler(request)
 
-    with mock.patch.dict(os.environ, {"NANO_CLAW_PHONE_TOKEN": "ops-token"}, clear=False):
+    env = {
+        "NANO_CLAW_OPERATOR_READ_TOKEN": "ops-token",
+        "NANO_CLAW_PHONE_TOKEN": "phone-token",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
         response = asyncio.run(exercise())
     assert response.status == 200

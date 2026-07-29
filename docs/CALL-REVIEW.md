@@ -6,11 +6,26 @@ barge-ins — and listen back to both sides of the line.
 
 ## Access
 
-The panel and its API share the phone gateway token
-(`NANO_CLAW_PHONE_TOKEN`). The page asks for it once and stores it in
-`localStorage`; every request sends it as the `X-NC-Phone-Token` header so
-it never appears in URLs or access logs. The legacy `?token=` query form
-still works (Telnyx webhook/media URLs depend on it).
+The panel and all operator-data APIs use the dedicated
+`NANO_CLAW_OPERATOR_READ_TOKEN`. This unlocks `/api/calls`, every
+`/api/calls/{id}/*` route (including recorded audio), `/api/metrics`, and
+`/api/costs`. The page asks for it once and stores it in `localStorage`;
+every request sends it as the `X-NC-Operator-Read` header. The browser
+fetches recordings with that header and gives each `<audio>` element a
+local Blob URL.
+
+The operator read token must never appear in a URL. Operator-data routes
+ignore `?token=` even when its value is correct. With neither read token nor
+the migration credential configured, operator reads fail closed. For one
+migration release only, when `NANO_CLAW_OPERATOR_READ_TOKEN` is unset, the
+server accepts `NANO_CLAW_PHONE_TOKEN` through `X-NC-Operator-Read` and logs
+a deprecation warning.
+
+`NANO_CLAW_PHONE_TOKEN` is a separate Telnyx-facing secret. It authenticates
+only `POST /api/phone/incoming` and `GET /ws/phone-media`; those two routes
+continue to accept `?token=` because Telnyx must carry the credential in
+the webhook/media URL. Never reuse the same value for the phone and operator
+read tokens.
 
 Each node keeps its own database, so `/calls` on the M3 shows M3-served
 calls and `/calls` on the M1 shows failover calls. `scripts/call-log.sh`

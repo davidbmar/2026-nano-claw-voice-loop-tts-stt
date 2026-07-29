@@ -655,14 +655,14 @@ def _event_conn(tmp_path, monkeypatch):
     return conn
 
 
-def test_token_ok_accepts_header_token():
+def test_telnyx_token_ok_accepts_header_token():
     from aiohttp.test_utils import make_mocked_request
 
     ok = make_mocked_request(
-        "GET", "/api/calls", headers={"X-NC-Phone-Token": "sekrit"}
+        "POST", "/api/phone/incoming", headers={"X-NC-Phone-Token": "sekrit"}
     )
     bad = make_mocked_request(
-        "GET", "/api/calls", headers={"X-NC-Phone-Token": "wrong"}
+        "POST", "/api/phone/incoming", headers={"X-NC-Phone-Token": "wrong"}
     )
     assert phone._token_ok(ok) is True
     assert phone._token_ok(bad) is False
