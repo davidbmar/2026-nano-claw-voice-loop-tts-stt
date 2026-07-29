@@ -2,9 +2,9 @@
 
 Serves the per-call timeline (semantic events + cost receipts + audio
 availability) and the recorded audio legs. Calls are addressed by their
-integer ``phone_calls.id`` — the raw Telnyx call id contains characters
-that are hostile to URLs and the truncated session form is lossy — and
-resolved back to the raw ``call_id`` join key internally.
+integer ``phone_calls.id`` — the Telnyx call id contains characters that are
+hostile to URLs and the truncated session form is lossy — and resolved back
+to the sanitized ``call_id`` join key internally.
 
 Operator-gated like the existing ``/api/calls`` log; the panel sends the
 dedicated read token via the ``X-NC-Operator-Read`` header so it never
@@ -24,7 +24,7 @@ from pathlib import Path
 from aiohttp import web
 
 from voice import audio_inspect, call_log, cost_ledger, phone
-from voice.phone_tap import DEFAULT_TAP_ROOT
+from voice.phone_tap import DEFAULT_TAP_ROOT, tap_directory_for
 
 log = logging.getLogger("call_review")
 
@@ -38,6 +38,16 @@ LEG_FILES = {
 
 def _tap_root() -> Path:
     return Path(os.environ.get("NANO_CLAW_PHONE_TAP_DIR", DEFAULT_TAP_ROOT))
+
+
+def _tap_directory(call_id: str) -> Path:
+    """Resolve one contained tap child, including safe legacy colon paths."""
+
+    return tap_directory_for(
+        _tap_root(),
+        call_id,
+        allow_existing_legacy=True,
+    )
 
 
 def _iso(ts: float) -> str:
@@ -113,7 +123,10 @@ async def timeline_handler(request: web.Request) -> web.Response:
     if call is None:
         return web.json_response({"error": "unknown call"}, status=404)
     call_id = call["call_id"]
-    tap_dir = _tap_root() / call_id
+    try:
+        tap_dir = _tap_directory(call_id)
+    except ValueError:
+        return web.json_response({"error": "unsafe call id"}, status=404)
     events = [
         {
             "ts": event["ts"],
@@ -163,7 +176,10 @@ async def inspect_handler(request: web.Request) -> web.Response:
     call = _resolve_call(conn, request.match_info["call_pk"])
     if call is None:
         return web.json_response({"error": "unknown call"}, status=404)
-    tap_dir = _tap_root() / call["call_id"]
+    try:
+        tap_dir = _tap_directory(call["call_id"])
+    except ValueError:
+        return web.json_response({"error": "unsafe call id"}, status=404)
 
     loop = asyncio.get_running_loop()
     payload = await loop.run_in_executor(None, audio_inspect.summarize, tap_dir)
@@ -230,7 +246,11 @@ async def audio_handler(request: web.Request) -> web.Response:
     call = _resolve_call(conn, request.match_info["call_pk"])
     if call is None:
         return web.json_response({"error": "unknown call"}, status=404)
-    path = _tap_root() / call["call_id"] / filename
+    try:
+        tap_dir = _tap_directory(call["call_id"])
+    except ValueError:
+        return web.json_response({"error": "unsafe call id"}, status=404)
+    path = tap_dir / filename
     if not path.is_file():
         return web.json_response({"error": "audio unavailable"}, status=404)
     return web.FileResponse(path)

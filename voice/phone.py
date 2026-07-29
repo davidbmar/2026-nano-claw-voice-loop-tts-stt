@@ -44,7 +44,6 @@ import json
 import logging
 import math
 import os
-import re
 import secrets
 import time
 from collections import deque
@@ -81,7 +80,7 @@ from voice.phone_audio import (
     transcript_looks_incomplete,
     ulaw_decode,
 )
-from voice.phone_tap import DEFAULT_TAP_ROOT, CallTap
+from voice.phone_tap import DEFAULT_TAP_ROOT, CallTap, tap_directory_for
 from voice.processing_audio import processing_chime, thinking_tick
 from voice.sentence_pipeline import SentencePipeline
 from voice.speech_preparer import (
@@ -584,6 +583,13 @@ async def _telnyx_cmd(client: httpx.AsyncClient, cid: str, command: str, payload
 _active_calls: set[str] = set()
 
 
+def _contained_call_id(call_id: str) -> str:
+    """Return the sanitized id whose tap path is one contained child."""
+
+    root = os.environ.get("NANO_CLAW_PHONE_TAP_DIR", DEFAULT_TAP_ROOT)
+    return tap_directory_for(root, call_id).name
+
+
 class PhoneCall:
     """One live call: endpointing → STT → agent → TTS, half-duplex."""
 
@@ -594,20 +600,28 @@ class PhoneCall:
         *,
         _flow=_FLOW_NOT_SUPPLIED,
         _flow_domain_id=_FLOW_NOT_SUPPLIED,
+        _telnyx_call_id: str | None = None,
     ) -> None:
+        telnyx_call_id = (
+            str(call_id) if _telnyx_call_id is None else str(_telnyx_call_id)
+        )
+        safe_call_id = _contained_call_id(telnyx_call_id)
         self.ws = ws
-        self.call_id = call_id
-        _active_calls.add(call_id)
+        # Persistence, tap paths, and logs use the contained id. The raw id is
+        # retained only for Telnyx Call Control commands, where it is the
+        # provider's remote resource identifier.
+        self.call_id = safe_call_id
+        self.telnyx_call_id = telnyx_call_id
+        _active_calls.add(safe_call_id)
         # The agent API validates session ids against ^[A-Za-z0-9_-]{1,64}$.
         # Telnyx call ids now carry a "v3:" prefix, and the colon (plus any
         # other punctuation) makes the id fail validation, so /api/chat returns
-        # 400 and the caller hears only the fallback line. Strip to the safe
-        # alphabet before slicing so the phone session id is always accepted.
-        safe_call_id = re.sub(r"[^A-Za-z0-9_-]", "", call_id)
+        # 400 and the caller hears only the fallback line. The tap-directory
+        # invariant strips to the safe alphabet before this id is sliced.
         self.session_id = f"phone-{safe_call_id[:24]}"
         codec = phone_codec()
         rate = 16000 if codec == "l16" else 8000
-        self.tap = CallTap.create(call_id, codec, rate, rate)
+        self.tap = CallTap.create(safe_call_id, codec, rate, rate)
         self._tap_sentence_index = 0
         self._active_tap_sentence_index: int | None = None
         if self.tap:
@@ -657,7 +671,7 @@ class PhoneCall:
         else:
             self.vad = None
         self._vad_frames = 0
-        log.info("[phone %s] VAD: %s", call_id[:8], self.vad_mode)
+        log.info("[phone %s] VAD: %s", safe_call_id[:8], self.vad_mode)
         self.speaking = False
         self.interrupted = False
         self.closed = False
@@ -693,7 +707,7 @@ class PhoneCall:
         start_voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
         call_log.emit(
             _metrics_conn,
-            call_id,
+            safe_call_id,
             "call_start",
             {
                 "codec": codec,
@@ -724,6 +738,8 @@ class PhoneCall:
     ) -> PhoneCall:
         """Build live-calendar flows off-loop before the phone greeting."""
 
+        telnyx_call_id = str(call_id)
+        safe_call_id = _contained_call_id(telnyx_call_id)
         domain_id = active_scheduling_domain(get_flow_mode())
         flow = (
             await FlowSession.create_async(domain_id=domain_id)
@@ -732,9 +748,10 @@ class PhoneCall:
         )
         return cls(
             ws,
-            call_id,
+            safe_call_id,
             _flow=flow,
             _flow_domain_id=domain_id,
+            _telnyx_call_id=telnyx_call_id,
         )
 
     async def close(self) -> None:
@@ -884,7 +901,12 @@ class PhoneCall:
                     {"text": IDLE_GOODBYE_TEXT, "mode": "idle"},
                 )
                 await self.speak(IDLE_GOODBYE_TEXT)
-                await _telnyx_cmd(self._http, self.call_id, "hangup", {})
+                await _telnyx_cmd(
+                    self._http,
+                    getattr(self, "telnyx_call_id", self.call_id),
+                    "hangup",
+                    {},
+                )
                 self.closed = True
                 return
 
@@ -1325,7 +1347,12 @@ class PhoneCall:
                 )
                 await self.speak(reply.text)
                 if reply.done:
-                    await _telnyx_cmd(self._http, self.call_id, "hangup", {})
+                    await _telnyx_cmd(
+                        self._http,
+                        getattr(self, "telnyx_call_id", self.call_id),
+                        "hangup",
+                        {},
+                    )
                     self.closed = True
                 return
             await self._stream_reply(text)
@@ -1983,9 +2010,10 @@ async def incoming_handler(request: web.Request) -> web.Response:
     data = body.get("data", {})
     event = data.get("event_type", "")
     payload = data.get("payload", {})
-    cid = payload.get("call_control_id", "")
+    cid = str(payload.get("call_control_id", "") or "")
 
     if event == "call.initiated" and cid:
+        safe_cid = _contained_call_id(cid)
         now = time.monotonic()
         for k, t in list(_answered.items()):  # keep the dedup map bounded
             if now - t > 3600:
@@ -2002,7 +2030,7 @@ async def incoming_handler(request: web.Request) -> web.Response:
         caller = payload.get("from", "?")
         log.info("[phone] incoming call from %s → answering", caller)
         metrics_db.record_call_start(
-            _metrics_conn, cid, caller, payload.get("to", "?"), _node()
+            _metrics_conn, safe_cid, caller, payload.get("to", "?"), _node()
         )
         codec = phone_codec()
         async with httpx.AsyncClient() as client:
@@ -2016,9 +2044,10 @@ async def incoming_handler(request: web.Request) -> web.Response:
                 "stream_bidirectional_sampling_rate": phone_rate(),
             })
     elif event == "call.hangup":
-        log.info("[phone] hangup cid=%s", cid[:16])
+        safe_cid = _contained_call_id(cid)
+        log.info("[phone] hangup cid=%s", safe_cid[:16])
         _answered.pop(cid, None)
-        metrics_db.record_call_end(_metrics_conn, cid)
+        metrics_db.record_call_end(_metrics_conn, safe_cid)
 
     return web.json_response({"ok": True})
 
@@ -2043,13 +2072,20 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             if event == "start":
                 meta = msg.get("start") or {}
-                cid = meta.get("call_control_id") or msg.get("stream_id") or "unknown"
+                cid = str(
+                    meta.get("call_control_id")
+                    or msg.get("stream_id")
+                    or "unknown"
+                )
+                safe_cid = _contained_call_id(cid)
                 call = await PhoneCall.create_async(ws, cid)
-                log.info("[phone %s] media stream started", cid[:8])
+                log.info("[phone %s] media stream started", safe_cid[:8])
                 # Calls that never hit the webhook (loopback tests, direct
                 # media connections) still get a reviewable phone_calls row;
                 # INSERT OR IGNORE keeps the webhook row when both fire.
-                metrics_db.record_call_start(_metrics_conn, cid, "?", "?", _node())
+                metrics_db.record_call_start(
+                    _metrics_conn, safe_cid, "?", "?", _node()
+                )
                 greeting = _compose_greeting(
                     _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
                 )
@@ -2062,7 +2098,7 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if await _stt_reachable(getattr(call, "_http", None)):
                     call_log.emit(
                         _metrics_conn,
-                        cid,
+                        safe_cid,
                         "assistant_turn",
                         {"text": greeting, "mode": "greeting"},
                     )
@@ -2071,21 +2107,23 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     log.error(
                         "[phone %s] STT unreachable at answer — apologizing"
                         " and hanging up",
-                        cid[:8],
+                        safe_cid[:8],
                     )
                     call_log.emit(
                         _metrics_conn,
-                        cid,
+                        safe_cid,
                         "degraded_answer",
                         {"reason": "stt_unreachable"},
                     )
                     call_log.emit(
                         _metrics_conn,
-                        cid,
+                        safe_cid,
                         "assistant_turn",
                         {"text": DEGRADED_ANSWER_LINE, "mode": "error"},
                     )
-                    asyncio.create_task(_apologize_and_hangup(call, cid))
+                    asyncio.create_task(
+                        _apologize_and_hangup(call, cid, safe_cid)
+                    )
             elif event == "media" and call:
                 call.feed_media((msg.get("media") or {}).get("payload", ""))
             elif event == "stop":
@@ -2096,9 +2134,9 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
             await call.close()
             # Loopback/dropped-socket calls never get a hangup webhook; give
             # them a duration (a webhook-recorded end is never overwritten).
-            # `cid` is always bound when `call` is — both are assigned only
-            # in the start branch.
-            metrics_db.record_call_end_if_open(_metrics_conn, cid)
+            # `safe_cid` is always bound when `call` is — both are assigned
+            # only in the start branch.
+            metrics_db.record_call_end_if_open(_metrics_conn, safe_cid)
     return ws
 
 
@@ -2393,18 +2431,22 @@ async def _stt_reachable(http) -> bool:
         return False
 
 
-async def _apologize_and_hangup(call, cid: str) -> None:
+async def _apologize_and_hangup(
+    call,
+    telnyx_call_id: str,
+    safe_call_id: str,
+) -> None:
     """Degraded answer: canned apology (cache/piper-backed — no service
     dependency) then hang up. Best-effort: media-only calls have no Telnyx
     leg to hang up."""
     try:
         await call.speak(DEGRADED_ANSWER_LINE)
     except Exception:
-        log.exception("[phone %s] degraded apology failed", cid[:8])
+        log.exception("[phone %s] degraded apology failed", safe_call_id[:8])
     try:
-        await _telnyx_cmd(call._http, cid, "hangup", {})
+        await _telnyx_cmd(call._http, telnyx_call_id, "hangup", {})
     except Exception:
-        log.exception("[phone %s] degraded hangup failed", cid[:8])
+        log.exception("[phone %s] degraded hangup failed", safe_call_id[:8])
     call.closed = True
 
 
