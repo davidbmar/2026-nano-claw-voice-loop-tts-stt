@@ -765,6 +765,8 @@ class PhoneCall:
             if not self._call_end_emitted:
                 self._call_end_emitted = True
                 call_log.emit(_metrics_conn, self.call_id, "call_end")
+            if tap is not None:
+                _schedule_seam_capture(self.call_id, getattr(tap, "directory", None))
 
     def _sync_flow_mode(self) -> None:
         """Re-evaluate the Flow dropdown at each turn boundary so a change in
@@ -2072,11 +2074,57 @@ async def calls_handler(request: web.Request) -> web.Response:
             {"node": _node(), "vad": get_vad_mode(), "calls": [], "error": "db unavailable"}
         )
     try:
+        calls = metrics_db.recent_calls(conn)
+        _attach_seam_summaries(conn, calls)
         return web.json_response(
-            {"node": _node(), "vad": get_vad_mode(), "calls": metrics_db.recent_calls(conn)}
+            {"node": _node(), "vad": get_vad_mode(), "calls": calls}
         )
     finally:
         conn.close()
+
+
+def _attach_seam_summaries(conn, calls: list) -> None:
+    """Merge each call's stored seam aggregate into the listing, in one query.
+
+    Purely additive and fully defensive: the call list is the operator's
+    primary view, so a missing or malformed seam row must degrade to "no seam
+    data for that call" rather than break the panel.
+    """
+
+    if not calls:
+        return
+    ids = [c.get("call_id") for c in calls if isinstance(c, dict) and c.get("call_id")]
+    if not ids:
+        return
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            "SELECT call_id, payload FROM call_events "
+            f"WHERE kind = 'audio_seams' AND call_id IN ({placeholders}) "
+            "ORDER BY seq ASC",
+            ids,
+        ).fetchall()
+    except Exception:
+        log.warning("seam summary lookup failed; listing served without it", exc_info=True)
+        return
+    latest: dict[str, dict] = {}
+    for call_id, payload in rows:
+        try:
+            parsed = json.loads(payload) if payload else None
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            latest[call_id] = parsed
+    for call in calls:
+        summary = latest.get(call.get("call_id")) if isinstance(call, dict) else None
+        if not summary:
+            continue
+        call["seams"] = {
+            "seamCount": summary.get("seamCount"),
+            "harshCount": summary.get("harshCount"),
+            "harshRate": summary.get("harshRate"),
+            "voice": summary.get("voice"),
+        }
 
 
 async def vad_get_handler(request: web.Request) -> web.Response:
@@ -2099,6 +2147,80 @@ async def vad_set_handler(request: web.Request) -> web.Response:
     _overrides["NANO_CLAW_PHONE_VAD"] = mode
     _persist_overrides()
     return web.json_response({"active": get_vad_mode()})
+
+
+def _seam_capture_enabled() -> bool:
+    return _cfg("NANO_CLAW_PHONE_SEAM_METRICS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _capture_seam_metrics(call_id: str, tap_dir) -> None:
+    """Persist a compact seam summary for one finished call. Never raises.
+
+    The seam analysis already exists (audio_inspect) but only ran on demand
+    when someone opened one call in the review panel, so nothing accumulated:
+    there was no way to ask whether clicks are getting worse, or which voice
+    produces them. This writes the aggregate — not the per-seam list, which
+    stays available on demand from the tap — as a `audio_seams` call_event,
+    alongside the pipeline settings that were in force, so the numbers are
+    correlatable rather than just present.
+
+    Runs in an executor off the call path. A failure here must never affect a
+    call, so everything is swallowed after logging.
+    """
+
+    try:
+        from voice import audio_inspect
+
+        analysis = audio_inspect.analyze_outbound(Path(tap_dir))
+        if not analysis.get("available"):
+            return
+        seams = analysis.get("seams") or []
+        harsh = int(analysis.get("harshCount", 0))
+        try:
+            speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
+        except ValueError:
+            speed = 1.0
+        call_log.emit(
+            _metrics_conn,
+            call_id,
+            "audio_seams",
+            {
+                "durationS": analysis.get("durationS"),
+                "peak": analysis.get("peak"),
+                "seamCount": len(seams),
+                "harshCount": harsh,
+                # Rate matters more than count: a long call has more seams.
+                "harshRate": round(harsh / len(seams), 4) if seams else 0.0,
+                "edgeSummary": analysis.get("edgeSummary"),
+                # Pipeline settings in force, so a regression can be attributed.
+                "voice": _cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
+                "model": _cfg("NANO_CLAW_PHONE_MODEL", ""),
+                "speed": speed,
+                "sttSize": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
+                "speechMode": phone_speech_mode(),
+                "speechVersion": SPEECH_COMPILER_VERSION,
+                "sampleRate": analysis.get("sampleRate"),
+            },
+        )
+    except Exception:
+        log.exception("[phone %s] seam metric capture failed", str(call_id)[:8])
+
+
+def _schedule_seam_capture(call_id: str, tap_dir) -> None:
+    """Fire-and-forget the seam analysis so call teardown never waits on numpy."""
+
+    if not tap_dir or not _seam_capture_enabled():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.run_in_executor(None, _capture_seam_metrics, call_id, tap_dir)
 
 
 async def config_get_handler(request: web.Request) -> web.Response:

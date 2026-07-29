@@ -1,9 +1,15 @@
 # Agent Self-Knowledge: Settings and Health as Introspection Tools
 
 2026-07-28 · branch `call-review-panel` · proposed by David ("the AI doesn't
-know what is selected on the panel... can it query the state of the settings as
+know what is selected on the panel… can it query the state of the settings as
 they are right now?"), scoped to query-on-demand rather than per-turn digest at
 David's direction.
+
+**Revision 2** (same day) after an adversarial Codex review returned *needs
+rework* with 16 findings, 7 high (`.context/results/089-*`). Revision 1 is in
+git history at `f612af7`. The findings did not scatter — they clustered on one
+root cause, and this revision restructures around it rather than patching each
+symptom.
 
 ## Problem
 
@@ -13,283 +19,370 @@ barge-in cluster, voice, speed, Whisper model, and the rest. It has no idea what
 any of them are **set to**, and no idea whether the machine underneath it is
 healthy.
 
-So two questions it cannot answer today:
+Two questions it cannot answer:
 
-1. *"What are your settings right now?"* — it will describe the panel generically
+1. *"What are your settings right now?"* — it describes the panel generically
    from static prose, which sounds like an answer and is not one.
 2. *"Why do you sound choppy — is the machine overloaded?"* — it cannot
    distinguish a bad configuration from a degraded host. On 2026-07-26 a bumpy
-   call was diagnosed as host degradation, not pipeline config; an agent
-   reasoning from settings alone would have blamed a perfectly fine barge-in
-   setup.
+   call was host degradation, not pipeline config; an agent reasoning from
+   settings alone would have blamed a perfectly fine barge-in setup.
 
-The blocker is not data availability. It is capability:
+The blocker is capability, not data. Production voice agents run
+`NANO_CLAW_DISABLE_TOOLS=1` — zero tools, no tool-calling — because the
+alternative registers `ShellTool`, `ReadFileTool`, and `WriteFileTool` together.
+`ReadFileTool` has no path restriction (`src/agent/tools/file.ts:45` is a bare
+`readFileSync(path)`) and secrets reach the container through `docker -e` (see
+the `-e` block in `run.sh`, roughly lines 251–290), so `/proc/self/environ` is a
+live exfiltration target. On a publicly-dialable line, knowledge-only was the
+only defensible setting.
 
-```
-deploy/m1.env.defaults:6:NANO_CLAW_DISABLE_TOOLS=1
-deploy/m3.env.defaults:6:NANO_CLAW_DISABLE_TOOLS=1
-```
+**The feature is self-knowledge. The enabling change is a capability model that
+lets a deployment expose safe tools without exposing a shell.**
 
-Production voice agents run knowledge-only — **zero tools registered, no
-tool-calling at all**. And `createToolRegistry()` (`src/api/server.ts:228-244`)
-is all-or-nothing: enabling tools registers `ShellTool`, `ReadFileTool`, and
-`WriteFileTool` together. `ReadFileTool` has no path restriction whatsoever
-(`src/agent/tools/file.ts:45` is a bare `readFileSync(path)`), and `run.sh:287`
-passes secrets into the container via `-e`, so `/proc/self/environ` exposes every
-API key. On a publicly-dialable voice line, knowledge-only was the only
-defensible setting.
+## What the review changed
 
-**This design breaks that binary.** The feature is self-knowledge; the enabling
-change is a capability model that lets a deployment expose safe tools without
-exposing a shell.
+Revision 1 treated this as "add two tools." The review showed it is "build a
+capability boundary, then add two tools through it." Three findings in
+particular reframed the work:
+
+- **There are two tool-registration paths, not one.**
+  `AgentLoop.registerBuiltInTools()` (`src/agent/loop.ts:76-90`) registers
+  shell/read/write whenever `config.tools.enabled !== false`, independent of
+  `createToolRegistry()`, and `AgentLoop` executes tool calls immediately with
+  no approval pause. Enforcement in one path is not enforcement.
+- **There are two approval pauses, not one.** Non-streaming at
+  `src/api/server.ts:649-679`, streaming at `~1005-1027`. Voice turns request
+  SSE, so revision 1's "bypass the pause at line 657" would have shipped a
+  feature that does not work on the only path that matters.
+- **An empty advertised schema is documentation, not enforcement.** Providers
+  can emit undeclared keys; `safeParseToolArgs()` accepts any parsed object and
+  manufactures `_raw` for malformed JSON, and `ToolRegistry.execute()` passes it
+  straight through. "Zero parameters" has to be checked where the tool runs.
 
 ## Invariant
 
 > A tool reachable by an anonymous caller must expose **no caller-controlled
-> target**: zero parameters, fixed data sources, allowlisted output fields.
+> target**: zero parameters *enforced at execution*, fixed data sources, and a
+> typed output DTO whose every field, error path, and exception is safe to
+> publish verbatim.
 
-Read-vs-write is explicitly *not* the safety axis. The most dangerous tool in the
-current registry is a read tool. What predicts danger is whether anything the
-caller says can change what the tool touches:
+Read-vs-write is not the safety axis; the most dangerous tool in the registry
+today is a read. What predicts danger is whether anything the caller says can
+change what the tool touches.
 
 | Tool | Verb | Caller picks target? | Anonymous-safe |
 |---|---|---|---|
-| `get_settings()` | read | no — no parameters | yes, structurally |
-| `get_system_health()` | read | no — no parameters | yes, structurally |
+| `get_settings()` | read | no — zero args, enforced at execution | yes |
+| `get_system_health()` | read | no — zero args, enforced at execution | yes |
 | `read_file(path)` | read | **yes** | no — `/proc/self/environ` |
 | `shell(cmd)` | exec | yes | no |
 | `write_file(path, content)` | write | yes | no |
 
-Safety by construction, not by vigilance: "remember not to add a tool that reads
-`.env`" is a policy living in a reviewer's head and it holds until someone adds
-`get_config_value(key)` because it looked harmless. A tool with no parameters
-offers no lever to pull.
+Two corollaries the review forced, both of which revision 1 got wrong:
 
-## Decisions
+**The DTO must be safe to publish, not merely narrated safely.** Output goes to
+an LLM provider and must be assumed readable verbatim by an adversarial model. A
+prompt instruction not to speak raw values is not a security control. A
+field-name allowlist is also insufficient — secrets can ride inside *allowed*
+fields, and `ToolRegistry.execute()` currently turns a thrown exception's raw
+`.message` into tool output, which is how internal URLs, `ECONNREFUSED` targets,
+and filesystem paths escape.
 
-### 1. Query on demand, not a per-turn digest
+**Identifier secrecy is a property of the whole system, never of the
+identifier.** Revision 1 proposed `GET /api/runtime/settings?sessionId=…`; the
+review rated blind guessing impractical because conversation IDs are 128-bit
+UUIDs. Both of us missed that `/api/metrics` published live session IDs to
+anonymous callers. It was never guessing. That endpoint is now gated (below),
+but **this design must not depend on session IDs being secret** — an ID is a
+name, not a credential.
 
-State is asked for rarely and explicitly. A digest injected every turn costs
-tokens and attention permanently — and worse, `kokoro_client.is_healthy()` is an
-HTTP probe, so a health digest means running network probes on every turn to
-serve a question asked once in a hundred. Health is only meaningful at the
-instant of asking.
+## Prerequisite — SHIPPED, not assumed
 
-Rejected alternative — digest after `SYSTEM_CACHE_MARKER` (`context.ts:105`):
-cheap for settings, wrong for health, and it does not compose. Every future fact
-would make every turn heavier forever. A tool-shaped capability composes: call
-history, cost ledger, and next-appointment all become the same shape later.
+Review finding 4 identified a pre-existing hole that undermined the whole
+"read-only phase is safe" premise: `POST /api/phone/config`, `/api/phone/vad`,
+`/api/voice/flow`, and `/api/voice/region-model` were mounted on the same public
+aiohttp app as the console with no authentication, so anyone could change the
+live phone line's model/voice/STT and the assistant mode.
 
-### 2. Deployment allowlist by tool name, not a safety tier
+Fixed and deployed the same day:
+
+- `5fbbd6b` — those four writes now require `NANO_CLAW_OPERATOR_PASSWORD` via an
+  `X-NC-Operator` header (`secrets.compare_digest`), fail closed when unset.
+  Adding them to `SENSITIVE_PATH_PREFIXES` alone would **not** have fixed it:
+  that constant applies CSRF and response hardening, never authorization, and
+  any direct HTTP client can send the three same-origin headers. `/api/phone/incoming`
+  is deliberately excluded (Telnyx has its own token; guarding it kills every
+  inbound call) with a regression test.
+- `10bdfa7` — `/api/metrics` and `/api/costs` now take the operator token.
+
+Both verified live. This design assumes that baseline and does not re-litigate
+it. Note for future work: `SENSITIVE_PATH_PREFIXES` does two unrelated jobs
+(CSRF + response hardening) and its name invites the assumption that membership
+implies authorization. It caused that mistake twice in one session. Worth
+renaming.
+
+## Architecture
+
+Two layers. Layer A is most of the work and is reusable by every future tool;
+Layer B is the feature.
+
+### Layer A — one capability platform
+
+**A1. Single tool catalog and one startup-resolved policy.** One factory
+enumerates every tool with its metadata. One policy object is resolved once at
+startup and is immutable thereafter. Both the HTTP API and every `AgentLoop`
+consumer (CLI, gateway channels, cron, subagents) obtain tools only through it;
+the duplicate registration in `loop.ts` is deleted. The environment allowlist is
+authoritative — config may further *disable* a capability but may never *add*
+one.
+
+**A2. Deployment allowlist by tool name.**
 
 ```bash
 NANO_CLAW_TOOLS=get_settings,get_system_health
 ```
 
-`ToolRegistry` is already `Map<string, BaseTool>` keyed by `tool.name`
-(`registry.ts:47,53`), so filtering at registration is a small change.
-
-Chosen over a tier/class enum because **a list fails closed as the codebase
-grows**. When someone adds `book_appointment(...)` in six months, a tier forces
-them to classify it and a misclassification ships live on the next deploy. With
-an allowlist the new tool is inert until a deploy file names it — new capability
-defaults to dark, everywhere, always.
-
-Secondary benefits: `deploy/m1.env.defaults` becomes the complete answer to "what
+Chosen over a safety tier because **a list fails closed as the codebase grows**:
+a tier forces whoever adds `book_appointment(...)` to classify it, and a
+misclassification ships live on the next deploy, whereas an unnamed tool is
+inert. Unset means no tools — the same fail-closed default as today's prod.
+Secondary benefit: `deploy/m1.env.defaults` becomes the complete answer to "what
 can this agent do?" without reading TypeScript, and M1/M3/nano-claw can diverge
-in capability without sharing a taxonomy.
+without sharing a taxonomy.
 
-**Unset means no tools.** An absent `NANO_CLAW_TOOLS` registers nothing — the
-same fail-closed default as today's prod. Every environment that wants tools
-names them explicitly, including local dev; `.env.example` ships with the two
-introspection tools listed so a fresh checkout gets self-knowledge and nothing
-else.
-
-### 3. `NANO_CLAW_ALLOW_UNSAFE_TOOLS` defaults to false — including dev
-
-An allowlist alone makes safety a *deployment-config* property: a one-line env
-edit (`NANO_CLAW_TOOLS=get_settings,read_file`) exposes secrets with no code
-review and no test to catch it. The seatbelt is one boolean on the base class,
-not a taxonomy:
+**A3. `unsafe` and `requiresApproval` on `BaseTool`, both defaulting `true`.**
 
 ```typescript
 export abstract class BaseTool {
   /** Caller-controlled target (path, command, free text). Default: assume yes. */
   unsafe = true;
+  /** Pause the conversation for user approval before executing. */
+  requiresApproval = true;
 }
 ```
 
-`ShellTool`, `ReadFileTool`, `WriteFileTool` inherit `true`. The two
-introspection tools set `false`. Naming an unsafe tool without
-`NANO_CLAW_ALLOW_UNSAFE_TOOLS` **refuses it at boot with a loud error** rather
-than silently registering or silently dropping it.
+Kept as separate fields: the first governs whether a tool may be *exposed*, the
+second whether a call *interrupts the conversation*. They coincide today;
+conflating them would surprise us the first time they do not. Naming an `unsafe`
+tool without `NANO_CLAW_ALLOW_UNSAFE_TOOLS` is a **startup error**.
 
-Default is **false in every environment, dev included** — there is no
-"trusted" default. Dev opts in deliberately, the same as prod would have to.
-Written as the word `false` rather than `0` in `.env.example` and all
-`deploy/*.env.defaults`, so the intent reads at a glance. The existing truthy
-parser (`['1','true','yes']`, `src/config/index.ts:126`) already treats `false`
-as falsy; no parser change is needed.
+`NANO_CLAW_ALLOW_UNSAFE_TOOLS` defaults to **false in every environment, dev
+included** — there is no "trusted" default, because a dev-convenient default is
+exactly what leaks to prod via a copied env file or a shared image. Written as
+the word `false`, not `0`.
 
-`NANO_CLAW_DISABLE_TOOLS` is retired. `NANO_CLAW_TOOLS=` (empty) is the
-knowledge-only mode, which is what `scripts/cross_source_eval/run_eval.py:1009`
-becomes.
+**A4. Runtime zero-argument enforcement.** Advertised schemas get
+`additionalProperties: false`, but nothing depends on the provider honouring it.
+At execution, a tool with `unsafe === false` requires a plain object with
+**exactly zero own keys** and is refused otherwise — extra keys, arrays,
+primitives, malformed JSON, and the `_raw` fallback all fail closed before the
+tool body runs.
 
-### 4. Read-only tools skip the approval pause
+**A5. `ToolExecutionContext` for trusted ambient data.** The current session ID
+and anything else the tool legitimately needs arrives through a typed context
+supplied by the server, **never through model-supplied arguments**. This is what
+lets `get_settings()` be session-scoped while taking zero parameters, and it is
+why no caller-selectable session route is needed anywhere.
 
-`src/api/server.ts:657` pauses on **any** tool call — correct for the only tools
-that exist today, wrong for a side-effect-free read. In a spoken conversation,
-answering "what are your settings?" with an approval dialog is not a slow answer,
-it is a broken one.
+**A6. One shared tool-call dispatcher** used by both the streaming and
+non-streaming loops. Defined behaviour:
 
-`BaseTool` gains `requiresApproval`, defaulting to `true`. Tools with
-`unsafe = false` set it `false` and bypass the pause at line 657. `unsafe` and
-`requiresApproval` stay separate fields: the first governs whether a tool may be
-*exposed*, the second whether a call *interrupts the conversation*. They coincide
-today; conflating them would surprise us the first time they do not.
+- auto-execute only registered tools with `requiresApproval === false`, append
+  results with the correct tool-call ID, continue within the iteration limit;
+- a batch mixing approval-free and approval-required calls **pauses the whole
+  batch before executing anything** (safest interpretation);
+- unknown tool names fail closed;
+- execution failure and cancellation produce a structured result, never a raw
+  exception.
 
-### 5. Agent → voice server is a new, deliberate dependency arrow
+**A7. Boot validation before `listen()`.** `createServer()` currently never
+calls `createToolRegistry()` — it is invoked lazily from chat loops, so
+revision 1's "loud boot error" would in fact have been a first-caller error,
+with `/api/health` passing and the container happily serving. Allowlist names
+and the unsafe opt-in are validated at startup against the full catalog, and the
+process refuses to start on a bad deployment. The resolved tool names are logged
+(names only, no secrets).
 
-Today the arrow is one-way: the voice server calls `POST /api/chat`
-(`voice/server.py:1319`); the Node agent never calls back. Both tools need state
-that lives in the voice server, so the arrow must be added.
+**A8. Flag migration contract.** The existing truthy expression is inline and
+specific to `NANO_CLAW_DISABLE_TOOLS`, so revision 1's "no parser change needed"
+was misleading. Add one shared strict parser. For at least one release, a legacy
+`NANO_CLAW_DISABLE_TOOLS=1` **overrides to zero tools** (or a legacy/new
+conflict is rejected outright) — silently ignoring an operator's explicit kill
+switch is unacceptable. `run.sh` must forward `NANO_CLAW_TOOLS`,
+`NANO_CLAW_ALLOW_UNSAFE_TOOLS`, and `NANO_CLAW_VOICE_URL`. Test matrix: unset,
+empty, whitespace, duplicates, unknown names, `false`, `0`, mixed case,
+legacy-only, and conflicting old/new.
 
-Two new read-only aiohttp routes:
+### Layer B — the two tools
 
-- `GET /api/runtime/settings?sessionId=…` — resolves via `_agent_session_id()`
-- `GET /api/runtime/health`
+**B1. Live runtime registry.** The data does not exist in a reachable shape
+today: the browser `Session` is a local variable inside `websocket_handler`, the
+history runtime holds only owner metadata (anonymous sockets are absent), phone
+keeps `_active_calls: set[str]` rather than a `session_id → PhoneCall` map, and
+`_agent_session_id()` is one-way — it mints an ID from a `Session`, it cannot
+resolve one back. So: a minimal registry keyed by the server-owned Node session
+ID, with registration and removal on browser and phone lifecycle, storing only a
+typed snapshot provider. Pre-session, disconnected, and expired IDs return a
+fixed `unavailable` DTO.
 
-Reached from Node via `NANO_CLAW_VOICE_URL`, with a **hard timeout (500ms) and
-graceful degradation**: on timeout or error the tool returns a structured
-"unavailable" result and the agent says it cannot reach its own status. A
-self-check must never hang a live call.
+**B2. Internal-only transport.** The agent (Node) reaching the voice server
+(Python) is a genuinely new dependency arrow — today the voice server calls
+`POST /api/chat` and Node never calls back. It is **not** exposed as a
+caller-selectable route on the public listener. The session ID comes from the
+trusted execution context (A5), the endpoint requires an internal service
+credential, browser-origin requests are rejected, and a mismatch returns `404`
+rather than confirming existence.
 
-## The two tools
+**B3. `get_settings()` — zero arguments, one bounded internal call.** Six
+setting fields live on the browser `Session` (`voice_id`, `speed`, `model`,
+`stt_size`, `analysis_style`, `speech_mode` — `voice/webrtc.py:106-119`; revision
+1 said "ten of ~13 controls are already on `Session`", which was wrong). The rest
+are globals: assistant mode via `get_flow_profile()`, scheduler model, and the
+phone settings. Phone values are globals read at *different times* — some at the
+next utterance, some at the next turn, some at the next sentence — so the DTO
+carries an explicit **effective-now vs next-turn** label per field rather than
+implying they all apply immediately.
 
-### `get_settings()` — no arguments, no I/O
+Revision 1 described this as "no I/O", which was wrong: the Python snapshot is
+memory-only, but the Node tool necessarily performs one bounded internal HTTP
+call.
 
-Reads what is already in memory. Ten of ~13 panel controls are *already* on the
-server-side `Session` object (`voice/webrtc.py:106-119`) and nothing has ever
-read them for prompt purposes:
+**B4. `get_system_health()` — zero arguments, bounded probes.** Revision 1's
+"hard timeout (500ms)" did not bound the work: `kokoro_client.is_healthy()` and
+`lux_client.is_healthy()` are synchronous with 3-second timeouts (STT uses 1.5s),
+and timing out the Node fetch does not cancel the threads — repeated calls would
+exhaust the executor and worsen the exact overload being diagnosed. Instead:
+concurrent async probes with per-probe deadlines below the overall budget,
+bounded concurrency, single-flight with short-TTL caching so N callers cause one
+probe, and per-session rate limiting. A disconnected caller must leave no
+unbounded work behind.
 
-```python
-self.voice_id  self.speed  self.model  self.stt_size
-self.analysis_style  self.speech_mode
-```
+**"Host load" needs defining before it can be claimed.** Voice and Node run in a
+Linux container while STT/TTS/Lux run on the Mac host, so container metrics may
+describe the Docker VM or cgroup rather than the Mac/MPS pressure that actually
+degraded the 07-26 call. This design therefore reports **bounded service
+readiness and latency plus cgroup-aware coarse saturation**, in qualitative bands
+with tested thresholds, and states plainly what cannot be inferred. Exact host
+figures are also a fingerprinting oracle and are out of scope; true Mac health
+would need a separate narrowly-allowlisted host exporter.
 
-Plus `get_flow_profile()` (assistant mode), the scheduler/region model, and phone
-VAD as server globals.
+**B5. Output DTOs.** Versioned, with enums, numeric ranges, and maximum lengths
+on the leaves. Health returns coarse states (`healthy | degraded | unavailable`)
+and fixed reason codes. Every success, timeout, parse failure, non-2xx, and
+thrown exception is serialized through the DTO; detailed causes are logged on
+the trusted side with redaction. Canonical model/voice labels are fine — those
+catalogs are already public. Provider availability, credentials, base URLs,
+internal hostnames/ports/paths, PIDs, other callers' data, conversation
+identity, and raw exception text are not.
 
-**Phone sessions are in scope.** A phone caller has no panel, but the settings
-are just as real — voice, model, STT, VAD all come from `/api/phone/config` and
-`/api/phone/vad`. The tool reports the phone line's configuration for those
-sessions, and the narration adapts: a phone caller is told what the line is set
-to, never pointed at a control they cannot see.
+### Input validation at the write boundaries
 
-### `get_system_health()` — no arguments, probes services
+`get_settings()` echoing stored values creates a **stored injection channel**
+unless the writes are validated: `set_model` stores any string, `set_voice`
+stores any non-empty string, and `POST /api/phone/config` persists an arbitrary
+`model` globally — so attacker text could return to the model in the more
+trusted `tool` role, and a planted phone value would be consumed by a *later*
+caller's conversation. (`set_stt`, `set_analysis_style`, and `set_speech_mode`
+already validate against closed sets.)
 
-Kokoro / LuxTTS / STT reachability (`kokoro_client.is_healthy()`,
-`lux_client.is_healthy()` — already implemented and already used for a
-user-facing voice warning at `voice/server.py:743-751`), host load, and recent
-turn latency against a normal band. This is the tool that gets the 07-26 call
-right: degraded host, not bad config.
+So, at every write boundary: strict booleans, finite bounded numbers, closed
+enums and catalog IDs with length limits, unknown fields rejected. Store
+canonical IDs; map them to fixed public labels in the snapshot; report the
+**effective** value after fallback rather than an invalid requested one.
 
-It costs real I/O, so it is the case where the thinking-cue filler earns its
-keep. Kept separate from `get_settings()` precisely because their costs differ —
-an instant question should not pay a probe's latency.
+### New plumbing: the barge-in trio
 
-## New plumbing: the barge-in trio
-
-Everything else is already server-side. The barge-in settings are pure
-`localStorage` and reach the server only as *events* (`barge_in`,
-`barge_in_commit`, `barge_in_false`), never as *settings*.
-
-Add a `set_barge_in` WS message mirroring the established `set_model` /
-`set_voice` pattern (`voice/server.py:692-738`) exactly, including the
-`pending_settings` pre-session path, carrying `enabled`, `sensitivity`, and
-`adaptive` onto `Session`.
+Browser barge-in settings live only in `localStorage` and reach the server as
+*events* (`barge_in`, `barge_in_commit`, `barge_in_false`), never as settings. A
+`set_barge_in` message mirroring `set_model`/`set_voice`
+(`voice/server.py:692-738`) is necessary but **not sufficient**: `app.js` must
+also send the trio on connect and on reconnect, not only on change, or the
+server's view is empty until the user happens to touch a control.
 
 ## Prompt changes
 
-`data/base/knowledge.md` gains an explicit instruction: **you have tools for your
-current settings and health — call them rather than describing the panel from
-memory.** Without this the model answers fluently from the static panel
-description at `knowledge.md:63-87` and reports no actual values. The failure is
-invisible because the wrong answer sounds completely fine.
+`data/base/knowledge.md` gains: **you have tools for your current settings and
+health — call them rather than describing the panel from memory.** Without it the
+model answers fluently from the static panel description and reports no actual
+values; the failure is invisible because the wrong answer sounds fine.
 
-`knowledge.md:86` ("These are changed by the user in the console — you cannot
-flip them yourself") **remains true and unchanged**. This phase is read-only.
+The universal-approval claim must be retired in **three** places, not one:
+`knowledge.md:48-49` and two copies inside `docker/default-config.json` (the
+default and base-profile system prompts) all state that every tool call is shown
+for approval. That becomes false for approval-free self-checks. A
+prompt-construction test rejects the old sentence so the copies cannot drift back.
 
-Spoken-output note: the tools return structured data; the model narrates. It must
-not read raw thresholds or millisecond figures aloud. "Barge-in is on and fairly
-sensitive" is the register, not "sensitivity low, threshold 0.35."
+`knowledge.md:86` ("you cannot flip them yourself") remains true and unchanged —
+this phase is read-only.
+
+Spoken-register note: tools return structured data and the model narrates.
+"Barge-in is on and fairly sensitive", not "sensitivity low, threshold 0.35".
+This is UX, **not** a security control — see the DTO rule above.
 
 ## Non-goals
 
-- **No write path.** The agent cannot change settings in this phase. That is
-  phase 2, and it is exactly where the approval pause becomes a feature.
-- **No proactive tuning coach.** The agent answers when asked; it does not
-  volunteer configuration opinions. `knowledge.md:91-94` ("do not recite this
-  document unprompted") still governs.
-- **No shared state store.** One config owner per session, already in memory in
-  the right process, already the right lifetime.
+- **No write path.** Phase 2, where the approval pause becomes the confirmation
+  UX rather than an obstacle.
+- **No proactive tuning coach.** Answers when asked; does not volunteer opinions.
+- **No shared state store.**
 - **No per-turn config digest.**
+- **No exact host metrics**, and no caller-selectable runtime route, ever.
 
 ## Enforcement tests
 
-Two small tests, in the spirit of the AST isolation test pattern — the boundary
-stops depending on whoever reviews the next PR:
-
-1. **Empty parameter schema.** Every registered tool with `unsafe === false`
-   exposes `parameters.properties === {}` and no `required`. Adding a parameter
-   to an introspection tool fails the build.
-2. **Allowlisted output fields.** `get_system_health()` and `get_settings()`
-   return only fields on an explicit allowlist — never a config dump, never an
-   env echo, never a provider key. A no-argument tool that returns
-   `process.env` is exactly as dangerous as `read_file`.
-
-Plus: boot validation rejects unknown names in `NANO_CLAW_TOOLS` with a startup
-error. A typo'd tool name that silently disables self-knowledge presents to the
-user as "the AI is being dumb again" — the hardest class of bug to trace.
+1. **Zero-argument enforcement at execution** for every `unsafe === false` tool:
+   extra keys, arrays, primitives, malformed JSON, and `_raw` all refused.
+   Schema-level `additionalProperties: false` asserted separately.
+2. **DTO safety**: secret-shaped values planted in *allowed* fields are refused,
+   and every error path — timeout, non-2xx, parse failure, thrown exception —
+   serializes through the DTO with no raw `.message` escaping.
+3. **Every entry point respects the allowlist**, with `NANO_CLAW_TOOLS` unset:
+   HTTP API, CLI, gateway channels, cron, and subagents all register zero tools.
+   This is the regression test for the `AgentLoop` bypass.
+4. **Startup fails** on unknown allowlist names and on an unsafe tool without the
+   opt-in — asserted at process/server startup, not by calling a factory.
+5. **Both dispatch paths**: streaming and non-streaming, plus mixed batches and
+   unknown names.
+6. **Probe saturation and cancellation**: N concurrent health calls cause one
+   probe; a disconnected caller leaves no work running.
+7. **Prompt construction** rejects the universal-approval sentence.
 
 ## Failure modes
 
 | Failure | Behaviour |
 |---|---|
-| Voice server unreachable from Node | 500ms timeout → "I can't reach my own status right now"; call continues |
-| Unknown name in `NANO_CLAW_TOOLS` | Loud boot error, refuse to start |
-| Unsafe tool named without the opt-in | Loud boot error, refuse to start |
-| Model answers from static panel prose | Mitigated by the `knowledge.md` instruction; covered by an eval case |
-| Model reads raw numbers aloud | Spoken-register instruction alongside the tool description |
-
-## Security posture, before and after
-
-**Before:** binary — knowledge-only, or shell plus unrestricted filesystem read
-on a public voice line. Prod chose knowledge-only, which is why the agent knows
-nothing about itself.
-
-**After:** prod exposes exactly two zero-argument tools with allowlisted output.
-Worst case with a fully adversarial LLM is that it tells a caller the TTS service
-is healthy. Unsafe tools require a second, deliberately separate opt-in that is
-false by default in every environment.
+| Voice server unreachable from Node | Bounded deadline → `unavailable` DTO; call continues |
+| Probe slower than its deadline | Per-probe deadline; cached/coarse result; no thread leak |
+| Unknown name in `NANO_CLAW_TOOLS` | Startup error, refuse to start |
+| Unsafe tool named without opt-in | Startup error, refuse to start |
+| Legacy `DISABLE_TOOLS=1` plus a new list | Legacy wins (zero tools) or hard conflict error |
+| Session ID unknown/expired/pre-session | Fixed `unavailable` DTO, never another session's data |
+| Model answers from static panel prose | `knowledge.md` instruction; eval case |
+| Adversarial model dumps the DTO verbatim | Acceptable by construction — DTO is publishable |
 
 ## Build order
 
-1. `BaseTool` gains `unsafe` and `requiresApproval` (defaults `true`/`true`)
-2. Allowlist + opt-in flag in `createToolRegistry()`, boot validation, retire
-   `NANO_CLAW_DISABLE_TOOLS`
-3. Approval bypass at `src/api/server.ts:657` for `requiresApproval === false`
-4. `set_barge_in` WS message → `Session`
-5. `GET /api/runtime/settings` and `GET /api/runtime/health` on the voice server
-6. `get_settings` and `get_system_health` tools in Node, with timeout handling
-7. `knowledge.md` instruction + spoken-register note
-8. The two enforcement tests, boot-validation test, and an eval case for
-   "what are your settings?"
+Reordered so no intermediate commit is unsafe or half-broken. Revision 1 exposed
+routes before their auth tests and deferred all tests to the end; it also would
+have caused an outage if deployment allowlists changed at step 2, since boot
+validation would see names for tools that did not exist until step 6.
+
+1. Centralized policy + single catalog (A1, A2, A3), `ToolExecutionContext`
+   (A5), strict DTO and argument validators (A4, B5) — **with failing boundary
+   tests first**
+2. Startup validation (A7) and the flag migration contract (A8)
+3. Shared dispatcher across both approval paths (A6)
+4. Write-boundary validation + `set_barge_in` including connect/reconnect sync
+5. Live runtime registry (B1) and internal-authenticated transport (B2), bounded
+   probes (B4) — routes stay internal-only at every intermediate commit
+6. The two tools (B3, B4) through the platform
+7. Prompt updates across all three copies + evals
+8. **Deployment allowlists change last**, as the final enablement step, only
+   after everything above passes
 
 ## Phase 2 (not in scope)
 
-The write path — "turn off barge-in", "switch to the fast model". It needs a
-different safety story: a caller-controlled target by definition, so it is
-`unsafe` by the rule above, and the approval pause becomes the confirmation UX
-rather than an obstacle. Revisit once phase 1 is live and we know what people
-actually ask for.
+The write path — "turn off barge-in", "switch to the fast model". Caller-controlled
+by definition, so `unsafe` by the rule above, and the approval pause becomes the
+confirmation UX. Revisit once phase 1 is live and we know what people actually ask.
