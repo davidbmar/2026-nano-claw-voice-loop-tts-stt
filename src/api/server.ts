@@ -36,7 +36,7 @@ import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
 import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
-import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
+import { MODEL_CATALOG, modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 import { retrieveTurnEvidence } from '../agent/intelligence';
 import {
   collectionScopeKey,
@@ -359,14 +359,16 @@ export function getAgentConfig(
  * Accept a runtime-settings payload only in the exact shape we render.
  *
  * Re-sanitized here rather than trusted from the voice server: these strings
- * reach the system prompt, and the write boundaries behind them (`set_model`,
- * `set_voice`, `POST /api/phone/config`) accept arbitrary text. Unknown fields
- * are dropped, not passed through — the render set is closed by construction.
+ * reach the system prompt. The WebSocket boundary validates catalog-backed
+ * fields by membership and passes canonical values; this remains an
+ * independent defense if that boundary regresses. Unknown fields are dropped,
+ * not passed through — the render set is closed by construction.
  */
 // Identifiers plus what a catalog display name legitimately contains
 // ("Isabella (48k)"). Deliberately excludes newlines, '#', and '*' — the
 // characters that would let a value forge a heading or a new prompt section.
 const SAFE_SETTING_RE = /^[A-Za-z0-9._:/+() -]{1,64}$/;
+const RUNTIME_MODEL_SENTINELS = new Set(['default', 'unknown', 'unrecognized']);
 
 export function sanitizeRuntimeSettings(value: unknown): RuntimeSettings | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -379,10 +381,14 @@ export function sanitizeRuntimeSettings(value: unknown): RuntimeSettings | undef
     return SAFE_SETTING_RE.test(trimmed) ? trimmed : 'unrecognized';
   };
   const speed = typeof raw.speed === 'number' && Number.isFinite(raw.speed) ? raw.speed : 1;
+  const chatModel = text('chatModel');
+  const canonicalModel = RUNTIME_MODEL_SENTINELS.has(chatModel)
+    ? chatModel
+    : MODEL_CATALOG.find((model) => model.id === chatModel)?.id || 'unrecognized';
   return {
     surface: text('surface'),
     mode: text('mode'),
-    chatModel: text('chatModel'),
+    chatModel: canonicalModel,
     voice: text('voice'),
     speed: Math.min(4, Math.max(0.1, Math.round(speed * 100) / 100)),
     sttModel: text('sttModel'),

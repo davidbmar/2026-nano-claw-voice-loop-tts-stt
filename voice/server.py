@@ -465,6 +465,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     # anything that arrives before the selected transport creates its Session.
     pending_settings: dict = {}
     http_client = httpx.AsyncClient(timeout=120.0)
+    model_catalog_by_id: dict[str, dict] | None = None
+
+    async def _socket_model_catalog() -> dict[str, dict] | None:
+        """Fetch once from the same Node catalog exposed by /api/models."""
+
+        nonlocal model_catalog_by_id
+        if model_catalog_by_id is None:
+            model_catalog_by_id = await _fetch_model_catalog(http_client)
+        return model_catalog_by_id
 
     def _create_session(audio_transport=None):
         from voice.webrtc import Session
@@ -504,6 +513,9 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         new_session._scheduler_flow_attempted = False
         new_session._scheduler_flow = None
         new_session._scheduler_flow_domain = None
+        # Runtime prompt settings re-check the exact catalog snapshot that
+        # authorized this socket's model selection.
+        new_session._model_catalog_by_id = model_catalog_by_id or {}
         if "voice" in pending_settings:
             voice = pending_settings["voice"]
             new_session.set_voice(voice["voiceId"], voice["speed"])
@@ -691,12 +703,28 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text), turn_state)
 
             elif msg_type == "set_model":
-                model_id = msg.get("modelId", "") or ""
+                catalog = await _socket_model_catalog()
+                model_id = msg.get("modelId")
+                entry = (
+                    catalog.get(model_id)
+                    if catalog is not None and isinstance(model_id, str)
+                    else None
+                )
+                if entry is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "unrecognized",
+                        "setting": "model",
+                        "message": "Unrecognized model selection.",
+                    })
+                    continue
+                canonical_model_id = entry["id"]
                 if session:
-                    session.model = model_id
+                    session._model_catalog_by_id = catalog
+                    session.model = canonical_model_id
                     log.info("Model set: %s", session.model or "(default)")
                 else:
-                    pending_settings["model"] = model_id
+                    pending_settings["model"] = canonical_model_id
 
             elif msg_type == "set_stt":
                 size = msg.get("size", "base")
@@ -729,18 +757,31 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     pending_settings["speech_mode"] = speech_mode
 
             elif msg_type == "set_voice":
+                voice_id = msg.get("voiceId")
+                entry = (
+                    voice_catalog.lookup(voice_id)
+                    if isinstance(voice_id, str)
+                    else None
+                )
+                if entry is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "unrecognized",
+                        "setting": "voice",
+                        "message": "Unrecognized voice selection.",
+                    })
+                    continue
+                canonical_voice_id = entry["id"]
                 if not session:
                     pending_settings["voice"] = {
-                        "voiceId": msg.get("voiceId", ""),
+                        "voiceId": canonical_voice_id,
                         "speed": msg.get("speed", 1.0),
                     }
                     continue
-                voice_id = msg.get("voiceId", "")
-                session.set_voice(voice_id, msg.get("speed", 1.0))
+                session.set_voice(canonical_voice_id, msg.get("speed", 1.0))
                 # Proactively warn if a native-service voice was picked but the
                 # service is down — the reply will still work (Piper fallback).
-                entry = voice_catalog.lookup(voice_id)
-                if entry and entry["engine"] in ("kokoro", "luxtts"):
+                if entry["engine"] in ("kokoro", "luxtts"):
                     probe = (kokoro_client.is_healthy if entry["engine"] == "kokoro"
                              else lux_client.is_healthy)
                     label = "Kokoro" if entry["engine"] == "kokoro" else "LuxTTS"
@@ -1302,11 +1343,11 @@ async def _refresh_agent_conversation_on_mode_switch(
     await _delete_agent_session(client, _agent_session_id(session))
 
 
-# Settings values reach the prompt, so they are a prompt-injection channel:
-# set_model and set_voice accept arbitrary strings today, and POST
-# /api/phone/config persists an arbitrary model globally. A planted value would
-# otherwise arrive inside the system prompt. Anything that is not a plain
-# identifier is replaced rather than rendered.
+# Settings values reach the prompt, so they are a prompt-injection channel.
+# Fields backed by a catalog are validated by membership, never by shape, and
+# only the catalog's canonical value is passed on. _safe_id is the last-line
+# fallback for genuinely open-ended fields: looking like an identifier is not
+# enough to authorize a model or voice supplied by an anonymous client.
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:/+-]{1,64}$")
 
 
@@ -1318,6 +1359,70 @@ def _safe_id(value: object, fallback: str = "unrecognized") -> str:
     return text if _SAFE_ID_RE.match(text) else fallback
 
 
+def _catalog_entries_by_id(payload: object) -> dict[str, dict]:
+    """Return canonical model entries from a Node /api/models payload."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return {}
+    entries: dict[str, dict] = {}
+    for item in payload["models"]:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id:
+            entries[model_id] = item
+    return entries
+
+
+async def _fetch_model_catalog(client: httpx.AsyncClient) -> dict[str, dict] | None:
+    """Fetch the authoritative catalog; None means it could not be verified."""
+
+    try:
+        response = await client.get(f"{NANO_CLAW_URL}/api/models")
+        if response.status_code != 200:
+            log.warning("Model catalog lookup failed with status %s", response.status_code)
+            return None
+        payload = response.json()
+    except Exception:
+        log.warning("Model catalog lookup failed", exc_info=True)
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        log.warning("Model catalog lookup returned an invalid payload")
+        return None
+    return _catalog_entries_by_id(payload)
+
+
+_BUNDLED_MODEL_ID_RE = re.compile(r"""\bid\s*:\s*(['"])([^'"\r\n]+)\1""")
+_bundled_model_catalog_cache: dict[str, dict] | None = None
+
+
+def _bundled_model_catalog() -> dict[str, dict]:
+    """Read the catalog source used to build Node, for transport-free callers.
+
+    Live sockets always carry the catalog fetched from Node. Unit-level and
+    other transport-free calls have no HTTP boundary, so they read the same
+    source artifact rather than maintaining a second Python allowlist.
+    """
+
+    global _bundled_model_catalog_cache
+    if _bundled_model_catalog_cache is not None:
+        return _bundled_model_catalog_cache
+    root = Path(__file__).resolve().parents[1]
+    for path in (root / "src/agent/models.ts", root / "dist/agent/models.js"):
+        try:
+            source = path.read_text()
+        except OSError:
+            continue
+        ids = [match[1] for match in _BUNDLED_MODEL_ID_RE.findall(source)]
+        if ids:
+            _bundled_model_catalog_cache = {
+                model_id: {"id": model_id} for model_id in ids
+            }
+            return _bundled_model_catalog_cache
+    _bundled_model_catalog_cache = {}
+    return _bundled_model_catalog_cache
+
+
 def _runtime_settings(session: Session) -> dict:
     """The live pipeline configuration for this session, as an allowlist.
 
@@ -1327,8 +1432,29 @@ def _runtime_settings(session: Session) -> dict:
     internal URLs, no credentials.
     """
 
+    model_id = getattr(session, "model", "") or ""
+    catalog = getattr(session, "_model_catalog_by_id", None)
+    # An EMPTY dict means the socket has not fetched the live catalog yet: it is
+    # seeded to {} at session creation and only populated by set_model.  Treating
+    # that as an authoritative "no such model" reported a perfectly valid default
+    # model as "unrecognized", which the prompt instructs the agent to describe
+    # as "I cannot tell".  Fall back to the bundled catalog instead — membership
+    # is still enforced, against our own trusted artifact rather than the live
+    # snapshot, so the disclosure guarantee is unchanged.
+    if not isinstance(catalog, dict) or not catalog:
+        catalog = _bundled_model_catalog()
+    model_entry = catalog.get(model_id) if isinstance(model_id, str) else None
+    canonical_model_id = (
+        model_entry.get("id") if isinstance(model_entry, dict) else None
+    )
+
     voice_id = getattr(session, "voice_id", "") or ""
-    entry = voice_catalog.lookup(voice_id)
+    entry = (
+        voice_catalog.lookup(voice_id)
+        if isinstance(voice_id, str)
+        else None
+    )
+    voice_name = entry.get("name") if entry else None
     try:
         speed = round(float(getattr(session, "speed", 1.0) or 1.0), 2)
     except (TypeError, ValueError):
@@ -1336,14 +1462,18 @@ def _runtime_settings(session: Session) -> dict:
     return {
         "surface": "browser console",
         "mode": _safe_id(get_flow_mode()),
-        "chatModel": _safe_id(getattr(session, "model", "")),
-        # The catalog's human name ("Isabella (48k)") so the model says
-        # something speakable instead of reading "lux_isabella" aloud. The
-        # catalog is our own static data, so its name is trusted and does not
-        # go through the identifier sanitizer (which would reject the spaces
-        # and parentheses in a perfectly legitimate display name). Only the
-        # unknown-voice fallback is caller-influenced, and that is sanitized.
-        "voice": str(entry.get("name") or "")[:64] if entry else _safe_id(voice_id),
+        "chatModel": (
+            canonical_model_id
+            if isinstance(canonical_model_id, str) and canonical_model_id
+            else "default" if not model_id else "unrecognized"
+        ),
+        # Catalog membership above makes this canonical human name
+        # ("Isabella (48k)") safe to render without laundering caller text.
+        "voice": (
+            voice_name
+            if isinstance(voice_name, str) and voice_name
+            else "default" if not voice_id else "unrecognized"
+        ),
         "speed": speed,
         "sttModel": _safe_id(getattr(session, "stt_size", "base")),
         "speechMode": _safe_id(getattr(session, "speech_mode", "")),
