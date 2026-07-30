@@ -236,6 +236,33 @@ The start failure **fails open** on purpose, unlike everything else in this
 seam. The alternative is dropping a real phone call because another service is
 down.
 
+## What stops a misheard word reaching a live number
+
+Making an app voice-drivable widens what a transcription error can touch, so it
+is worth being able to say exactly what does not move. Traced end to end,
+2026-07-30:
+
+A spoken rename DOES change the business id before deploy — "Rivera" heard as
+"Riviera" gives `riviera_plumbing`. That is correct: pre-deploy the id follows
+the owner's choice of name, and it locks the moment a deploy writes files under
+it (`prepare_deploy`).
+
+What keeps that from reaching a caller is a chain with no voice in it:
+
+1. **Deploy is not a tool.** The model has 21 and all 21 edit the graph. No
+   amount of saying "deploy this" reaches the deploy path.
+2. **Deploy needs the literal word GO.** `prepare_deploy` refuses anything else
+   and its docstring says "typed by a human" — which it cannot enforce, since it
+   only inspects a string. That is exactly why (1) matters: the enforcement is
+   the absence of a tool, not the check.
+3. **GO is typed in the browser**, on a summary screen showing the business name
+   and the DID being taken over. A misheard rename is visible there before
+   anything ships.
+
+A test pins (1), because the danger is someone adding a deploy tool for
+convenience and turning a deliberate typed act into something an STT error can
+trigger.
+
 ## Known gaps
 
 - **No PSTN call has run through this.** A loopback call has; see the top.
