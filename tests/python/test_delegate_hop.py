@@ -294,6 +294,10 @@ def test_the_console_can_mint_a_fresh_conversation(monkeypatch):
     assert response.status == 200
     assert seen["url"] == "http://127.0.0.1:8790/api/delegate/start"
     assert seen["channel"] == "browser"
+    assert seen["to"] == "+15125550100", (
+        "the app resolves which business a conversation is for from the DID and "
+        "refuses an unknown one rather than inventing a business; sending none "
+        "earned a 404 saying exactly that")
     assert default_delegate_url() == "http://127.0.0.1:8790/api/session/fresh/turn"
 
 
