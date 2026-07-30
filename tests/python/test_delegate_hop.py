@@ -462,3 +462,31 @@ def test_the_phone_start_still_says_caller():
         "the phone start passes no `who`, taking the 'caller' default; if that "
         "changed, say so deliberately")
     assert "channel" in passed
+
+
+def test_the_mode_can_be_selected_at_startup(monkeypatch):
+    """A node can boot straight into delegate mode.
+
+    The rig configured the delegate URL and the DID but not the MODE, so every
+    restart left an operator one manual switch from working — which is exactly
+    what "is it ready?" meant. `NANO_CLAW_VOICE_FLOW` already existed for this;
+    nothing was using it for delegate.
+
+    The greeting comes with it. A 07-27 bug had a restart re-read this variable
+    while the phone kept the previous mode's intro — the Space Channel greeting
+    over Document Intelligence answers — which is why `_MODE_GREETINGS` carries
+    one per mode. Delegate has its own, so booting into it stays consistent.
+    """
+    import voice.flow_session as fs
+    from voice.flow_session import flow_mode_greeting, get_flow_mode
+
+    monkeypatch.setattr(fs, "_flow_mode", None)
+    monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "delegate")
+
+    assert get_flow_mode() == "delegate"
+    greeting = flow_mode_greeting()
+    assert greeting, "a mode selected at startup must still have a greeting"
+    for other in ("Space Channel", "Riff codebase", "Replicant"):
+        assert other.lower() not in greeting.lower(), (
+            f"booting into delegate answered with the {other} intro — the "
+            f"07-27 mismatch, one mode later")

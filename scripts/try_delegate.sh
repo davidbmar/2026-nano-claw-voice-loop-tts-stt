@@ -94,6 +94,7 @@ env VOICE_PORT="$NC_PORT" \
   NANO_CLAW_PHONE_WEBHOOK_BASE="http://127.0.0.1:$NC_PORT" \
   NANO_CLAW_DELEGATE_STARTS="{\"$DID\":{\"start\":\"http://127.0.0.1:$RB_PORT/api/delegate/start\",\"greeting\":\"Thanks for calling Test Plumbing.\",\"voice\":\"af_heart\"}}" \
   NANO_CLAW_DELEGATE_URL="$BROWSER_DELEGATE" \
+  NANO_CLAW_VOICE_FLOW=delegate \
   "$NC_ROOT/.venv-test/bin/python" -m voice > "$RUN/nano-claw.log" 2>&1 &
 
 for _ in $(seq 1 90); do
@@ -119,8 +120,8 @@ echo "         $NC_ROOT/.venv-test/bin/python $NC_ROOT/scripts/check_delegate_se
 echo
 echo "  2. TALK TO IT IN THE BROWSER"
 echo "       open http://127.0.0.1:$NC_PORT/"
-echo "       MODE dropdown -> 'Turn Delegate'"
-echo "       operator password when it asks: ${NANO_CLAW_OPERATOR_PASSWORD:-testing}"
+echo "       MODE is ALREADY 'Turn Delegate' — the rig starts in it."
+echo "       (to change it, the operator password is ${NANO_CLAW_OPERATOR_PASSWORD:-testing})"
 echo "       APP URL       -> already filled in: this rig minted a conversation"
 echo "                        and pointed the console at it"
 echo "       then hold the mic button and speak. Every reply comes from"
