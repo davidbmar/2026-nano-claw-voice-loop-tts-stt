@@ -778,3 +778,48 @@ def test_the_delegate_turn_happens_inside_the_dead_air_cue():
     assert lines["_start_thinking_cue"] < lines["_stream_reply"], (
         "the cue must start BEFORE the reply is fetched, or the silence it "
         "exists to fill has already happened")
+
+
+# ── the design's evidence must keep pointing at something ────────────────────
+
+def test_the_symbols_the_design_reasons_about_still_exist():
+    """`docs/design/2026-07-30-conversation-start-seam.md` argues from named
+    code: the placement of the start call rests on `_answered` recording before
+    any await, the correlation problem rests on the stream URL being built in
+    `incoming_handler`, and the hangup section rests on `PhoneCall.close` being
+    local teardown.
+
+    That doc first cited LINE NUMBERS, and four had drifted within days as this
+    file grew — still read as evidence while pointing at unrelated code. Symbols
+    do not drift, but they do get renamed, and a renamed symbol leaves the
+    argument just as orphaned. This is the cheap half of that: the names still
+    resolve. Whether they still mean what the doc says is a human's job.
+    """
+    import ast
+    from pathlib import Path
+
+    load_bearing = {
+        "_answered": "the webhook-retry guard the start call is placed after",
+        "incoming_handler": "where the stream URL is built and routing is minted",
+        "close": "PhoneCall.close, cited as local teardown that cannot end a call",
+        "hangup_after_playback": "what was built because close could not",
+        "_call_routing": "the per-call conversation map",
+        "conversation_key_for": "the digest sent instead of the carrier id",
+        "delegate_starts": "the per-DID configuration",
+        "route_for": "how the turn hop finds its conversation",
+    }
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    tree = ast.parse(source)
+    names = {n.name for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    names |= {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              for t in n.targets if isinstance(t, ast.Name)}
+    # AnnAssign too: `_answered: dict[str, float] = {}` and `_call_routing` are
+    # annotated, and leaving them out made this guard fail on its own first run.
+    names |= {n.target.id for n in ast.walk(tree)
+              if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+
+    missing = {s: why for s, why in load_bearing.items() if s not in names}
+    assert not missing, (
+        f"renamed or removed, leaving the design arguing from nothing: {missing}")

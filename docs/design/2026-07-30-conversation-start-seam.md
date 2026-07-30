@@ -1,6 +1,12 @@
 # The conversation-start seam (turn-delegate contract v0.1)
 
-**Status:** revised after Codex review, 2026-07-30. Ready to implement.
+**Status:** implemented; see status per item below. Revised after Codex review,
+2026-07-30.
+
+Citations here name **symbols, not line numbers**. The first draft cited lines,
+and four of them had drifted within days as this file grew — pointing at
+unrelated code while still being read as evidence. A design doc whose evidence
+silently relocates is worse than one with none.
 **Repos:** nano-claw (gateway), riff-builder-goal-driven (reference delegate)
 **Adds** one optional step to `docs/turn-delegate-contract.md`.
 
@@ -31,14 +37,17 @@ The gateway cannot fix this alone. Minting a conversation means knowing the app
 has a `POST /api/session` and what to put in it, which is exactly the
 app-specific knowledge the contract exists to keep out of the gateway.
 
-**There is no phone delegate wiring today at all.** `PhoneCall.__init__` carries
-no delegate or DID state (`voice/phone.py:596-604`), the webhook does no routing
-(`:2013-2045`), and the per-turn call goes to local `/api/chat` (`:1422-1450`).
-An earlier draft of this document described the phone as already having a static
-per-DID URL whose collisions this seam would fix. That was wrong — there is
-nothing to be backward-compatible *with* on the phone, and this seam is a
-prerequisite for phone delegation rather than an improvement to it. (Review
-MEDIUM-4.)
+**There was no phone delegate wiring at all when this was written.**
+`PhoneCall.__init__` carried no delegate or DID state, the webhook did no
+routing, and the per-turn call went to local `/api/chat`. An earlier draft
+described the phone as already having a static per-DID URL whose collisions this
+seam would fix; that was wrong — there was nothing to be backward-compatible
+*with*, and this seam was a prerequisite for phone delegation rather than an
+improvement to it. (Review MEDIUM-4.)
+
+All three now exist — see the implementation status below. Kept in the past
+tense rather than deleted, because the reasoning that follows only makes sense
+against the state it was reasoning about.
 
 ## The seam
 
@@ -101,14 +110,14 @@ webhook-retry dedup rather than a session-minting guard. **That reasoning was
 wrong** (review HIGH-2), and the correction inverts the decision:
 
 - `_answered` checks and records the raw `call_control_id` *before any await*
-  (`voice/phone.py:2013-2024`). A start POST placed after that guard is
+  (`voice/phone.py`, `incoming_handler`). A start POST placed after that guard is
   therefore already protected from ordinary webhook redelivery within a worker.
 - The media handler has **no mint dedup at all**, and media streams can
   reconnect — so the placement chosen for its supposed exactly-once property
   has strictly less of it.
 - The media WebSocket also cannot correlate to a routing map as the draft
   assumed: every call is handed the *same* stream URL, carrying only the shared
-  token (`voice/phone.py:2025-2034`). `from` and `to` are used solely for
+  token (`voice/phone.py`, `incoming_handler`'s `ws_url`). `from` and `to` are used solely for
   logging and metrics. Correlation would require reading the raw
   `call_control_id` out of the media start message, or a signed nonce in the
   stream URL. (Review MEDIUM-1.)
@@ -165,7 +174,7 @@ These are requirements, not open questions.
 The draft said "speak the apology and end the call" as though ending were
 available. It is not: the gateway issues `answer`, while `call.hangup` is an
 inbound notification only, and `PhoneCall.close` is local teardown
-(`voice/phone.py:603-614,757-760,2036-2050`). Tearing down the WebSocket
+(`voice/phone.py`, `PhoneCall.close` / `incoming_handler`). Tearing down the WebSocket
 immediately would truncate the apology mid-word. (Review MEDIUM-2.)
 
 `_telnyx_cmd` exists and the raw id is retained, so this is implementable — as
