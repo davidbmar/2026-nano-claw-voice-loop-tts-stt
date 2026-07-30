@@ -139,4 +139,16 @@ echo "     watch what the node did:   tail -f $RUN/nano-claw.log"
 echo
 echo "  Ctrl-C here shuts the rig down."
 echo "════════════════════════════════════════════════════════════════"
-while true; do sleep 3600; done
+
+# `wait -n` returns the moment ANY child exits, so the shell tells us instead of
+# being polled. The first version of this slept in a loop, which meant the script
+# stayed alive with the terminal still saying "rig is up" while nothing answered
+# — the quiet failure this whole feature guards against, in the tool built to
+# demonstrate it. The second version polled with curl and hung. This one asks the
+# shell the question it already knows the answer to.
+wait -n
+echo
+echo "!! a rig process exited — the rig is no longer serving."
+echo "   logs: $RUN"
+tail -5 "$RUN/nano-claw.log" 2>/dev/null | sed 's/^/     /'
+exit 1
