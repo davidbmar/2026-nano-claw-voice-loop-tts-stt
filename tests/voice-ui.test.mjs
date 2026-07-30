@@ -84,6 +84,11 @@ assert.deepEqual(flowOptions, [
   ['replicantpm', 'Replicant PM'],
   ['scheduler', 'Plumber Scheduler'],
   ['lawyer', 'Lawyer Scheduler'],
+  // Added when the delegate mode landed. This assertion had been failing since
+  // then and nobody knew: `npm test` runs vitest, which reports "No test suite
+  // found" for these plain node:assert files and moves on. A red test nobody
+  // runs is a red test nobody has.
+  ['delegate', 'Turn Delegate'],
 ]);
 assert.match(
   flowSelect,
@@ -153,3 +158,36 @@ assert.ok(
 );
 
 console.log('voice-ui tests passed');
+
+// ── the thinking counter must stop on every path that ends a turn ───────────
+//
+// A delegated turn is answered by another app and cannot stream (contract v0 is
+// atomic), so the browser shows nothing between question and reply — measured at
+// 7 and 11 seconds in real use, which reads as a hang. The counter makes the
+// wait legible; a counter that keeps running when nothing is happening is worse
+// than the static line it replaced.
+{
+  const appJs = await readFile(new URL('../voice/web/app.js', import.meta.url), 'utf8');
+
+  assert.ok(
+    /function clearThinking\(\)[\s\S]{0,200}clearInterval\(thinkingTimer\)/.test(appJs),
+    'clearThinking must stop the interval, or every turn leaks a timer',
+  );
+
+  const endsATurn = [
+    ["case 'agent_reply':", 'a completed reply'],
+    ["case 'agent_reply_delta':", 'the first streamed token'],
+    ["case 'error':", 'a server error'],
+    ['socket.onclose', 'a closed socket'],
+  ];
+  for (const [marker, why] of endsATurn) {
+    const at = appJs.indexOf(marker);
+    assert.ok(at > -1, `${marker} not found — has the handler been restructured?`);
+    const window_ = appJs.slice(at, at + 600);
+    assert.ok(
+      window_.includes('clearThinking()'),
+      `${why} does not clear the thinking counter — it would tick upward ` +
+        `forever while nothing is happening`,
+    );
+  }
+}

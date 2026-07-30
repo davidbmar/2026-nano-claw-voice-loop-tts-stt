@@ -9,6 +9,7 @@ import {
   PRESENCE_PROFILES,
   applyEmotionLayer,
   inferEmotion,
+  inferInboundEmotion,
 } from './emotion-layer.js';
 import { createAuthHistoryUI } from './auth.js';
 import { Pcm16AudioPlayer } from './ws-audio-player.js';
@@ -233,6 +234,9 @@ const latencyTts = document.getElementById('latency-tts');
 const latencyOverall = document.getElementById('latency-overall');
 const talkingCubeCanvas = document.getElementById('talking-cube');
 const talkingCubeStatus = document.getElementById('talking-cube-status');
+// The stage wraps the canvas. The mascot mounts its own DOM subtree here rather
+// than drawing into the cube's canvas, so the swap needs the container too.
+const talkingCubeStage = document.getElementById('talking-cube-stage');
 const cubeScene = document.getElementById('cube-scene');
 const cubePattern = document.getElementById('cube-pattern');
 const cubeFormation = document.getElementById('cube-formation');
@@ -491,11 +495,113 @@ var agentAudioContext = null;
 var agentAudioSource = null;
 var agentAudioAnalyser = null;
 
-const talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+// `let`, not `const`: this binding is the ACTIVE renderer, and the console can
+// swap the cube for the mascot character at runtime. Every downstream call site
+// (`talkingCube.pulse(...)` and ~30 others) resolves the binding when it runs,
+// so they all follow the swap without being rewritten.
+//
+// The cube stays the boot-time renderer because its constructor is synchronous.
+// Mounting the mascot requires fetching rig.json and awaiting the character art,
+// so it can only ever happen behind an awaited swap — see switchRenderer().
+let talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
 talkingCube.importProfile(loadedVisualization.profile);
 talkingCube.setPanelOpen(false);
 window.TalkingCube = talkingCube;
 window.VoiceCube = talkingCube;
+
+const RENDERER_STORAGE_KEY = 'nanoClawRenderer';
+var activeRendererId = 'cube';
+
+/** Swap the active renderer. Returns true if the renderer changed.
+ *
+ *  Three things have to survive the swap or it looks broken: the live TTS
+ *  analyser (or the new renderer never reacts to audio), the current emotion and
+ *  presence (or it starts blank mid-conversation), and the outgoing renderer's
+ *  teardown (the mascot documents a measured leak of 14 writes plus a stray
+ *  rAF loop per unmount if destroy() is skipped). */
+async function switchRenderer(id) {
+  const next = id === 'mascot' ? 'mascot' : 'cube';
+  if (next === activeRendererId) return false;
+
+  const hadAnalyser = !!agentAudioAnalyser;
+  try {
+    talkingCube.disconnectAnalyser();
+  } catch (err) {
+    console.warn('[renderer] disconnectAnalyser failed during swap', err);
+  }
+
+  let replacement;
+  if (next === 'mascot') {
+    const { createMascotRenderer } = await import('./mascot-renderer.js');
+    replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
+    talkingCubeCanvas.hidden = true;
+  } else {
+    talkingCubeCanvas.hidden = false;
+    replacement = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+    replacement.importProfile(loadedVisualization.profile);
+    replacement.setPanelOpen(false);
+  }
+
+  // Tear the old one down only once the new one exists, so a failed mount
+  // leaves a working display rather than an empty stage.
+  const outgoing = talkingCube;
+  talkingCube = replacement;
+  activeRendererId = next;
+  window.TalkingCube = talkingCube;
+  window.VoiceCube = talkingCube;
+  try {
+    (outgoing.unmount || outgoing.destroy).call(outgoing);
+  } catch (err) {
+    console.warn('[renderer] teardown of previous renderer failed', err);
+  }
+
+  if (hadAnalyser) talkingCube.connectAnalyser(agentAudioAnalyser);
+  applyVisualizationLayers();
+  if (talkingCube.applyEmotion) {
+    talkingCube.applyEmotion(emotionState.emotion, emotionState.intensity);
+    talkingCube.applyPresence(emotionState.presence);
+  }
+  try {
+    localStorage.setItem(RENDERER_STORAGE_KEY, next);
+  } catch {
+    /* storage disabled — the swap still worked for this session */
+  }
+  return true;
+}
+window.VoiceRenderer = { switch: switchRenderer, active: () => activeRendererId };
+
+const rendererSelect = document.getElementById('renderer-select');
+if (rendererSelect) {
+  rendererSelect.addEventListener('change', async () => {
+    const wanted = rendererSelect.value;
+    try {
+      await switchRenderer(wanted);
+    } catch (err) {
+      // A failed mount must not leave the control lying about what is on screen:
+      // switchRenderer only commits after the replacement exists, so the old
+      // renderer is still live and the dropdown should say so.
+      console.error('[renderer] switch failed, staying on', activeRendererId, err);
+      rendererSelect.value = activeRendererId;
+    }
+  });
+
+  // Restore the previous choice. Deliberately after first paint and never
+  // awaited at module scope: the cube is already up, so a slow or broken mascot
+  // mount degrades to "console works, wrong renderer" instead of a blank stage.
+  let storedRenderer = null;
+  try {
+    storedRenderer = localStorage.getItem(RENDERER_STORAGE_KEY);
+  } catch {
+    /* storage disabled */
+  }
+  if (storedRenderer === 'mascot') {
+    rendererSelect.value = 'mascot';
+    switchRenderer('mascot').catch((err) => {
+      console.error('[renderer] could not restore mascot, falling back to cube', err);
+      rendererSelect.value = activeRendererId;
+    });
+  }
+}
 
 // ── Emotion layer state ──────────────────────────────────────
 // Sits between the user's base profile and the caller/moment/speaking
@@ -527,6 +633,19 @@ function setVisualPresence(name) {
 function inferEmotionFromReply(text) {
   if (!emotionAuto) return;
   var inferred = inferEmotion(text);
+  setVisualEmotion(inferred.emotion, { intensity: inferred.intensity });
+}
+
+// The caller's turn. Runs the moment the transcript arrives — before the agent
+// has composed anything — so the display reacts while it is still listening.
+//
+// A neutral read deliberately does NOT clear a live emotion: most utterances
+// match no rule, and letting every unremarkable sentence flatten the display
+// would make it less alive, not more. Only a positive match moves it.
+function inferEmotionFromCaller(text) {
+  if (!emotionAuto) return;
+  var inferred = inferInboundEmotion(text);
+  if (inferred.emotion === 'neutral') return;
   setVisualEmotion(inferred.emotion, { intensity: inferred.intensity });
 }
 
@@ -1864,12 +1983,27 @@ function addBubble(text, role) {
   return transcriptLine.content;
 }
 
+var thinkingTimer = null;
+
 function showThinking() {
   clearThinking();
   const transcriptLine = createTranscriptLine('agent');
   transcriptLine.line.classList.add('thinking');
   transcriptLine.content.textContent = 'Thinking…';
   chatLog.scrollTop = chatLog.scrollHeight;
+
+  // Count the wait out loud. A delegated turn is answered by another app and
+  // cannot stream (contract v0 is atomic), so the browser has nothing to show
+  // between the question and the reply — measured here at 7 and 11 seconds,
+  // which reads as a hang rather than as work. A number that keeps moving is
+  // the difference between "it is thinking" and "it is broken"; the phone
+  // solves the same problem with a chime and ticks.
+  const startedAt = Date.now();
+  thinkingTimer = setInterval(function () {
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    if (seconds < 2) return;      // below this the counter is just noise
+    transcriptLine.content.textContent = 'Thinking… ' + seconds + 's';
+  }, 500);
 }
 
 var streamingBubble = null;
@@ -1893,6 +2027,10 @@ function finalizeAgentBubble() {
 }
 
 function clearThinking() {
+  if (thinkingTimer !== null) {
+    clearInterval(thinkingTimer);
+    thinkingTimer = null;
+  }
   const el = chatLog.querySelector('.thinking');
   if (el) el.remove();
 }
@@ -2911,6 +3049,9 @@ function connect() {
 
   socket.onclose = function (event) {
     if (socket !== ws || generation !== connectionGeneration) return;
+    // Nothing is coming now. Same reason as the error case: a counter left
+    // running on a dead socket claims work that stopped.
+    clearThinking();
     pageLog(
       'WS CLOSE code=' +
         (event && event.code) +
@@ -3047,6 +3188,7 @@ function handleMessage(msg, generation) {
       deepProjectionPending = false;
       if (msg.text) {
         addBubble(msg.text, 'user');
+        inferEmotionFromCaller(msg.text);
         showThinking();
         setVisualPresence('thinking');
         setPhoneStatus('Thinking...');
@@ -3180,6 +3322,10 @@ function handleMessage(msg, generation) {
 
     case 'error':
       console.error('Server error:', msg.message);
+      // A turn that ends in an error ends the wait too. Before the counter this
+      // left a stale "Thinking…"; with it, the line would tick upward forever
+      // while nothing was happening — worse than the stale line it replaced.
+      clearThinking();
       finalizeAgentBubble();
       setVisualizationSpeaking(false);
       rearmPhoneMode('Voice error; listening again...');
