@@ -388,6 +388,17 @@
               <span class="section-note">LIVE CANVAS</span>
             </div>
             <div class="pipe-row">
+              <label
+                for="renderer-select"
+                title="Which character renders the live voice display"
+                >DISPLAY</label
+              >
+              <select id="renderer-select" aria-label="Voice display renderer">
+                <option value="cube" selected>Voice constellation</option>
+                <option value="mascot">Computer mascot</option>
+              </select>
+            </div>
+            <div class="pipe-row">
               <label for="cube-scene">PRESET</label>
               <select id="cube-scene">
                 <option value="calm" selected>Default profile</option>

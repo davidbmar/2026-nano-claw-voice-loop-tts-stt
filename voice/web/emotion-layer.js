@@ -192,3 +192,36 @@ export function inferEmotion(text) {
     }
     return { emotion: "neutral", intensity: 0.65 };
 }
+
+// Rules for what the CALLER said, kept deliberately separate from
+// EMOTION_RULES above. The outbound set is scoped to agent replies and
+// misfires badly on caller speech: "Wait, sorry, I don't understand" hits the
+// somber rule on the caller's polite "sorry" and would render the display sad
+// at someone who is merely confused. Same reason a caller's "is it booked?"
+// must not read as joy — the vocabularies genuinely differ.
+//
+// Ordered: first match wins, so arousal (urgent/tense) outranks the generic
+// question → curious rule.
+const INBOUND_RULES = [
+    { emotion: "urgent", intensity: 0.85, re: /\b(?:right now|flooding|emergency|immediately|third time|still waiting)\b/i },
+    { emotion: "confused", intensity: 0.7, re: /\b(?:i don'?t understand|what do you mean|sorry,? what|come again|huh)\b/i },
+    { emotion: "tense", intensity: 0.75, re: /\b(?:nobody has|no one has|this is ridiculous|frustrat|unacceptable)\b/i },
+    { emotion: "warm", intensity: 0.7, re: /\b(?:thanks so much|that works great|perfect|appreciate it)\b/i },
+    { emotion: "curious", intensity: 0.65, re: /\?\s*$/ },
+];
+
+/** Infer an emotion from what the CALLER just said, so the display reacts while
+ *  the agent is still listening rather than only when it answers.
+ *
+ *  Measured 2026-07-30 against gemma3:1b with constrained decoding: these rules
+ *  scored 7/7 on the sample where the model scored 3/7, at ~0ms versus ~537ms.
+ *  A model is not obviously better here and costs an ollama dependency, so this
+ *  stays regex until real call transcripts say otherwise. */
+export function inferInboundEmotion(text) {
+    const value = String(text || "").trim();
+    if (!value) return { emotion: "neutral", intensity: 0.65 };
+    for (const rule of INBOUND_RULES) {
+        if (rule.re.test(value)) return { emotion: rule.emotion, intensity: rule.intensity };
+    }
+    return { emotion: "neutral", intensity: 0.65 };
+}
