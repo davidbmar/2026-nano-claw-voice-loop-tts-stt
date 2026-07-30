@@ -15,10 +15,15 @@ import json
 import pytest
 
 from voice import phone
+from voice.phone import DelegateProfile, DelegateRoute
 from voice.turn_delegate import ConversationStart
 
 LINE = "+15123569101"
 START = "http://127.0.0.1:8790/api/delegate/start"
+
+
+def route(url, **profile):
+    return DelegateRoute(url, DelegateProfile(start_url=START, **profile))
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +54,7 @@ def test_a_configured_line_is_read_per_call(monkeypatch):
     restart — restarting drops live calls."""
     assert phone.delegate_starts() == {}
     monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({LINE: START}))
-    assert phone.delegate_starts() == {LINE: START}
+    assert phone.delegate_starts() == {LINE: DelegateProfile(start_url=START)}
 
 
 # ── the conversation key ─────────────────────────────────────────────────────
@@ -77,15 +82,15 @@ def test_an_unrouted_call_has_no_delegate():
 
 
 def test_a_routed_call_finds_its_conversation():
-    phone._call_routing["v3:abc"] = ("http://127.0.0.1:8790/api/session/s1/turn", 0.0)
+    phone._call_routing["v3:abc"] = (route("http://127.0.0.1:8790/api/session/s1/turn"), 0.0)
     assert phone.routing_for("v3:abc") == "http://127.0.0.1:8790/api/session/s1/turn"
 
 
 def test_two_calls_hold_two_conversations():
     """The collision the whole seam exists to prevent, asserted on the map that
     holds the result."""
-    phone._call_routing["v3:a"] = ("http://h/api/session/a/turn", 0.0)
-    phone._call_routing["v3:b"] = ("http://h/api/session/b/turn", 0.0)
+    phone._call_routing["v3:a"] = (route("http://h/api/session/a/turn"), 0.0)
+    phone._call_routing["v3:b"] = (route("http://h/api/session/b/turn"), 0.0)
 
     assert phone.routing_for("v3:a") != phone.routing_for("v3:b")
 
@@ -94,7 +99,7 @@ def test_the_map_is_keyed_on_the_raw_id_not_the_sanitized_one():
     """The media WebSocket correlates on the raw id; the sanitized one is a
     different string, so a map keyed on it would never match."""
     raw = "v3:has-a-colon"
-    phone._call_routing[raw] = ("http://h/t", 0.0)
+    phone._call_routing[raw] = (route("http://h/t"), 0.0)
 
     assert phone.routing_for(raw) is not None
     assert phone.routing_for(phone._contained_call_id(raw)) is None
@@ -208,7 +213,7 @@ def test_a_failed_start_leaves_the_call_undelegated_rather_than_refused(
 def test_hangup_forgets_the_conversation(quiet_webhook):
     """The delegate URL is a capability — riff-builder's carries its session id —
     so it must not outlive the call that earned it."""
-    phone._call_routing["v3:call-1"] = ("http://h/api/session/s1/turn", 0.0)
+    phone._call_routing["v3:call-1"] = (route("http://h/api/session/s1/turn"), 0.0)
 
     asyncio.run(phone.incoming_handler(hangup()))
 
@@ -232,3 +237,163 @@ def test_a_redelivered_webhook_does_not_mint_twice(quiet_webhook, monkeypatch):
     asyncio.run(phone.incoming_handler(initiated()))   # the retry
 
     assert len(calls) == 1, f"minted {len(calls)} conversations for one call"
+
+
+# ── the per-line profile ─────────────────────────────────────────────────────
+#
+# The conversation-start seam deliberately refuses a `greeting` FROM the app:
+# delegate-authored text going straight to TTS is an arbitrary-speech capability
+# (Codex review 2026-07-30, HIGH-3). An OPERATOR setting a greeting for a line
+# they configured is a different trust level entirely, and closes the same gap —
+# a business's phone should not answer in a voice that names nobody.
+
+def test_a_bare_url_is_still_valid_configuration(monkeypatch):
+    """Profiles were added without invalidating any existing config."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({LINE: START}))
+    profile = phone.delegate_starts()[LINE]
+
+    assert profile.start_url == START
+    assert profile.greeting == ""
+    assert profile.voice == ""
+
+
+def test_a_line_can_carry_its_own_greeting_and_voice(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({LINE: {
+        "start": START,
+        "greeting": "Thanks for calling Rivera Plumbing.",
+        "voice": "af_heart",
+        "speed": 1.1,
+    }}))
+    profile = phone.delegate_starts()[LINE]
+
+    assert profile.start_url == START
+    assert profile.greeting == "Thanks for calling Rivera Plumbing."
+    assert profile.voice == "af_heart"
+    assert profile.speed == 1.1
+
+
+def test_a_profile_without_a_start_url_is_refused(monkeypatch):
+    """A line that names a greeting but nowhere to send turns is misconfiguration,
+    not a line that answers in someone's name and then cannot talk."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"greeting": "Thanks for calling Rivera Plumbing."}}))
+
+    assert phone.delegate_starts() == {}
+
+
+@pytest.mark.parametrize("speed", ["fast", None, -1, 0, 99])
+def test_an_unusable_speed_falls_back_to_the_node_default(monkeypatch, speed):
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"start": START, "speed": speed}}))
+
+    assert phone.delegate_starts()[LINE].speed == 0.0, "0 means inherit"
+
+
+def test_the_greeting_decision_lives_in_one_place(monkeypatch):
+    """Precedence, most specific first: the line's own greeting, then the
+    node-wide override, then the mode's. The per-DID greeting MUST beat
+    NANO_CLAW_PHONE_GREETING — otherwise one node answering two businesses
+    greets both as the first one."""
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.default_greeting = "Mode greeting."
+    call.delegate_route = None
+
+    monkeypatch.delenv("NANO_CLAW_PHONE_GREETING", raising=False)
+    assert call.greeting_line == "Mode greeting."
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_GREETING", "Node greeting.")
+    assert call.greeting_line == "Node greeting."
+
+    call.delegate_route = route("http://h/t", greeting="Rivera Plumbing here.")
+    assert call.greeting_line == "Rivera Plumbing here.", (
+        "the node-wide greeting outranked the line's own — two businesses on "
+        "one node would both answer as the first")
+
+
+def test_a_line_without_a_greeting_does_not_override_anything(monkeypatch):
+    """A delegated line with no greeting configured must behave exactly as an
+    undelegated one, not fall through to empty."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_GREETING", "Node greeting.")
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.default_greeting = "Mode greeting."
+    call.delegate_route = route("http://h/t")
+
+    assert call.greeting_line == "Node greeting."
+
+
+def _bare_call(route_=None):
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    # call_id because cost_ledger.install_phone_tracking WRAPS
+    # _synthesize_sentence for billing when another test has installed it, and
+    # the wrapper reads it. Its presence therefore depends on test order, which
+    # is a good reason for this stand-in to look like a real call.
+    call.call_id = "delegate-test-call"
+    call.default_greeting = "Mode greeting."
+    call.delegate_route = route_
+    return call
+
+
+def test_a_line_can_sound_like_itself(monkeypatch):
+    """One node can answer for more than one business once lines are delegated,
+    and they should not have to sound alike."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "node_default")
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "1.0")
+
+    assert _bare_call().configured_voice == "node_default"
+    assert _bare_call(route("http://h/t")).configured_voice == "node_default", (
+        "a line with no voice set must inherit, not blank out")
+
+    styled = _bare_call(route("http://h/t", voice="af_heart", speed=1.2))
+    assert styled.configured_voice == "af_heart"
+    assert styled.configured_speed == 1.2
+
+
+def test_the_voice_reaches_synthesis_not_just_the_log(monkeypatch):
+    """The trap this nearly shipped as.
+
+    `_synthesize_sentence` read NANO_CLAW_PHONE_VOICE directly, every sentence,
+    and ignored the value computed at construction — which turned out to be only
+    a log field. A per-line voice wired there would have configured NOTHING.
+
+    Asserted on what reaches `tts_synthesize`, not on the source: `cost_ledger.
+    install_phone_tracking` legitimately wraps this method for billing, so
+    inspecting it finds the wrapper.
+    """
+    captured = {}
+
+    def fake_synthesize(text, voice, speed, *rest):
+        captured.update(text=text, voice=voice, speed=speed)
+        return b"\x00" * 96
+
+    monkeypatch.setattr(phone, "tts_synthesize", fake_synthesize)
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "node_default")
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "1.0")
+
+    call = _bare_call(route("http://h/t", voice="af_heart", speed=1.2))
+    call.tap = None
+    call._tap_sentence_index = None
+
+    asyncio.run(call._synthesize_sentence("Hello there."))
+
+    assert captured["voice"] == "af_heart", (
+        "synthesis used the node-wide voice; the line's own voice configured "
+        "nothing")
+    assert captured["speed"] == 1.2
+
+
+def test_an_unparseable_node_speed_still_falls_back_and_warns(monkeypatch):
+    """The existing behaviour this refactor had to preserve."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "not-a-number")
+    warned = []
+    monkeypatch.setattr(phone, "_warn_config_fallback",
+                        lambda *a, **k: warned.append(a))
+
+    assert _bare_call().configured_speed == 1.0
+    assert warned, "a bad node speed must still warn"
+
+
+def test_a_line_speed_does_not_need_the_node_value_to_parse(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "not-a-number")
+    styled = _bare_call(route("http://h/t", speed=1.3))
+
+    assert styled.configured_speed == 1.3

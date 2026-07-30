@@ -1022,6 +1022,12 @@ def test_media_start_records_call_row_and_greeting_event(tmp_path, monkeypatch):
     class StubCall:
         default_greeting = "Hello from Space Channel!"
 
+        @property
+        def greeting_line(self):
+            # PhoneCall.greeting_line, minus the per-DID profile this stub has
+            # no route for — i.e. exactly the old inline expression.
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
+
         async def speak(self, text):
             return None
 
@@ -1112,6 +1118,10 @@ def test_media_ws_close_fills_missing_call_end(tmp_path, monkeypatch):
     class StubCall:
         default_greeting = "Hi."
 
+        @property
+        def greeting_line(self):
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
+
         async def speak(self, text):
             return None
 
@@ -1172,6 +1182,12 @@ def test_degraded_stt_answer_apologizes_and_hangs_up(tmp_path, monkeypatch):
 
     class StubCall:
         default_greeting = "Hello from Space Channel!"
+
+        @property
+        def greeting_line(self):
+            # PhoneCall.greeting_line, minus the per-DID profile this stub has
+            # no route for — i.e. exactly the old inline expression.
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
         _http = DeadHttp()
 
         async def speak(self, text):

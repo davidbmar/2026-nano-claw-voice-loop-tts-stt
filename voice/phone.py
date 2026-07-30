@@ -721,13 +721,16 @@ class PhoneCall:
             self.flow = _flow
         self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
+        # The webhook mints the route at call.initiated, which is strictly before
+        # the media WebSocket opens, so it is already there to be read.
+        self.delegate_route = route_for(telnyx_call_id)
         self.default_greeting = (
             self.flow.greeting if self.flow else flow_mode_greeting()
         )
         self._call_end_emitted = False
         self._thinking_cue_task: asyncio.Task | None = None
         self._thinking_cue_stop: asyncio.Event | None = None
-        start_voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+        start_voice = self.configured_voice
         call_log.emit(
             _metrics_conn,
             safe_call_id,
@@ -776,6 +779,61 @@ class PhoneCall:
             _flow_domain_id=domain_id,
             _telnyx_call_id=telnyx_call_id,
         )
+
+    def _delegate_profile(self) -> "DelegateProfile | None":
+        """This line's operator-set profile, if it has one.
+
+        `getattr` because tests construct a PhoneCall through `__new__` to
+        exercise single methods, matching this file's existing idiom for
+        `_frame_pacer` and `telnyx_call_id`. A call with no route has no profile,
+        which is the same answer.
+        """
+
+        route = getattr(self, "delegate_route", None)
+        return route.profile if route else None
+
+    @property
+    def configured_voice(self) -> str:
+        """The TTS voice for this call: the line's own, else the node default."""
+
+        profile = self._delegate_profile()
+        if profile and profile.voice:
+            return profile.voice
+        return _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
+
+    @property
+    def configured_speed(self) -> float:
+        """The TTS speed for this call: the line's own, else the node default.
+
+        A profile speed of 0 means "inherit", which is why an out-of-range or
+        unparseable value in config becomes 0 rather than a guess.
+        """
+
+        profile = self._delegate_profile()
+        if profile and profile.speed > 0.0:
+            return profile.speed
+        try:
+            return float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
+        except ValueError:
+            _warn_config_fallback(
+                "NANO_CLAW_PHONE_SPEED", _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), 1.0)
+            return 1.0
+
+    @property
+    def greeting_line(self) -> str:
+        """What this call opens with, decided in ONE place.
+
+        Precedence, most specific first: the line's own operator-set greeting,
+        then the node-wide override, then whatever the mode would say. A per-DID
+        greeting has to beat NANO_CLAW_PHONE_GREETING — otherwise one node
+        answering two businesses greets both as the first one, which is the
+        multi-tenant version of the bug this whole seam exists to prevent.
+        """
+
+        profile = self._delegate_profile()
+        if profile and profile.greeting:
+            return profile.greeting
+        return _cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
 
     async def hangup_after_playback(
         self,
@@ -1835,12 +1893,10 @@ class PhoneCall:
             sentence_index = self._tap_sentence_index
             tap.event("synth_start", sentence_index=sentence_index)
         synth_started = time.monotonic() if tap else None
-        voice = _cfg("NANO_CLAW_PHONE_VOICE", "af_heart")
-        try:
-            speed = float(_cfg("NANO_CLAW_PHONE_SPEED", "1.0") or 1.0)
-        except ValueError:
-            _warn_config_fallback("NANO_CLAW_PHONE_SPEED", _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), 1.0)
-            speed = 1.0
+        # Per call, not per node: one node can answer for more than one business
+        # once lines are delegated, and they should not have to sound alike.
+        voice = self.configured_voice
+        speed = self.configured_speed
         loop = asyncio.get_running_loop()
         synth_args = (spoken_text, voice, speed)
         if pause_after_ms is not None:
@@ -2030,16 +2086,77 @@ _answered: dict[str, float] = {}  # call_control_id → answer time (webhook ret
 # Keyed by the RAW id because that is what the media WebSocket can correlate on;
 # the sanitized id is a different string. Cleared on hangup because the value is
 # a capability — riff-builder's delegate URL contains its session id.
-_call_routing: dict[str, tuple[str, float]] = {}
+_call_routing: dict[str, tuple["DelegateRoute", float]] = {}
 _ROUTING_TTL_S = 4 * 3600
 
 
-def delegate_starts() -> dict[str, str]:
-    """DID → conversation-start URL, or {} when no line is delegated.
+@dataclass(frozen=True)
+class DelegateProfile:
+    """How one delegated phone line should sound.
+
+    Authored by the OPERATOR, never by the delegate. That distinction is the
+    whole design: the conversation-start seam deliberately refuses to accept a
+    `greeting` from the app, because delegate-authored text going straight to TTS
+    is an arbitrary-speech capability (Codex review 2026-07-30, HIGH-3). An
+    operator setting a greeting for a line they configured is the same trust
+    level as every other setting in this module.
+
+    It closes the same gap for the same reason a business's phone should not
+    answer in a voice that names nobody.
+    """
+
+    start_url: str
+    greeting: str = ""
+    voice: str = ""
+    speed: float = 0.0   # 0 = inherit the node default
+
+
+@dataclass(frozen=True)
+class DelegateRoute:
+    """The conversation minted for one live call, plus how it sounds."""
+
+    delegate_url: str
+    profile: DelegateProfile
+
+
+def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
+    """Accept either a bare start URL or a full profile object."""
+
+    if isinstance(value, str):
+        return DelegateProfile(start_url=value) if value.strip() else None
+    if not isinstance(value, dict):
+        return None
+    start_url = str(value.get("start", "") or "").strip()
+    if not start_url:
+        log.error("delegate line %s names no start url", did)
+        return None
+    try:
+        speed = float(value.get("speed", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        log.error("delegate line %s has a non-numeric speed; using the default", did)
+        speed = 0.0
+    return DelegateProfile(
+        start_url=start_url,
+        greeting=str(value.get("greeting", "") or "").strip(),
+        voice=str(value.get("voice", "") or "").strip(),
+        speed=speed if 0.0 < speed <= 3.0 else 0.0,
+    )
+
+
+def delegate_starts() -> dict[str, DelegateProfile]:
+    """DID → its profile, or {} when no line is delegated.
 
     Read per call so a line can be added without a restart. Empty by default,
     which is what keeps every existing call path untouched: no entry, no start
     request, no behaviour change.
+
+    Both shapes are accepted, so adding profiles did not invalidate any existing
+    configuration::
+
+        {"+15551234567": "http://app/start"}
+        {"+15551234567": {"start": "http://app/start",
+                          "greeting": "Thanks for calling Rivera Plumbing.",
+                          "voice": "af_heart", "speed": 1.0}}
     """
 
     raw = _cfg("NANO_CLAW_DELEGATE_STARTS")
@@ -2052,7 +2169,12 @@ def delegate_starts() -> dict[str, str]:
         return {}
     if not isinstance(table, dict):
         return {}
-    return {str(did): str(url) for did, url in table.items() if url}
+    parsed = {}
+    for did, value in table.items():
+        profile = _parse_delegate_profile(str(did), value)
+        if profile is not None:
+            parsed[str(did)] = profile
+    return parsed
 
 
 def conversation_key_for(call_control_id: str) -> str:
@@ -2068,11 +2190,18 @@ def conversation_key_for(call_control_id: str) -> str:
     return hashlib.sha256(call_control_id.encode()).hexdigest()[:32]
 
 
-def routing_for(call_control_id: str) -> str | None:
-    """The delegate URL minted for this call, if any."""
+def route_for(call_control_id: str) -> "DelegateRoute | None":
+    """The conversation minted for this call, if any."""
 
     entry = _call_routing.get(call_control_id)
     return entry[0] if entry else None
+
+
+def routing_for(call_control_id: str) -> str | None:
+    """The delegate URL minted for this call, if any."""
+
+    route = route_for(call_control_id)
+    return route.delegate_url if route else None
 _metrics_conn = None  # set in register_phone_routes; every write is best-effort
 
 
@@ -2163,7 +2292,8 @@ async def incoming_handler(request: web.Request) -> web.Response:
             _metrics_conn, safe_cid, caller, payload.get("to", "?"), _node()
         )
         codec = phone_codec()
-        start_url = delegate_starts().get(str(payload.get("to", "")))
+        profile = delegate_starts().get(str(payload.get("to", "")))
+        start_url = profile.start_url if profile else None
         async with httpx.AsyncClient() as client:
             answer = _telnyx_cmd(client, cid, "answer", {
                 "command_id": f"answer-{cid}",
@@ -2200,7 +2330,8 @@ async def incoming_handler(request: web.Request) -> web.Response:
                     if now_routing - at > _ROUTING_TTL_S:
                         _call_routing.pop(key, None)
                 if started.ok:
-                    _call_routing[cid] = (started.delegate_url, now_routing)
+                    _call_routing[cid] = (
+                        DelegateRoute(started.delegate_url, profile), now_routing)
                     log.info("[phone] %s delegated for this call", safe_cid[:16])
                 else:
                     # No entry means the turn hop finds no delegate and the call
@@ -2255,9 +2386,7 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 metrics_db.record_call_start(
                     _metrics_conn, safe_cid, "?", "?", _node()
                 )
-                greeting = _compose_greeting(
-                    _cfg("NANO_CLAW_PHONE_GREETING") or call.default_greeting
-                )
+                greeting = _compose_greeting(call.greeting_line)
                 # Pre-answer health gate (07-26 incident: the node answered
                 # while the pipeline was dying and the caller talked into a
                 # line that couldn't hear). TTS-down is survivable — the
