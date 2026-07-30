@@ -1659,6 +1659,9 @@ let phoneModeEnabled = false;
 let autoTurnPending = false;
 let linkReady = false;
 let audioConnected = false;
+/** The wire format announced in hello_ack, kept so START MIC can retry
+ *  acquisition inside a user gesture. Null until the first hello_ack. */
+let lastWsAudioFormat = null;
 let textTransportReady = false;
 let pendingTextMessages = [];
 let vadAudioContext = null;
@@ -1686,7 +1689,13 @@ let connectionGeneration = 0;
 function syncReadinessControls() {
   textInput.disabled = !linkReady;
   sendBtn.disabled = !linkReady;
-  talkBtn.disabled = !audioConnected;
+  // Enabled on LINK readiness, not audio readiness. Gating the mic on
+  // audioConnected deadlocked: the automatic getUserMedia on hello_ack runs
+  // outside a user gesture, browsers that require one refuse it, audio never
+  // reaches "ready", and the only control that could supply the gesture stays
+  // disabled forever. The click now drives acquisition — see
+  // handleTalkButtonClick.
+  talkBtn.disabled = !linkReady && !audioConnected;
 }
 
 function renderReadinessState(element, state, textElement, text) {
@@ -3155,6 +3164,11 @@ function handleMessage(msg, generation) {
           ' path'
       );
       if (wsAudioEnabled) setTextTransportReady(true);
+      // Remembered so START MIC can RE-run acquisition inside a click. The
+      // automatic attempt below runs outside any user gesture, which Safari and
+      // most mobile browsers refuse for getUserMedia — and startWsAudio()
+      // validates this payload and throws without it, so a retry needs it kept.
+      lastWsAudioFormat = msg.wsAudioFormat;
       const startAudio = wsAudioEnabled
         ? startWsAudio(generation, msg.wsAudioFormat)
         : startWebRTC(generation);
@@ -3896,8 +3910,25 @@ function stopPhoneMode(options) {
   if (config.status !== false && audioConnected) statusText.textContent = 'Phone mode stopped';
 }
 
-function handleTalkButtonClick() {
+async function handleTalkButtonClick() {
   resumeWsAudioFromGesture();
+  // If the automatic acquisition on hello_ack was refused for want of a user
+  // gesture, THIS click is that gesture. Retry inside it before doing anything
+  // else; without this the button was clickable but inert until some other
+  // interaction (pressing Send) happened to satisfy the browser first.
+  if (!audioConnected && wsAudioEnabled && !phoneModeEnabled && lastWsAudioFormat) {
+    try {
+      await startWsAudio(connectionGeneration, lastWsAudioFormat);
+    } catch (err) {
+      pageLog('mic acquire on click failed: ' + err);
+      cleanupWsAudio();
+      setAudioUnavailable('Mic unavailable');
+    }
+    // Acquisition is asynchronous and the server still has to answer
+    // mic_audio_start. Let that land rather than starting a capture the
+    // transport is not ready for; the next click proceeds normally.
+    if (!audioConnected) return;
+  }
   if (phoneModeEnabled) stopPhoneMode();
   else startPhoneMode();
 }

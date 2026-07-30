@@ -2454,6 +2454,13 @@ input[type="range"]::-moz-range-thumb {
   place-items: center;
   overflow: hidden;
   padding: 12px;
+  /* Sampled from the artwork's own edge pixels (corners range #e8d4bd-#f4e9d8;
+     the paper carries a vignette, so this is their mean). On a window wider
+     than the art, the character cannot reach both edges without being scaled
+     absurdly — so instead of zooming further, the stage behind it is the same
+     cream and the uncovered strips read as more paper rather than as black
+     bars. Sizing stays driven by height; this covers whatever is left. */
+  background: #efe0ce;
 }
 
 /* The cube's overlay copy would otherwise be painted across the character. */
