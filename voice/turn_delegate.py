@@ -113,7 +113,16 @@ async def call_delegate(
     try:
         response = await client.post(
             url,
-            json={"text": text, "who": who},
+            # `speak: False` is unconditional because a gateway always owns
+            # audio — there is no configuration in which we want the delegate to
+            # synthesize a reply we are about to synthesize ourselves. Measured
+            # against a live riff-builder before this was sent: 5 WAV files and
+            # 1.0 MB written across two turns, none of them ever fetched.
+            #
+            # A delegate that has never heard of the field ignores it, which is
+            # the ordinary behaviour of every JSON body parser and is now stated
+            # in the contract.
+            json={"text": text, "who": who, "speak": False},
             timeout=timeout,
             follow_redirects=False,
         )

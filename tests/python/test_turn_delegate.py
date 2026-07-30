@@ -67,7 +67,13 @@ def test_the_request_carries_exactly_the_contract_fields():
         await call_delegate(client, "http://127.0.0.1:8790/t", "what I said", who="owner")
 
         sent = client.calls[0]
-        assert sent["json"] == {"text": "what I said", "who": "owner"}
+        assert sent["json"] == {
+            "text": "what I said",
+            "who": "owner",
+            # A gateway owns audio, so the delegate must not also render it.
+            # Measured waste when this was missing: 1.0MB of WAV over two turns.
+            "speak": False,
+        }
         assert sent["timeout"] == DELEGATE_TIMEOUT_S, (
             "the contract's 30s ceiling must be passed per request — both existing "
             "clients are built with timeout=120.0, so it is not inherited")

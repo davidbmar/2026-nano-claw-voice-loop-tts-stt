@@ -103,7 +103,7 @@ def test_delegate_mode_diverts_the_turn_and_speaks_the_apps_words(spoken, monkey
         assert handled is True, "the turn must NOT also reach nano-claw's model"
         assert client.calls[0]["url"] == "http://127.0.0.1:8790/api/session/s1/turn"
         assert client.calls[0]["json"] == {
-            "text": "do you do water heaters", "who": "caller"}
+            "text": "do you do water heaters", "who": "caller", "speak": False}
         assert spoken == [
             {"type": "final", "response": "Rivera Plumbing, how can I help?"}]
 
