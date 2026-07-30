@@ -178,3 +178,47 @@ def test_ops_data_allows_correct_token(path):
     with mock.patch.dict(os.environ, env, clear=False):
         response = asyncio.run(exercise())
     assert response.status == 200
+
+
+# Routes that mutate or spend without operator auth, each an accepted decision
+# rather than an oversight. Adding a POST route forces a choice: guard it, or
+# name it here with the reason.
+_INTENTIONALLY_PUBLIC_POSTS = {
+    # The browser posts its own client-side logs; requiring operator auth would
+    # mean no telemetry from the page that most needs it — one that failed to
+    # authenticate.
+    "/api/client-log",
+    # The voice picker in the console synthesizes a one-line sample. Spends TTS,
+    # reads nothing, and changes no state.
+    "/api/preview",
+}
+
+
+def test_every_mutating_route_is_guarded_or_declared_public():
+    """A POST that is neither in OPERATOR_PATHS nor listed above is reachable by
+    anyone who can reach the port.
+
+    This is a list-versus-list problem, which is why it is checked rather than
+    reviewed: the route is added in `server.py` and the guard in
+    `webauth/aiohttp_adapter.py`, so nothing about writing the handler brings the
+    allowlist to mind. The same-origin check does not help — it is self-documented
+    as CSRF mitigation only.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    server_src = (root / "voice" / "server.py").read_text()
+    adapter_src = (root / "voice" / "webauth" / "aiohttp_adapter.py").read_text()
+
+    posts = set(re.findall(r'app\.router\.add_post\("([^"]+)"', server_src))
+    block = re.search(r"OPERATOR_PATHS = frozenset\((.*?)\n\)", adapter_src, re.S)
+    assert block, "OPERATOR_PATHS moved or changed shape"
+    guarded = set(re.findall(r'"([^"]+)"', block.group(1)))
+
+    assert posts, "no POST routes found — has create_app been restructured?"
+    unclassified = sorted(posts - guarded - _INTENTIONALLY_PUBLIC_POSTS)
+    assert not unclassified, (
+        f"{unclassified} accept POSTs from anyone who can reach the port. Add "
+        f"them to OPERATOR_PATHS, or to _INTENTIONALLY_PUBLIC_POSTS with the "
+        f"reason they are safe.")

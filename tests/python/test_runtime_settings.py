@@ -113,3 +113,31 @@ def test_missing_attributes_do_not_raise():
 def test_safe_id_accepts_real_identifiers():
     for value in ("anthropic/claude-haiku-4-5", "ollama/gemma4:e2b", "topic_map", "base"):
         assert server._safe_id(value) == value
+
+
+def test_every_deferred_setting_is_applied_when_the_session_appears():
+    """A setting can arrive before the session exists — the browser sends its
+    stored preferences the moment the socket opens, and the Session is not built
+    until the first audio. Those go into `pending_settings` and are applied at
+    creation.
+
+    Two lists, two places. A handler that stashes a key nobody reads produces the
+    quietest possible bug: the browser sends the setting, the server accepts it,
+    and it never takes effect — no error, no log, and it works fine whenever the
+    session happens to already exist, so it reproduces only on a cold socket.
+
+    Compared as key sets rather than by name, because the handler and the key do
+    not always match (`set_delegate` stores `delegate_url`).
+    """
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "server.py").read_text()
+    written = set(re.findall(r'pending_settings\["([a-z_]+)"\]\s*=', source))
+    read = set(re.findall(r'if "([a-z_]+)" in pending_settings', source))
+
+    assert written, "no deferred settings found — has the socket been restructured?"
+    dropped = sorted(written - read)
+    assert not dropped, (
+        f"{dropped} are stashed for a session that does not exist yet and never "
+        f"applied when it appears — silently discarded on a cold socket")
