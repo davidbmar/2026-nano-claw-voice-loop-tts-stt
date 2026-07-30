@@ -425,7 +425,11 @@ def _delegate_call(monkeypatch, reply_text, ok=True):
     call._stop_thinking_cue = lambda: state.__setitem__("cue_stopped", True)
 
     async def fake_speak(units):
-        state["spoke"].append(units)
+        # CONSUMES the source, as the real _speak_sentences does. A stub that
+        # only accepted it hid the fact that what the caller heard is recorded
+        # by iteration — these tests passed while the review over-reported.
+        async for unit in units:
+            state["spoke"].append(unit)
         call._stop_thinking_cue()
 
     call._speak_sentences = fake_speak
@@ -499,3 +503,106 @@ def test_the_carrier_endpoint_defaults_to_production():
     assert phone_module.TELNYX_API.startswith("https://api.telnyx.com"), (
         "TELNYX_API_BASE is set in this environment, or the default changed")
     assert importlib.import_module("voice.phone").TELNYX_API == phone_module.TELNYX_API
+
+
+# ── barge-in must not be reported as a reply the caller heard ────────────────
+
+def _bargeable_call(monkeypatch, reply_text, cut_after=None):
+    """A delegated call whose speech stops after `cut_after` units."""
+    from voice.turn_delegate import DelegateReply
+
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.session_id = "p"
+    call.tap = None
+    call.call_id = "c1"
+    call.telnyx_call_id = "v3:c1"
+    call._http = object()
+    call.barge = type("B", (), {"reset": lambda s: None})()
+    call.speaking = False
+    call.interrupted = False
+    call._playback_flush_sent = False
+    call.endpointer = type("E", (), {"reset": lambda s: None})()
+    call.closed = False
+    call._stop_thinking_cue = lambda: None
+    call._speech_units = lambda t: [p.strip() + "." for p in t.split(".") if p.strip()]
+
+    async def speak(units):
+        spoken = 0
+        async for _unit in units:
+            spoken += 1
+            if cut_after is not None and spoken >= cut_after:
+                call.interrupted = True   # the caller talked over us
+                return
+
+    call._speak_sentences = speak
+
+    logged: list = []
+    monkeypatch.setattr(phone.call_log, "emit",
+                        lambda conn, cid, kind, payload, **k:
+                        logged.append((kind, payload)))
+
+    async def fake_delegate(client, url, text, *, who):
+        return DelegateReply(reply_text, ok=True)
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+    phone._call_routing["v3:c1"] = (route("http://h/t"), 0.0)
+    return call, logged
+
+
+def _turn(logged):
+    rows = [p for k, p in logged if k == "assistant_turn"]
+    assert rows, "no assistant_turn was logged"
+    return rows[0]
+
+
+def test_a_barged_reply_records_only_what_was_spoken(monkeypatch):
+    """The review timeline must show what the caller HEARD. Appending the whole
+    reply before speaking it recorded three sentences for a caller who got one."""
+    call, logged = _bargeable_call(
+        monkeypatch, "First sentence. Second sentence. Third sentence.",
+        cut_after=1)
+
+    asyncio.run(call._stream_reply("hi"))
+    row = _turn(logged)
+
+    assert row["text"] == "First sentence."
+    assert "Third sentence" not in row["text"]
+
+
+def test_a_barged_reply_is_not_reported_complete(monkeypatch):
+    """complete=True beside interrupted=True is not merely wrong, it is
+    self-contradictory — the same row said both."""
+    call, logged = _bargeable_call(
+        monkeypatch, "First sentence. Second sentence.", cut_after=1)
+
+    asyncio.run(call._stream_reply("hi"))
+    row = _turn(logged)
+
+    assert row["complete"] is False
+    assert row["interrupted"] is True
+
+
+def test_an_uninterrupted_reply_is_reported_complete_and_whole(monkeypatch):
+    """The fix must not make every delegate turn look truncated."""
+    call, logged = _bargeable_call(
+        monkeypatch, "First sentence. Second sentence.", cut_after=None)
+
+    asyncio.run(call._stream_reply("hi"))
+    row = _turn(logged)
+
+    assert row["complete"] is True
+    assert row["interrupted"] is False
+    assert "First sentence." in row["text"]
+    assert "Second sentence." in row["text"]
+
+
+def test_an_empty_reply_is_a_complete_turn(monkeypatch):
+    """Nothing to say is not a truncated turn."""
+    call, logged = _bargeable_call(monkeypatch, "", cut_after=None)
+
+    asyncio.run(call._stream_reply("hi"))
+
+    rows = [p for k, p in logged if k == "assistant_turn"]
+    if rows:  # only emitted when something was spoken
+        assert rows[0]["complete"] is True
+    assert call.speaking is False

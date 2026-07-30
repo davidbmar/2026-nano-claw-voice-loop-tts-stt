@@ -1562,17 +1562,29 @@ class PhoneCall:
                 reply = await call_delegate(
                     self._http, delegate_url, text, who="caller")
                 record_agent_done()
-                reply_complete = True
-                spoken_parts.append(reply.text)
                 log.info("[phone %s] delegate turn ok=%s (%.1fs)",
                          self.call_id[:8], reply.ok, time.monotonic() - t0)
                 if reply.text:
-                    await self._speak_sentences(self._speech_units(reply.text))
+                    # Through `record_spoken`, exactly like the streaming path.
+                    # Appending `reply.text` up front instead recorded the WHOLE
+                    # reply as heard even when the caller barged in after the
+                    # first sentence — and paired it with complete=True, which
+                    # is not merely wrong but self-contradictory next to the
+                    # interrupted=True the same row carries.
+                    async def delegate_units():
+                        for unit in self._speech_units(reply.text):
+                            yield unit
+
+                    await self._speak_sentences(record_spoken(delegate_units()))
+                    # A delegate reply is atomic by contract, so "complete"
+                    # means all of it reached the caller.
+                    reply_complete = not self.interrupted
                 else:
                     # The contract permits an app to have nothing to say. That is
                     # not a failure, but the cue must still stop — otherwise the
                     # caller hears ticking forever for a turn that is over.
                     self._stop_thinking_cue()
+                    reply_complete = True
                 return
 
             payload: dict = {
