@@ -261,7 +261,24 @@ def _origin_matches_request(request: web.Request) -> bool:
         return raw_host == "localhost:9090"
     if origin == PUBLIC_ORIGIN:
         return raw_host in PUBLIC_HOST_HEADERS
+    if origin and origin in _embedding_origins():
+        return True
     return _loopback_origin_matches_host(origin, raw_host)
+
+
+def _embedding_origins() -> frozenset[str]:
+    """Origins allowed to embed this gateway's voice, beyond its own console.
+
+    A product page that wants nano-claw to do its audio lives on its own origin,
+    so the same-origin rule that protects the console locks it out entirely
+    (riff-builder on :8790 gets a flat 403 from /ws).
+
+    Declared, never inferred: empty by default, and one exact origin per entry.
+    This is the same discipline as NANO_CLAW_DELEGATE_HOSTS — the operator names
+    who may speak through this node, rather than a wildcard deciding for them.
+    """
+    raw = os.environ.get("NANO_CLAW_EMBED_ORIGINS", "")
+    return frozenset(o.strip() for o in raw.split(",") if o.strip())
 
 
 def _loopback_origin_matches_host(origin: str | None, raw_host: str) -> bool:

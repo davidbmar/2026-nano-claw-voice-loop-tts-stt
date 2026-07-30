@@ -96,6 +96,8 @@ env VOICE_PORT="$NC_PORT" \
   NANO_CLAW_DELEGATE_STARTS="{\"$DID\":{\"start\":\"http://127.0.0.1:$RB_PORT/api/delegate/start\",\"greeting\":\"Thanks for calling Test Plumbing.\",\"voice\":\"af_heart\"}}" \
   NANO_CLAW_DELEGATE_URL="$BROWSER_DELEGATE" \
   NANO_CLAW_VOICE_FLOW=delegate \
+  NANO_CLAW_WS_AUDIO=1 \
+  NANO_CLAW_EMBED_ORIGINS="http://127.0.0.1:$RB_PORT,http://localhost:$RB_PORT,http://127.0.0.1:8790,http://localhost:8790" \
   "$NC_ROOT/.venv-test/bin/python" -m voice > "$RUN/nano-claw.log" 2>&1 &
 
 for _ in $(seq 1 90); do

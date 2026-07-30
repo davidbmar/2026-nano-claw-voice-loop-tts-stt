@@ -41,6 +41,8 @@ from voice.flow_session import (
     set_region_model,
 )
 from voice.turn_delegate import (
+    _CONTROL_CHARS,
+    _MAX_REPLY_CHARS,
     DELEGATE_APOLOGY,
     DELEGATE_TIMEOUT_S,
     DelegateUrlRefused,
@@ -701,6 +703,34 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg_type == "mic_cancel":
                 if session:
                     session.cancel_recording()
+
+            elif msg_type == "speak":
+                # "Say exactly this" — no agent, no turn, no reply expected.
+                #
+                # `text_message` means "a human said X" and runs a turn. A
+                # product page driving this gateway needs the other thing: it has
+                # already decided the words and wants them spoken, so it can
+                # announce something the caller did not ask for ("I've marked
+                # that as a keeper"). Without this the page can only speak by
+                # pretending someone talked.
+                #
+                # Bounded like a delegate reply, and for the same reason: this is
+                # text from another origin reaching TTS.
+                raw_text = msg.get("text", "")
+                if not isinstance(raw_text, str):
+                    await ws.send_json(
+                        {"type": "input_error", "error": "invalid_message"})
+                    continue
+                spoken = raw_text.translate(_CONTROL_CHARS)[:_MAX_REPLY_CHARS].strip()
+                if not spoken:
+                    await ws.send_json({"type": "speak_done", "spoken": ""})
+                    continue
+                if session is None:
+                    await ws.send_json(
+                        {"type": "input_error", "error": "no_session"})
+                    continue
+                await _speak_with_events(ws, session, spoken)
+                await ws.send_json({"type": "speak_done", "spoken": spoken})
 
             elif msg_type == "text_message":
                 raw_text = msg.get("text", "")
