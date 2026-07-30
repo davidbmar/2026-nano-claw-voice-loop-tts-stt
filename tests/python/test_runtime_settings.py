@@ -42,10 +42,18 @@ def test_payload_is_a_closed_allowlist():
         "speechMode",
         "analysisStyle",
         "schedulerModel",
+        # Both are server-side state. Barge-in SENSITIVITY and ADAPTIVE are
+        # deliberately NOT here: they live only in voice/web/barge-in.js, so
+        # including them would mean rendering a client-supplied value into the
+        # system prompt.
+        "vad",
+        "bargeIn",
     }
     assert payload["chatModel"] == "ollama/gemma4:e2b"
     assert payload["sttModel"] == "small"
     assert payload["speed"] == 1.0
+    assert payload["bargeIn"] in {"on", "off"}
+    assert payload["vad"] in {"energy", "silero"}
 
 
 def test_known_voice_renders_its_human_label():

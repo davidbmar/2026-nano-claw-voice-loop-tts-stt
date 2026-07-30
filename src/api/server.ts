@@ -395,6 +395,8 @@ export function sanitizeRuntimeSettings(value: unknown): RuntimeSettings | undef
     speechMode: text('speechMode'),
     analysisStyle: text('analysisStyle'),
     schedulerModel: text('schedulerModel'),
+    vad: text('vad'),
+    bargeIn: text('bargeIn'),
   };
 }
 

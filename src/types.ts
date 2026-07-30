@@ -93,6 +93,10 @@ export interface RuntimeSettings {
   speechMode: string;
   analysisStyle: string;
   schedulerModel: string;
+  /** Phone-call speech-detection profile ("energy" | "silero"). */
+  vad: string;
+  /** Whether speaking over the agent interrupts it ("on" | "off"). */
+  bargeIn: string;
 }
 
 /** Local evidence retrieval performed before the conversational model call. */

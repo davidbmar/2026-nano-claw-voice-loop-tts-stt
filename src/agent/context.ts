@@ -99,26 +99,21 @@ export class ContextBuilder {
       }
     }
 
-    // Everything above this marker (persona + knowledge) is stable across
-    // turns; cache-capable providers mark it as a cacheable prefix, others
-    // strip the marker. The timestamp and anything below churn per turn.
-    parts.push(SYSTEM_CACHE_MARKER);
-
-    // Live pipeline configuration. Deliberately BELOW the cache marker: these
-    // values change per session and would otherwise invalidate the cacheable
-    // persona+knowledge prefix on every turn. Small enough (~100 tokens) that
-    // carrying it every turn costs less than a lookup round-trip would.
+    // How to TALK about the live settings. Constant text, so it belongs in the
+    // cacheable prefix — it was previously written next to the values it
+    // describes and paid ~165 uncached tokens on every single turn for text
+    // that never changed. The values themselves stay below the marker, where
+    // per-session churn belongs. `surface` moved into the value list precisely
+    // so this paragraph interpolates nothing and can be cached verbatim.
     //
-    // This belongs to the base layer conceptually — every profile composes
-    // base beneath its own persona, so every mode inherits self-knowledge of
-    // its settings rather than each persona re-declaring it.
+    // Still conditional: with no settings payload (the phone path sends none)
+    // this would instruct the agent to answer from a list that is not there.
     if (this.config.runtimeSettings) {
-      const s = this.config.runtimeSettings;
-      parts.push('\n## Your current settings');
+      parts.push('\n## Answering about your own settings');
       parts.push(
-        'This is how you are configured right now, on the ' +
-          `${s.surface}. When the user asks what your settings are, why you sound a ` +
-          'certain way, or how something is configured, answer from this list rather ' +
+        'A list of your live configuration appears below, under "Your current ' +
+          'settings". When the user asks what your settings are, why you sound a ' +
+          'certain way, or how something is configured, answer from that list rather ' +
           'than describing the control panel in general terms. Do not recite it ' +
           'unprompted, and do not read the raw identifiers aloud as if they were ' +
           'part of the conversation: say "I\'m on the fast local model" rather than ' +
@@ -127,8 +122,27 @@ export class ContextBuilder {
           'You cannot change any of these yourself — the user changes them in the ' +
           'console.'
       );
+    }
+
+    // Everything above this marker (persona + knowledge) is stable across
+    // turns; cache-capable providers mark it as a cacheable prefix, others
+    // strip the marker. The timestamp and anything below churn per turn.
+    parts.push(SYSTEM_CACHE_MARKER);
+
+    // Live pipeline configuration. Deliberately BELOW the cache marker: these
+    // values change per session and would otherwise invalidate the cacheable
+    // persona+knowledge prefix on every turn. Values only — the instruction
+    // for how to use them is in the cached prefix above.
+    //
+    // This belongs to the base layer conceptually — every profile composes
+    // base beneath its own persona, so every mode inherits self-knowledge of
+    // its settings rather than each persona re-declaring it.
+    if (this.config.runtimeSettings) {
+      const s = this.config.runtimeSettings;
+      parts.push('\n## Your current settings');
       parts.push(
         [
+          `- Surface: ${s.surface}`,
           `- Assistant mode: ${s.mode}`,
           `- Chat model: ${s.chatModel}`,
           `- Voice: ${s.voice} at ${s.speed}x speed`,
@@ -136,6 +150,8 @@ export class ContextBuilder {
           `- Speech delivery: ${s.speechMode}`,
           `- Analysis style: ${s.analysisStyle}`,
           `- Scheduler model: ${s.schedulerModel}`,
+          `- Barge-in (speaking over you interrupts you): ${s.bargeIn}`,
+          `- Phone speech-detection profile: ${s.vad}`,
         ].join('\n')
       );
     }

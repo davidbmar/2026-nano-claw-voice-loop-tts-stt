@@ -1448,6 +1448,10 @@ def _runtime_settings(session: Session) -> dict:
         model_entry.get("id") if isinstance(model_entry, dict) else None
     )
 
+    # Lazily imported like every other `phone` use in this module: phone imports
+    # server, so a module-level import would be circular.
+    from voice import phone
+
     voice_id = getattr(session, "voice_id", "") or ""
     entry = (
         voice_catalog.lookup(voice_id)
@@ -1479,6 +1483,13 @@ def _runtime_settings(session: Session) -> dict:
         "speechMode": _safe_id(getattr(session, "speech_mode", "")),
         "analysisStyle": _safe_id(getattr(session, "analysis_style", "")),
         "schedulerModel": _safe_id(get_region_model()),
+        # Both are server-side state, so they can be reported truthfully.  The
+        # barge-in SENSITIVITY and ADAPTIVE controls are deliberately absent:
+        # they live only in the browser (voice/web/barge-in.js), so reporting
+        # them would mean trusting a client-supplied value in the system
+        # prompt — the injection channel task 094 just closed.
+        "bargeIn": "on" if BARGE_IN_ENABLED else "off",
+        "vad": _safe_id(phone.get_vad_mode()),
     }
 
 
