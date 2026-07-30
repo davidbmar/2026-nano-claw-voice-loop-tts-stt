@@ -1299,6 +1299,11 @@ function showDelegateWarning(message) {
 function renderDelegateConfig(config) {
   if (!delegateRow || !delegateUrlInput) return;
   delegateRow.classList.toggle('hidden', flowSelect.value !== 'delegate');
+  if (delegateNewBtn) {
+    window.NANO_CLAW_DELEGATE_START = (config && config.start_url) || '';
+    window.NANO_CLAW_DELEGATE_DID = (config && config.start_did) || '';
+    delegateNewBtn.classList.toggle('hidden', !window.NANO_CLAW_DELEGATE_START);
+  }
   // Never clobber a URL the operator is mid-way through typing.
   if (document.activeElement !== delegateUrlInput) {
     delegateUrlInput.value = (config && config.url) || '';
@@ -1349,6 +1354,43 @@ function saveDelegateUrl() {
       delegateUrlInput.disabled = false;
       showDelegateWarning(err.message);
     });
+}
+
+var delegateNewBtn = document.getElementById('delegate-new');
+
+function startFreshConversation() {
+  // Only offered when a start URL is configured: without one there is nothing
+  // to ask for a conversation, and a button that always fails is worse than no
+  // button.
+  var startUrl = window.NANO_CLAW_DELEGATE_START || '';
+  if (!startUrl) {
+    showDelegateWarning('No start URL configured for this node');
+    return;
+  }
+  delegateNewBtn.disabled = true;
+  operatorFetch('/api/voice/delegate', {
+    start: startUrl,
+    // Which line: the app refuses an unknown number rather than inventing a
+    // business to attach the conversation to.
+    did: window.NANO_CLAW_DELEGATE_DID || '',
+  })
+    .then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'failed'); });
+      return r.json();
+    })
+    .then(function (config) {
+      delegateNewBtn.disabled = false;
+      renderDelegateConfig(config || {});
+      statusText.textContent = 'Started a new conversation';
+    })
+    .catch(function (err) {
+      delegateNewBtn.disabled = false;
+      showDelegateWarning(err.message);
+    });
+}
+
+if (delegateNewBtn) {
+  delegateNewBtn.addEventListener('click', startFreshConversation);
 }
 
 if (delegateUrlInput) {

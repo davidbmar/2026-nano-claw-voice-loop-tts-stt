@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import secrets
+
 import httpx
 from aiohttp import WSCloseCode, web
 
@@ -40,8 +42,10 @@ from voice.flow_session import (
 )
 from voice.turn_delegate import (
     DELEGATE_APOLOGY,
+    DELEGATE_TIMEOUT_S,
     DelegateUrlRefused,
     call_delegate,
+    start_conversation,
     validate_delegate_url,
 )
 from voice.text_chunker import TextChunker
@@ -3138,13 +3142,29 @@ async def region_model_set_handler(request: web.Request) -> web.Response:
 def _delegate_api_payload() -> dict:
     """What the console shows about where delegate turns go."""
 
+    # Lazily, as everywhere else in this file: `voice.phone` imports back into
+    # here, so a module-level import is circular.
+    from voice.phone import delegate_starts
+
     url = default_delegate_url()
+    start_did = next(
+        ((did, profile.start_url) for did, profile in sorted(delegate_starts().items())
+         if profile.start_url), None)
     return {
         "url": url,
         "active": is_delegate_mode(),
         # The console has to be able to explain a refusal without the operator
         # reading server logs, so the allowlist is reported alongside.
         "allowed_hosts": sorted(delegate_allowed_hosts()),
+        # Where a fresh conversation would come from, if any line is delegated,
+        # and WHICH line. Both are needed: the app fails closed on an unknown
+        # number — correctly, since whoever dials a configured one can edit that
+        # business — so a start request without a DID is refused with
+        # "no builder line is configured for ''". The console shows its "New
+        # conversation" button only when these are set, because a button that
+        # always fails is worse than no button.
+        "start_url": start_did[1] if start_did else "",
+        "start_did": start_did[0] if start_did else "",
     }
 
 
@@ -3155,7 +3175,14 @@ async def delegate_get_handler(request: web.Request) -> web.Response:
 
 
 async def delegate_set_handler(request: web.Request) -> web.Response:
-    """Point new conversations at a delegate. Empty string clears it."""
+    """Point new conversations at a delegate. Empty string clears it.
+
+    `{"start": <url>}` mints a FRESH conversation through the app's start seam
+    and points here at it — the browser's half of what a phone call gets for
+    free. Without it an operator had to create a conversation by hand and paste
+    its URL, and could not start a second one without doing it again. Testing a
+    flow from the top is exactly when you want a clean conversation.
+    """
 
     try:
         body = await request.json()
@@ -3163,6 +3190,36 @@ async def delegate_set_handler(request: web.Request) -> web.Response:
         return web.Response(status=400, text="bad json")
     if not isinstance(body, dict):
         return web.Response(status=400, text="bad json")
+
+    start_url = body.get("start", "")
+    if isinstance(start_url, str) and start_url.strip():
+        try:
+            start_url = validate_delegate_url(
+                start_url.strip(), allowed_hosts=delegate_allowed_hosts())
+        except DelegateUrlRefused as exc:
+            return web.Response(status=400, text=f"start URL refused: {exc}")
+        # A key derived from the URL, so re-clicking mints a NEW conversation
+        # rather than being deduplicated back to the previous one. That is the
+        # opposite of the phone's need, and deliberate: a phone retry is one
+        # call, an operator clicking twice wants two.
+        key = f"console-{secrets.token_hex(8)}"
+        # `to` matters: the app resolves which business this conversation is for
+        # from the DID, and refuses an unknown one rather than inventing a
+        # business. Sending none earned a 404 that said exactly that.
+        did = body.get("did", "")
+        async with httpx.AsyncClient(timeout=DELEGATE_TIMEOUT_S) as client:
+            started = await start_conversation(
+                client, start_url, conversation_key=key, channel="browser",
+                to=str(did) if did else None)
+        if not started.ok:
+            # The app's own reason, which is the only thing that distinguishes a
+            # ceiling from a crash from a line nobody configured.
+            return web.Response(status=502,
+                                text=f"could not start a conversation: {started.failure}")
+        if not set_default_delegate_url(started.delegate_url):
+            return web.Response(status=400, text="delegate URL refused")
+        return web.json_response(_delegate_api_payload())
+
     if not set_default_delegate_url(body.get("url", "")):
         # 400 rather than 500: a refused URL is the operator's input being
         # rejected, which is a normal answer to give them.

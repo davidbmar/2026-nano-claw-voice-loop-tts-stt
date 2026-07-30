@@ -265,3 +265,105 @@ def _reset_runtime_delegate_url():
     import voice.flow_session as fs
     yield
     fs._delegate_url = None
+
+
+# ── the browser's half of the start seam ─────────────────────────────────────
+
+def test_the_console_can_mint_a_fresh_conversation(monkeypatch):
+    """A phone call gets a new conversation per call. The browser had none: an
+    operator created one by hand, pasted its URL, and to start a second one did
+    it again — which is exactly what you want when testing a flow from the top."""
+    from voice.turn_delegate import ConversationStart
+
+    seen = {}
+
+    async def fake_start(client, url, **kwargs):
+        seen.update(kwargs, url=url)
+        return ConversationStart("http://127.0.0.1:8790/api/session/fresh/turn",
+                                 ok=True)
+
+    monkeypatch.setattr(server, "start_conversation", fake_start)
+
+    async def exercise():
+        return await server.delegate_set_handler(
+            _JsonRequest({"start": "http://127.0.0.1:8790/api/delegate/start",
+                          "did": "+15125550100"}))
+
+    response = asyncio.run(exercise())
+
+    assert response.status == 200
+    assert seen["url"] == "http://127.0.0.1:8790/api/delegate/start"
+    assert seen["channel"] == "browser"
+    assert default_delegate_url() == "http://127.0.0.1:8790/api/session/fresh/turn"
+
+
+def test_clicking_twice_mints_two_conversations(monkeypatch):
+    """The OPPOSITE of the phone's need. A redelivered webhook is one call and
+    must deduplicate; an operator clicking twice wants two conversations, so the
+    key must differ each time."""
+    from voice.turn_delegate import ConversationStart
+
+    keys = []
+
+    async def fake_start(client, url, **kwargs):
+        keys.append(kwargs["conversation_key"])
+        return ConversationStart(
+            f"http://127.0.0.1:8790/api/session/s{len(keys)}/turn", ok=True)
+
+    monkeypatch.setattr(server, "start_conversation", fake_start)
+
+    async def exercise():
+        for _ in range(2):
+            await server.delegate_set_handler(
+                _JsonRequest({"start": "http://127.0.0.1:8790/api/delegate/start"}))
+
+    asyncio.run(exercise())
+
+    assert len(set(keys)) == 2, "the same key twice would reuse one conversation"
+
+
+def test_a_refused_start_url_is_rejected_before_dialling(monkeypatch):
+    called = []
+
+    async def fake_start(*a, **k):
+        called.append(True)
+
+    monkeypatch.setattr(server, "start_conversation", fake_start)
+    monkeypatch.delenv("NANO_CLAW_DELEGATE_HOSTS", raising=False)
+
+    async def exercise():
+        return await server.delegate_set_handler(
+            _JsonRequest({"start": "https://evil.example.com/start"}))
+
+    response = asyncio.run(exercise())
+
+    assert response.status == 400
+    assert called == [], "an unvetted host was dialled before being refused"
+
+
+def test_a_failed_start_reports_the_apps_reason(monkeypatch):
+    """502 with the app's own explanation, not a bare failure — a ceiling, a
+    crash and an unconfigured line are otherwise indistinguishable."""
+    from voice.turn_delegate import ConversationStart
+
+    async def fake_start(*a, **k):
+        return ConversationStart("", ok=False, failure="status 503: at the ceiling")
+
+    monkeypatch.setattr(server, "start_conversation", fake_start)
+
+    async def exercise():
+        return await server.delegate_set_handler(
+            _JsonRequest({"start": "http://127.0.0.1:8790/api/delegate/start"}))
+
+    response = asyncio.run(exercise())
+
+    assert response.status == 502
+    assert "ceiling" in response.text
+
+
+class _JsonRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
