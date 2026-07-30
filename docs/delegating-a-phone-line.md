@@ -7,9 +7,13 @@ per turn. This is the operator's side of that.
 Contract: riff-builder `docs/turn-delegate-contract.md`.
 Design and review: `docs/design/2026-07-30-conversation-start-seam.md`.
 
-> **Nothing here has carried a real call yet.** Every phone-side test stubs the
-> carrier. The preflight below exercises the full chain over real HTTP, which is
-> the closest thing to proof that exists today.
+> **A full call has now run through this — simulated, not over the PSTN.**
+> `scripts/phone_loopback_test.py` connects to `/ws/phone-media` exactly as the
+> carrier would. Against a second node with a delegated line (2026-07-30):
+> greeting played, caller audio transcribed, **delegate turn ok=True in 1.9s**,
+> first answer audio 2698 ms after the caller stopped. The per-DID greeting was
+> used — 320 greeting frames against 778 for an undelegated call on the same
+> node. Still untested: a real carrier, real network jitter, and barge-in.
 
 ## Why two settings and not one
 
@@ -74,6 +78,33 @@ A phone-started session is pinned to the **owner** role. The gateway sends
 `who == "owner"` is what gates voice approval, so a phone owner marked "caller"
 could not approve anything.
 
+## Exercising it without a phone number
+
+`scripts/check_delegate_setup.py` (below) proves the HTTP chain. To drive the
+whole phone path — STT, the delegate hop, TTS, frame pacing — run a second node
+and a loopback caller, leaving the node that serves the live line alone:
+
+```bash
+# a local sink so no fake call id reaches a real carrier
+TELNYX_API_BASE=http://127.0.0.1:8399 \
+VOICE_PORT=8080 NANO_CLAW_PHONE=1 \
+NANO_CLAW_DELEGATE_STARTS='{"+15125550100":{"start":"http://127.0.0.1:8790/api/delegate/start"}}' \
+  .venv-test/bin/python -m voice
+
+# mint the conversation the way call.initiated does
+curl -X POST "http://127.0.0.1:8080/api/phone/incoming?token=$NANO_CLAW_PHONE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"data":{"event_type":"call.initiated","payload":{
+       "call_control_id":"v3:loop-1","to":"+15125550100","from":"+15125559999"}}}'
+
+# then call it, correlating on the same id
+LOOPBACK_WS_BASE=ws://localhost:8080 LOOPBACK_CALL_ID='v3:loop-1' \
+  .venv-test/bin/python scripts/phone_loopback_test.py "we do emergency repairs"
+```
+
+`TELNYX_API_BASE` and the two `LOOPBACK_*` variables all default to production
+behaviour; they exist so this can be exercised without a carrier.
+
 ## Preflight before pointing a real number at it
 
 ```bash
@@ -109,7 +140,7 @@ down.
 
 ## Known gaps
 
-- **No real call has run through this.** See the note at the top.
+- **No PSTN call has run through this.** A loopback call has; see the top.
 - **`hangup_after_playback` is unwired.** It exists and is tested — it waits the
   pacer's measured surplus so a goodbye is not cut mid-word — but with start
   failures falling open, no path currently needs to end a call.

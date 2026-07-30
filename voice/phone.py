@@ -99,7 +99,10 @@ from voice.tts import synthesize as tts_synthesize
 log = logging.getLogger("nano-claw.phone")
 
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
-TELNYX_API = "https://api.telnyx.com/v2"
+# Overridable so the gateway can be exercised end to end against a local sink
+# instead of posting fake call ids to a real carrier with a dummy key. The
+# default is the production endpoint, so nothing changes unless it is set.
+TELNYX_API = os.environ.get("TELNYX_API_BASE", "https://api.telnyx.com/v2").rstrip("/")
 
 # Back-compat alias; the live greeting now follows the active mode so the
 # intro can never promise a persona the brain isn't running.

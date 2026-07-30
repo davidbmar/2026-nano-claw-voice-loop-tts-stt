@@ -487,3 +487,15 @@ def test_the_review_does_not_call_a_delegated_turn_our_persona(monkeypatch):
 
     turns = [payload for kind, payload in state["logged"] if kind == "assistant_turn"]
     assert turns[0]["mode"] == "delegate"
+
+
+def test_the_carrier_endpoint_defaults_to_production():
+    """The override exists so the gateway can be run against a local sink. It
+    must never change where a real deployment sends commands."""
+    import importlib
+
+    import voice.phone as phone_module
+
+    assert phone_module.TELNYX_API.startswith("https://api.telnyx.com"), (
+        "TELNYX_API_BASE is set in this environment, or the default changed")
+    assert importlib.import_module("voice.phone").TELNYX_API == phone_module.TELNYX_API

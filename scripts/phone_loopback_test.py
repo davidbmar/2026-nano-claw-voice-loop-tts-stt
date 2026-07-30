@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -37,7 +38,9 @@ from voice.phone_audio import (  # noqa: E402
 )
 
 TTS_URL = "http://localhost:8300/synthesize"
-WS_BASE = "ws://localhost:9090"
+# Overridable so this can exercise a second node without disturbing the one
+# serving the live line. Default unchanged.
+WS_BASE = os.environ.get("LOOPBACK_WS_BASE", "ws://localhost:9090")
 
 
 def _env(name: str, default: str = "") -> str:
@@ -116,7 +119,11 @@ async def run(question: str) -> None:
             await ws.send_json({
                 "event": "start",
                 "stream_id": "loopback",
-                "start": {"call_control_id": f"loopback-{int(time.time())}"},
+                # Overridable so a caller can be correlated to a routing entry
+                # minted by a call.initiated webhook — otherwise a delegated
+                # line cannot be exercised without a carrier.
+                "start": {"call_control_id": os.environ.get(
+                    "LOOPBACK_CALL_ID", f"loopback-{int(time.time())}")},
             })
 
             async def sender():
