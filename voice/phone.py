@@ -868,9 +868,11 @@ class PhoneCall:
         await asyncio.sleep(wait_s)
         # The RAW id, not self.call_id: that one is sanitized for tap paths and
         # logs, and Telnyx would not recognize it as a call.
+        # getattr for parity with the sites this replaces: a media-only call
+        # has no Telnyx leg, and they fell back rather than raising.
+        carrier_id = getattr(self, "telnyx_call_id", self.call_id)
         return await _telnyx_cmd(
-            client, self.telnyx_call_id, "hangup",
-            {"command_id": f"hangup-{self.telnyx_call_id}"})
+            client, carrier_id, "hangup", {"command_id": f"hangup-{carrier_id}"})
 
     async def close(self) -> None:
         was_speaking = self.speaking
@@ -1019,12 +1021,7 @@ class PhoneCall:
                     {"text": IDLE_GOODBYE_TEXT, "mode": "idle"},
                 )
                 await self.speak(IDLE_GOODBYE_TEXT)
-                await _telnyx_cmd(
-                    self._http,
-                    getattr(self, "telnyx_call_id", self.call_id),
-                    "hangup",
-                    {},
-                )
+                await self.hangup_after_playback(self._http)
                 self.closed = True
                 return
 
@@ -1465,12 +1462,7 @@ class PhoneCall:
                 )
                 await self.speak(reply.text)
                 if reply.done:
-                    await _telnyx_cmd(
-                        self._http,
-                        getattr(self, "telnyx_call_id", self.call_id),
-                        "hangup",
-                        {},
-                    )
+                    await self.hangup_after_playback(self._http)
                     self.closed = True
                 return
             await self._stream_reply(text)
@@ -2790,6 +2782,11 @@ async def _apologize_and_hangup(
     except Exception:
         log.exception("[phone %s] degraded apology failed", safe_call_id[:8])
     try:
+        # Deliberately NOT hangup_after_playback: this is a pre-answer gate,
+        # `telnyx_call_id` is passed in because the call object may not carry the
+        # right one, and "media-only calls have no Telnyx leg" means what arrives
+        # here is not always a full PhoneCall. The drain wait is worth less than
+        # the assumption would cost.
         await _telnyx_cmd(call._http, telnyx_call_id, "hangup", {})
     except Exception:
         log.exception("[phone %s] degraded hangup failed", safe_call_id[:8])

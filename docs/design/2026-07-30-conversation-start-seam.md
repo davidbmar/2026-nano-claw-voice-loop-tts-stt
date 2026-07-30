@@ -171,6 +171,15 @@ These are requirements, not open questions.
 
 ## Ending the call on start failure needs machinery that does not exist
 
+**Correction (2026-07-30, later):** the claim below was wrong. The gateway
+already hung up in THREE places — the idle goodbye, a finished scheduling flow,
+and the pre-answer health gate — each issuing the carrier command inline
+immediately after speaking, so each could clip its own last words by the pacer's
+surplus. `hangup_after_playback` was built as though nothing existed and wired
+nowhere; two of those three now use it. The third keeps its inline command
+deliberately: it is a pre-answer gate that is handed a `telnyx_call_id` because
+what arrives is not always a full `PhoneCall`.
+
 The draft said "speak the apology and end the call" as though ending were
 available. It is not: the gateway issues `answer`, while `call.hangup` is an
 inbound notification only, and `PhoneCall.close` is local teardown

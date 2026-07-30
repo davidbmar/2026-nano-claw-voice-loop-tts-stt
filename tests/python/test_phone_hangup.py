@@ -201,3 +201,51 @@ def test_a_call_with_no_pacer_yet_still_hangs_up(monkeypatch):
 
     assert asyncio.run(exercise()) is True
     assert len(client.posts) == 1
+
+
+# ── every hangup that follows speech must wait for it ────────────────────────
+
+def _calls_in(func_name: str) -> set:
+    """Attribute calls inside a function, read from the file on disk.
+
+    From disk, not `inspect.getsource`: `cost_ledger.install_phone_tracking`
+    wraps methods, and getsource then returns the wrapper — that has produced
+    tests here which pass alone and fail in the full suite.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text())
+    func = next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == func_name)
+    return {n.func.attr for n in ast.walk(func)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+
+
+def test_the_idle_goodbye_waits_before_hanging_up():
+    """"It sounds like you've stepped away. Thanks for calling — goodbye!" then
+    an immediate carrier hangup clips the goodbye by the pacer's surplus. This
+    was the shape at three sites before `hangup_after_playback` was wired in —
+    which also corrects a claim in the conversation-start design that no
+    gateway-controlled hangup existed at all. Three did."""
+    assert "hangup_after_playback" in _calls_in("_idle_watchdog"), (
+        "the idle goodbye hangs up without waiting for playback to drain")
+
+
+def test_a_finished_flow_waits_before_hanging_up():
+    """Same shape at the other site: a scheduling flow that reaches a terminal
+    outcome speaks its closing line and ends the call."""
+    assert "hangup_after_playback" in _calls_in("_run_turn")
+
+
+def test_the_pre_answer_gate_still_uses_the_id_it_was_given():
+    """`_apologize_and_hangup` takes `telnyx_call_id` as a PARAMETER, and its
+    docstring says media-only calls have no Telnyx leg — so what arrives is not
+    always a full PhoneCall. Routing it through `hangup_after_playback` would
+    ignore the id it was handed and assume a method the object may not have. I
+    made that change and reverted it; this keeps it reverted."""
+    calls = _calls_in("_apologize_and_hangup")
+
+    assert "hangup_after_playback" not in calls
+    assert "speak" in calls

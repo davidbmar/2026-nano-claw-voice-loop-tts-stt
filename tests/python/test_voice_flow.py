@@ -550,7 +550,12 @@ def test_phone_lawyer_degraded_start_speaks_apology_and_never_uses_persona(
     run(exercise())
     assert events == [
         ("speak", domain.apology_unavailable),
-        ("telnyx", "lawyer-unavailable", "hangup", {}),
+        # The payload carries a command_id now, as `answer` always has: Telnyx
+        # dedupes on it, and these calls hang up through
+        # `hangup_after_playback`, which waits for the pacer's surplus so the
+        # apology is not clipped mid-word.
+        ("telnyx", "lawyer-unavailable", "hangup",
+         {"command_id": "hangup-lawyer-unavailable"}),
     ]
 
 
@@ -614,7 +619,8 @@ def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
     assert events == [
         ("flow", "yes, book it"),
         ("speak", terminal.text),
-        ("telnyx", "booked-call", "hangup", {}),
+        ("telnyx", "booked-call", "hangup",
+         {"command_id": "hangup-booked-call"}),
     ]
 
 
