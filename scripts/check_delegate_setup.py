@@ -113,6 +113,12 @@ async def check_line(did: str, profile, probe_text: str, raw: dict | None = None
             # without it, and because the gateway fails OPEN the only symptom in
             # production is calls quietly ceasing to be delegated.
             line(BAD, f"conversation start failed: {started.failure}")
+            if "already open" in (started.failure or "") or "503" in (started.failure or ""):
+                # The app states the situation without naming a config variable,
+                # because its HTTP details are owner-facing. This output is not:
+                # only an operator runs a preflight, so the variable belongs here.
+                line(NOTE, "at the app's conversation ceiling — raise "
+                           "RB_DELEGATE_MAX_LIVE on the riff-builder side")
             line(NOTE, "the gateway would answer the call and handle it "
                        "undelegated — start failures fail OPEN")
             return False
