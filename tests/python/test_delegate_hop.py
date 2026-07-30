@@ -414,3 +414,51 @@ def test_the_phone_still_speaks_as_a_caller():
     assert who == "caller", (
         "the phone hop must not claim its caller is the owner — that would give "
         "anyone who dials the number the owner's voice approval")
+
+
+def test_a_console_started_conversation_is_the_owner_s(monkeypatch):
+    """The same assertion as the turn hop, one layer up. It changes no behaviour
+    today — riff-builder pins the role from the DID either way — and that is the
+    reason to pin it: a false statement nothing currently reads is one nobody
+    will notice becoming load-bearing."""
+    from voice.turn_delegate import ConversationStart
+
+    seen = {}
+
+    async def fake_start(client, url, **kwargs):
+        seen.update(kwargs)
+        return ConversationStart("http://127.0.0.1:8790/api/session/fresh/turn",
+                                 ok=True)
+
+    monkeypatch.setattr(server, "start_conversation", fake_start)
+
+    async def exercise():
+        return await server.delegate_set_handler(
+            _JsonRequest({"start": "http://127.0.0.1:8790/api/delegate/start",
+                          "did": "+15125550100"}))
+
+    asyncio.run(exercise())
+
+    assert seen["channel"] == "browser"
+    assert seen["who"] == "owner", (
+        "the console asserted its operator was a caller while also saying the "
+        "channel was a browser — the two fields contradicted each other")
+
+
+def test_the_phone_start_still_says_caller():
+    """And the phone's start keeps saying caller, for the same reason its turns
+    do: someone who dialled a number is one."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    call = next(n for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "start_conversation")
+    passed = {kw.arg for kw in call.keywords}
+
+    assert "who" not in passed, (
+        "the phone start passes no `who`, taking the 'caller' default; if that "
+        "changed, say so deliberately")
+    assert "channel" in passed

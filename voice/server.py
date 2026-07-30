@@ -3220,6 +3220,13 @@ async def delegate_set_handler(request: web.Request) -> web.Response:
         async with httpx.AsyncClient(timeout=DELEGATE_TIMEOUT_S) as client:
             started = await start_conversation(
                 client, start_url, conversation_key=key, channel="browser",
+                # Matches the turn hop: a console operator is not a caller.
+                # `who` defaults to "caller" because the phone is the common
+                # case, and leaving the default here asserted something false
+                # about who was starting the conversation. riff-builder happens
+                # to pin the role itself today, so this changed no behaviour —
+                # which is exactly why it would have stayed wrong.
+                who="owner",
                 to=str(did) if did else None)
         if not started.ok:
             # The app's own reason, which is the only thing that distinguishes a

@@ -119,3 +119,45 @@ def test_every_listed_capability_still_exists():
     assert not missing, (
         f"{missing} are listed here but no longer defined — renamed or removed, "
         f"leaving this file guarding names that do not exist")
+
+
+# ── what the gateway ASSERTS must match the channel it is on ────────────────
+
+def test_no_gateway_call_contradicts_its_own_channel():
+    """`who` is the gateway's statement about which human is speaking, and the
+    app is entitled to act on it — riff-builder gates voice approval on
+    `who == "owner"`.
+
+    Both hops shipped hardcoding "caller", so the browser told the app its
+    OPERATOR was a caller. The app answered them in the third person and their
+    spoken approvals did nothing. Found by someone using it, not by a test:
+    every value was valid, the code did what it said, and what it said was wrong
+    about the situation.
+
+    This is that mistake made checkable. A call on `channel="browser"` claiming a
+    caller, or on `channel="phone"` claiming an owner, is a contradiction the
+    author has to resolve deliberately.
+    """
+    import ast
+
+    contradictions = []
+    for rel in ("voice/server.py", "voice/phone.py",
+                "scripts/check_delegate_setup.py"):
+        tree = ast.parse((ROOT / rel).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name not in ("call_delegate", "start_conversation"):
+                continue
+            kw = {k.arg: getattr(k.value, "value", "<expr>") for k in node.keywords}
+            who = kw.get("who", "caller")          # the signature's default
+            channel = kw.get("channel")
+            if channel == "browser" and who not in ("owner", "operator"):
+                contradictions.append(f"{rel}:{node.lineno} browser channel says who={who!r}")
+            if channel == "phone" and who != "caller":
+                contradictions.append(f"{rel}:{node.lineno} phone channel says who={who!r}")
+
+    assert not contradictions, (
+        "the gateway is telling the app something its own channel contradicts: "
+        + "; ".join(contradictions))
