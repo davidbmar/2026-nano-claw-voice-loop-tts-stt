@@ -1541,6 +1541,36 @@ class PhoneCall:
                         spoken_parts.append(unit_text.strip())
                 yield unit
 
+        async def speak_whole_reply(text: str) -> None:
+            """Speak a reply that arrived complete, recording what was HEARD.
+
+            Both non-streaming paths — the delegate hop and the API fallback —
+            independently got this wrong the same way: they appended the whole
+            text to `spoken_parts` and set `reply_complete = True` BEFORE
+            speaking a word. A caller who barged in after one sentence was then
+            recorded as having received the reply in full, and the row said
+            `complete: True` beside `interrupted: True`.
+
+            Only the streaming branch did it correctly, via `record_spoken`. This
+            is that behaviour in one place, so there is no third copy to get
+            wrong: accumulate per unit as it is handed to synthesis, mark
+            first-audio latency once, and decide completeness from whether the
+            caller interrupted.
+            """
+            nonlocal first_spoken_at, reply_complete
+
+            async def units():
+                nonlocal first_spoken_at
+                for unit in self._speech_units(text):
+                    if first_spoken_at is None:
+                        first_spoken_at = time.monotonic()
+                        log.info("[phone %s] first sentence at %.1fs",
+                                 self.call_id[:8], first_spoken_at - t0)
+                    yield unit
+
+            await self._speak_sentences(record_spoken(units()))
+            reply_complete = not self.interrupted
+
         try:
             # INSIDE the try, so the finally below runs. It was outside once, and
             # that skipped all three of its jobs: `self.speaking` stayed True
@@ -1565,29 +1595,9 @@ class PhoneCall:
                 log.info("[phone %s] delegate turn ok=%s (%.1fs)",
                          self.call_id[:8], reply.ok, time.monotonic() - t0)
                 if reply.text:
-                    # Through `record_spoken`, exactly like the streaming path.
-                    # Appending `reply.text` up front instead recorded the WHOLE
-                    # reply as heard even when the caller barged in after the
-                    # first sentence — and paired it with complete=True, which
-                    # is not merely wrong but self-contradictory next to the
-                    # interrupted=True the same row carries.
-                    async def delegate_units():
-                        # Marks first-audio latency the way the streaming branch
-                        # does. On a delegated line this is THE number that
-                        # matters — a slow app is invisible from here otherwise,
-                        # and the turn itself is already logged separately.
-                        nonlocal first_spoken_at
-                        for unit in self._speech_units(reply.text):
-                            if first_spoken_at is None:
-                                first_spoken_at = time.monotonic()
-                                log.info("[phone %s] first sentence at %.1fs",
-                                         self.call_id[:8], first_spoken_at - t0)
-                            yield unit
-
-                    await self._speak_sentences(record_spoken(delegate_units()))
-                    # A delegate reply is atomic by contract, so "complete"
-                    # means all of it reached the caller.
-                    reply_complete = not self.interrupted
+                    # A delegate reply is atomic by contract, so it takes the
+                    # same path as any other whole reply.
+                    await speak_whole_reply(reply.text)
                 else:
                     # The contract permits an app to have nothing to say. That is
                     # not a failure, but the cue must still stop — otherwise the
@@ -1620,10 +1630,8 @@ class PhoneCall:
                     reply = body.get("response", "") or "I didn't catch that — could you say it again?"
                     record_turn_model(body)
                     record_agent_done()
-                    reply_complete = True
-                    spoken_parts.append(reply)
                     log.info("[phone %s] agent non-stream (%.1fs)", self.call_id[:8], time.monotonic() - t0)
-                    await self._speak_sentences(self._speech_units(reply))
+                    await speak_whole_reply(reply)
                     return
 
                 async def stream_sentences():

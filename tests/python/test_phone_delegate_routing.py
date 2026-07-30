@@ -634,3 +634,83 @@ def test_first_audio_is_marked_once_not_per_sentence(monkeypatch, caplog):
 
     marks = [r for r in caplog.records if "first sentence at" in r.message]
     assert len(marks) == 1, f"marked {len(marks)} times for one reply"
+
+
+# ── the same defect on the NORMAL path's non-streaming fallback ──────────────
+#
+# Found while auditing the delegate hop: when the agent API answers with
+# something other than SSE, that branch had the identical bug — whole reply
+# appended and complete=True set before speaking. Both now share one helper, so
+# there is no third copy to get wrong.
+
+class _NonSseResponse:
+    headers = {"content-type": "application/json"}
+
+    def __init__(self, reply):
+        self._reply = reply
+
+    async def aread(self):
+        import json as _json
+        return _json.dumps({"response": self._reply}).encode()
+
+
+class _NonSseStream:
+    def __init__(self, reply):
+        self._reply = reply
+
+    async def __aenter__(self):
+        return _NonSseResponse(self._reply)
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _NonSseHttp:
+    def __init__(self, reply):
+        self._reply = reply
+
+    def stream(self, _method, _url, **_kw):
+        return _NonSseStream(self._reply)
+
+
+def _fallback_call(monkeypatch, reply_text, cut_after=None):
+    """A call whose agent API answers non-SSE — no delegate involved."""
+    call, logged = _bargeable_call(monkeypatch, "unused", cut_after=cut_after)
+    phone._call_routing.clear()          # NOT delegated: the normal path
+    call._http = _NonSseHttp(reply_text)
+    monkeypatch.setattr(phone, "record_agent_done", lambda *a, **k: None,
+                        raising=False)
+    return call, logged
+
+
+def test_the_non_streaming_fallback_records_only_what_was_spoken(monkeypatch):
+    call, logged = _fallback_call(
+        monkeypatch, "Alpha one. Beta two. Gamma three.", cut_after=1)
+
+    asyncio.run(call._stream_reply("hi"))
+    row = _turn(logged)
+
+    assert row["text"] == "Alpha one."
+    assert "Gamma three" not in row["text"], (
+        "the fallback recorded a reply the caller was cut off from")
+    assert row["complete"] is False
+
+
+def test_the_non_streaming_fallback_is_complete_when_uninterrupted(monkeypatch):
+    call, logged = _fallback_call(monkeypatch, "Alpha one. Beta two.")
+
+    asyncio.run(call._stream_reply("hi"))
+    row = _turn(logged)
+
+    assert row["complete"] is True
+    assert row["interrupted"] is False
+    assert "Alpha one." in row["text"] and "Beta two." in row["text"]
+
+
+def test_the_fallback_is_still_a_persona_turn_not_a_delegate_one(monkeypatch):
+    """Sharing the speak helper must not blur which path answered."""
+    call, logged = _fallback_call(monkeypatch, "Alpha one.")
+
+    asyncio.run(call._stream_reply("hi"))
+
+    assert _turn(logged)["mode"] == "persona"
