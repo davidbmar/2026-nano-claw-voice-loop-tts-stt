@@ -100,3 +100,72 @@ def test_speak_is_a_distinct_message_from_text_message():
 
     assert "speak" in handled, "the gateway cannot be told to say something"
     assert "text_message" in handled
+
+
+# ── reading the voice list from the embedding page ───────────────────────────
+#
+# Declaring an origin admitted it to `/ws` but nothing else, so the settings
+# panel came up with an EMPTY voice dropdown: `/api/voices` answered 200 and the
+# browser discarded the body for want of an Access-Control-Allow-Origin header.
+# Found by loading the real page, not by a unit test — curl saw the 200 and was
+# satisfied. Embedding needs both halves of the same permission.
+
+from voice.webauth.aiohttp_adapter import _decorate_response  # noqa: E402
+
+
+def decorate(path, origin, method="GET"):
+    """Run the real response decorator over a plain 200."""
+    from aiohttp import web
+
+    request = SimpleNamespace(
+        path=path, method=method,
+        headers={"Origin": origin, "Host": "localhost:8080"})
+    return _decorate_response(request, web.json_response({"ok": True}))
+
+
+ALLOW = "Access-Control-Allow-Origin"
+
+
+def test_a_declared_origin_may_read_the_voice_list(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_EMBED_ORIGINS", "http://127.0.0.1:8790")
+
+    response = decorate("/api/voices", "http://127.0.0.1:8790")
+
+    assert response.headers[ALLOW] == "http://127.0.0.1:8790", (
+        "the panel cannot populate its dropdown without this header")
+    assert "Origin" in response.headers.get("Vary", ""), (
+        "the answer differs per origin, so a shared cache must not reuse it")
+
+
+def test_the_echo_is_the_declared_origin_never_a_wildcard(monkeypatch):
+    """`*` would hand the voice list to every page on the internet, and is the
+    lazy fix this test exists to prevent."""
+    monkeypatch.setenv("NANO_CLAW_EMBED_ORIGINS", "http://127.0.0.1:8790")
+
+    assert decorate("/api/voices", "http://127.0.0.1:8790").headers[ALLOW] != "*"
+
+
+def test_an_undeclared_origin_reads_nothing(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_EMBED_ORIGINS", "http://127.0.0.1:8790")
+
+    assert ALLOW not in decorate("/api/voices", "http://evil.example").headers
+
+
+def test_embedding_does_not_open_the_rest_of_the_gateway(monkeypatch):
+    """The panel needs exactly one path. Granting every non-sensitive path
+    because one was needed is how an embed permission becomes an API key."""
+    monkeypatch.setenv("NANO_CLAW_EMBED_ORIGINS", "http://127.0.0.1:8790")
+
+    for path in ("/api/me", "/api/history", "/api/config", "/"):
+        assert ALLOW not in decorate(path, "http://127.0.0.1:8790").headers, (
+            f"{path} was opened to an embedding origin that only asked to speak")
+
+
+def test_writes_are_not_granted_by_a_read_permission(monkeypatch):
+    """`/api/voices` also accepts POST to change the voice. Reading the list is
+    what embedding needs; changing settings goes over the socket, where the
+    session is."""
+    monkeypatch.setenv("NANO_CLAW_EMBED_ORIGINS", "http://127.0.0.1:8790")
+
+    assert ALLOW not in decorate(
+        "/api/voices", "http://127.0.0.1:8790", method="POST").headers

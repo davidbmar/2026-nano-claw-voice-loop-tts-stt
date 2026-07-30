@@ -53,6 +53,7 @@ PY
 echo "starting riff-builder on :$RB_PORT ..."
 RB_BUILDER_DIDS="{\"$DID\":{\"business_name\":\"Test Plumbing\",\"industry\":\"plumbing\"}}" \
   RB_SESSIONS_DIR="$RUN/sessions" \
+  RB_NANOCLAW_URL="http://127.0.0.1:$NC_PORT" \
   "$RB_ROOT/.venv/bin/python" -m uvicorn rb.server:app \
   --host 127.0.0.1 --port "$RB_PORT" > "$RUN/riff-builder.log" 2>&1 &
 

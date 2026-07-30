@@ -323,7 +323,44 @@ def _decorate_response(
     if _is_sensitive_path(request.path):
         response.headers["Cache-Control"] = "no-store"
         _strip_cors_headers(response)
+    _allow_embedded_read(request, response)
     return response
+
+
+# What an embedding page may READ over HTTP. Everything else it needs — setting
+# a voice, speaking, listening — goes over the socket, where a session exists.
+#
+# One path, because the panel needs one path. Declaring an origin should grant
+# what embedding requires and not a byte more; "allow every non-sensitive path
+# since it asked for one" is how an embed permission quietly becomes an API key.
+EMBED_READABLE_PATHS = frozenset({"/api/voices"})
+
+
+def _allow_embedded_read(
+    request: web.Request, response: web.StreamResponse
+) -> None:
+    """Let a declared origin read the voice list, and nothing else.
+
+    Admitting an origin to `/ws` was only half the permission. The settings
+    panel rendered with an EMPTY dropdown because `/api/voices` answered 200
+    with no Access-Control-Allow-Origin, so the browser discarded the body —
+    invisible to curl, which reads the status and is satisfied.
+
+    The origin is ECHOED, never `*`: the allowlist names who may embed, and a
+    wildcard would answer everyone. `Vary: Origin` because the response now
+    differs per caller and a shared cache must not reuse one origin's answer.
+    """
+    if request.method.upper() not in ("GET", "HEAD"):
+        return
+    if request.path not in EMBED_READABLE_PATHS:
+        return
+    if _is_sensitive_path(request.path):
+        return
+    origin = request.headers.get("Origin")
+    if not origin or origin not in _embedding_origins():
+        return
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Vary"] = "Origin"
 
 
 @web.middleware
