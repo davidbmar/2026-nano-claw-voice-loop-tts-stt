@@ -65,7 +65,18 @@ function buildMount(container) {
   calibration.setAttribute('hidden', '');
 
   inner.append(body, screen, calibration);
-  container.appendChild(inner);
+  // A wrapper purely for centring. It cannot be done on `.mascot-inner`: the
+  // rig owns that element's `transform` for whole-body motion, and grid
+  // centring on the stage clamps to the start edge once the art overflows
+  // (which it deliberately does), pushing the entire bleed to one side.
+  const frame = document.createElement('div');
+  frame.className = 'mascot-frame';
+  frame.appendChild(inner);
+  container.appendChild(frame);
+  // Opts the shared stage into centring + size caps, and hides the cube's
+  // overlay copy. Scoped rather than global so the cube is unaffected; removed
+  // again on unmount.
+  container.classList.add('mascot-active');
   return { inner, body, screen, calibration };
 }
 
@@ -123,6 +134,7 @@ export async function createMascotRenderer(container) {
         shim.destroy();
       } finally {
         els.inner.remove();
+        container.classList.remove('mascot-active');
         // The announcer hands back its own region element. Querying for it by
         // class would silently fail — it is created with role/aria attributes
         // and inline styles, and carries no class at all.

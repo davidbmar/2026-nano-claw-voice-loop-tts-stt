@@ -2437,3 +2437,90 @@ input[type="range"]::-moz-range-thumb {
   text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.35);
 }
 .phone-banner-number:hover { color: #ffe09a; }
+
+/* ── Mascot renderer ───────────────────────────────────────────────
+   Ported from ~/src/computer-agent-animation/src/styles.css. The rules that
+   look cosmetic are not: `.mascot-screen` and `.mascot-calibration` MUST stay
+   absolutely positioned at 0,0 with `transform-origin: 0 0`, because the rig
+   projects the face onto them with a homography computed against that origin.
+   Move them and the face detaches from the body.
+
+   Scoped to `.mascot-active` so the cube — which shares this stage — is
+   untouched. The stage is `position: fixed; inset: 0` (full viewport), and the
+   rig scales from bodyEl.clientWidth, so without a cap the character renders
+   at roughly twice the visible area and runs behind the side panels. */
+#talking-cube-stage.mascot-active {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 12px;
+}
+
+/* The cube's overlay copy would otherwise be painted across the character. */
+#talking-cube-stage.mascot-active .stage-copy,
+#talking-cube-stage.mascot-active .stage-topline {
+  display: none;
+}
+
+/* Centring wrapper. Needed because the art deliberately overflows: grid
+   `place-items: center` uses SAFE alignment, so an overflowing item is clamped
+   to the start edge instead of being centred — measured as 10px of bleed at the
+   top against 281px at the bottom, which left the top edge on screen. Absolute
+   positioning with a translate is not subject to that clamp. It lives here and
+   not on .mascot-inner because the rig owns that element's transform. */
+.mascot-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Whole-body motion (bob, lean, tilt, squash) targets this element, so it must
+   own its `transform` — never centre it with one. */
+.mascot-inner {
+  position: relative;
+  transform-origin: 50% 92%;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.mascot-body {
+  display: block;
+  /* The artwork is OPAQUE — the cream paper is part of the illustration, not a
+     transparent margin. Sized to fit, its rectangular edge is visible against
+     the dark console, and the idle bob moves the whole RECTANGLE rather than
+     appearing to move the character.
+
+     So it deliberately overflows: the paper bleeds past the stage on every
+     side and `overflow: hidden` on .mascot-active clips it, leaving no edge to
+     betray the motion.
+
+     Measured over 241 frames of idle motion: the whole-body bob is ±6.5px
+     vertical and 0 horizontal, so ~40px of bleed per side is ample.
+
+     HEIGHT drives and width follows the aspect ratio — do NOT add a min-width.
+     The stage is full-viewport, so `min-width: calc(100% + n)` demands ~1340px
+     and drags the height past 1100, which reads as badly over-zoomed. It is
+     also unnecessary: at this aspect a viewport-height character is ~960px
+     wide, leaving its left and right edges at roughly x=120 and x=1080, and
+     both are already covered by the config and transcript panels. Only the
+     vertical edges need real bleed. */
+  min-height: calc(100vh + 80px);
+  width: auto;
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.mascot-screen,
+.mascot-calibration {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+
+.mascot-calibration {
+  pointer-events: none;
+  overflow: visible;
+}

@@ -532,7 +532,10 @@ async function switchRenderer(id) {
 
   let replacement;
   if (next === 'mascot') {
-    const { createMascotRenderer } = await import('./mascot-renderer.js');
+    // Versioned like every other asset in index.html. A dynamic import is
+    // cached by URL independently of app.js, so without this the browser keeps
+    // serving a stale mascot module after a deploy.
+    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.17');
     replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
     talkingCubeCanvas.hidden = true;
   } else {
