@@ -823,3 +823,68 @@ def test_the_symbols_the_design_reasons_about_still_exist():
     missing = {s: why for s, why in load_bearing.items() if s not in names}
     assert not missing, (
         f"renamed or removed, leaving the design arguing from nothing: {missing}")
+
+
+# ── a delegated call must survive more than one turn ─────────────────────────
+
+def test_a_delegated_call_answers_a_second_turn(monkeypatch):
+    """The `speaking` flag bug (e4815a1) left it True after turn one, because
+    the delegate branch sat outside the try whose finally clears it. Every
+    delegated call would have gone dead after a single exchange — and
+    `feed_media` DROPS inbound audio while `speaking` is set (half-duplex), so
+    the caller would have talked to a line that could no longer hear them.
+
+    Two loopback attempts failed to prove this on the wire: the first mispaced
+    the endpointer, the second produced four empty transcriptions I could not
+    explain without more observability than the harness had. The property does
+    not need audio — it needs two turns — so it is tested here, where the
+    failure is unambiguous.
+    """
+    replies = ["First answer.", "Second answer."]
+    call, logged = _bargeable_call(monkeypatch, "unused")
+
+    async def fake_delegate(client, url, text, *, who):
+        from voice.turn_delegate import DelegateReply
+        return DelegateReply(replies.pop(0), ok=True)
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+
+    asyncio.run(call._stream_reply("we do emergency repairs"))
+    assert call.speaking is False, "turn one never released the speaking flag"
+
+    asyncio.run(call._stream_reply("yes that is right"))
+
+    turns = [p for k, p in logged if k == "assistant_turn"]
+    assert len(turns) == 2, f"the call answered {len(turns)} turns, not 2"
+    assert turns[0]["text"] == "First answer."
+    assert turns[1]["text"] == "Second answer.", (
+        "the second turn produced no reply — the call went dead after one "
+        "exchange, which is what the speaking-flag bug did")
+    assert call.speaking is False
+
+
+def test_a_delegated_call_survives_a_failed_turn_and_answers_the_next(monkeypatch):
+    """The recovery the contract promises: "keeps the channel open". A caller
+    whose turn failed asks again, and the app may be back by then."""
+    from voice.turn_delegate import DELEGATE_APOLOGY, DelegateReply
+
+    outcomes = [DelegateReply(DELEGATE_APOLOGY, ok=False, failure="status 502"),
+                DelegateReply("Back now. How can I help?", ok=True)]
+    call, logged = _bargeable_call(monkeypatch, "unused")
+
+    async def fake_delegate(client, url, text, *, who):
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+
+    asyncio.run(call._stream_reply("hello"))
+    asyncio.run(call._stream_reply("hello again"))
+
+    turns = [p for k, p in logged if k == "assistant_turn"]
+    assert len(turns) == 2
+    assert DELEGATE_APOLOGY in turns[0]["text"]
+    # Substance, not exact text: this file's _speech_units stub splits on "."
+    # and re-appends one, so a reply ending in "?" comes back "?.".
+    assert "Back now" in turns[1]["text"]
+    assert "How can I help" in turns[1]["text"]
+    assert DELEGATE_APOLOGY not in turns[1]["text"]
