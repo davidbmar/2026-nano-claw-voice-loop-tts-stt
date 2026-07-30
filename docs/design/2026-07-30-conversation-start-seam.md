@@ -198,15 +198,16 @@ consequence of it.
 
 ## Implementation order
 
-1. **TODO** — gateway-controlled hangup after playback drains (MEDIUM-2). Still
-   the blocker: the gateway only issues `answer`, `call.hangup` is an inbound
-   notification, and tearing the WebSocket down truncates the apology mid-word.
-2. **TODO** — `_call_routing`, keyed by raw `call_control_id`, TTL'd, cleared on
+1. **DONE** (`d283662`) — `PhoneCall.hangup_after_playback`. Waits the pacer's
+   measured surplus plus an unobservable-transit margin, and addresses the RAW
+   carrier id. Not yet called by anything.
+2. **DONE** — `_call_routing`, keyed by raw `call_control_id`, TTL'd, cleared on
    hangup.
 3. **DONE** (`3cd953e`) — `start_conversation()` in `voice/turn_delegate.py`,
    same bounded controls as `call_delegate`, plus the same-origin rule.
-4. **TODO** — the `call.initiated` hook, concurrent with `answer`.
-5. **TODO** — the phone turn hop, mirroring the browser hop.
+4. **DONE** — the `call.initiated` hook, concurrent with `answer`, after the
+   `_answered` guard.
+5. **DONE** — the phone turn hop, mirroring the browser hop.
 6. **DONE** (riff-builder `42636e6`) — `POST /api/delegate/start`, returning a
    relative `/api/session/<fresh id>/turn` and honouring `conversation_key`.
 
@@ -225,4 +226,19 @@ a live riff-builder, 2026-07-30:
 - the turn was attributed `who="owner"` even though the gateway sent
   `who="caller"`, so voice approval works on a phone builder line.
 
-What remains is entirely the phone transport inside nano-claw: items 1, 2, 4, 5.
+All six items are now implemented. What has NOT happened is a real phone call
+through the seam — every phone-side test uses a stubbed carrier, because
+exercising it for real means routing a DID at a live Telnyx number. The browser
+path and both halves of the start exchange have been run against live services;
+the phone path has not.
+
+Two behaviours are deliberately unlike the rest of this module and worth
+re-reading before changing:
+
+- **A failed start fails OPEN.** The call is answered and handled as it is
+  today rather than refused, because the alternative is dropping a real phone
+  call because another service is down. Everywhere else in this seam fails
+  closed.
+- **The hangup path is still unwired.** `hangup_after_playback` exists and is
+  tested, but nothing calls it: with a failed start now falling open, there is
+  no path that needs to end a call. It is there for when one does.

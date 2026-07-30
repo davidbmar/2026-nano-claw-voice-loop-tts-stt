@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -56,6 +57,7 @@ import numpy as np
 from aiohttp import web
 
 from voice import call_log, metrics_db, silero_vad, voice_catalog
+from voice.turn_delegate import call_delegate, start_conversation
 from voice.flow_session import (
     FLOW_MODES,
     FlowSession,
@@ -1474,6 +1476,27 @@ class PhoneCall:
                         spoken_parts.append(unit_text.strip())
                 yield unit
 
+        # getattr, matching this file's idiom for attributes that may be absent
+        # on a bare-constructed call (see _play_synthesized's _frame_pacer). A
+        # call with no carrier id has no routing entry by definition.
+        delegate_url = routing_for(getattr(self, "telnyx_call_id", ""))
+        if delegate_url:
+            # This call belongs to another app. Everything acoustic stayed here —
+            # mic, VAD, endpointing, STT, TTS, barge-in — and the words come from
+            # there. `call_delegate` has already validated status and shape, so
+            # what returns is safe to speak; a failure is its fixed apology, never
+            # the delegate's own words.
+            reply = await call_delegate(
+                self._http, delegate_url, text, who="caller")
+            record_agent_done()
+            reply_complete = True
+            spoken_parts.append(reply.text)
+            log.info("[phone %s] delegate turn ok=%s (%.1fs)",
+                     self.call_id[:8], reply.ok, time.monotonic() - t0)
+            if reply.text:
+                await self._speak_sentences(self._speech_units(reply.text))
+            return
+
         try:
             payload: dict = {
                 "message": text,
@@ -1998,6 +2021,58 @@ class PhoneCall:
 # ── HTTP handlers ────────────────────────────────────────────────
 
 _answered: dict[str, float] = {}  # call_control_id → answer time (webhook retries dedup)
+
+# raw call_control_id → (delegate_url, created_at). Separate from `_answered`
+# deliberately: that one is a webhook-retry guard whose entries mean "we have
+# already answered", while these hold a live conversation URL. Overloading it
+# would tie two lifetimes together that expire for different reasons.
+#
+# Keyed by the RAW id because that is what the media WebSocket can correlate on;
+# the sanitized id is a different string. Cleared on hangup because the value is
+# a capability — riff-builder's delegate URL contains its session id.
+_call_routing: dict[str, tuple[str, float]] = {}
+_ROUTING_TTL_S = 4 * 3600
+
+
+def delegate_starts() -> dict[str, str]:
+    """DID → conversation-start URL, or {} when no line is delegated.
+
+    Read per call so a line can be added without a restart. Empty by default,
+    which is what keeps every existing call path untouched: no entry, no start
+    request, no behaviour change.
+    """
+
+    raw = _cfg("NANO_CLAW_DELEGATE_STARTS")
+    if not raw.strip():
+        return {}
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError:
+        log.error("NANO_CLAW_DELEGATE_STARTS is not valid JSON; no line delegated")
+        return {}
+    if not isinstance(table, dict):
+        return {}
+    return {str(did): str(url) for did, url in table.items() if url}
+
+
+def conversation_key_for(call_control_id: str) -> str:
+    """A stable per-call key that reveals nothing about the carrier.
+
+    The raw `call_control_id` is stable and would work, but it is the provider's
+    remote resource identifier — the string every Call Control command is
+    addressed to, including hangup. Handing it to an app so the app can
+    deduplicate is more than the app needs to know, and it travels to whatever
+    the start URL is. A digest is equally stable and carries no capability.
+    """
+
+    return hashlib.sha256(call_control_id.encode()).hexdigest()[:32]
+
+
+def routing_for(call_control_id: str) -> str | None:
+    """The delegate URL minted for this call, if any."""
+
+    entry = _call_routing.get(call_control_id)
+    return entry[0] if entry else None
 _metrics_conn = None  # set in register_phone_routes; every write is best-effort
 
 
@@ -2088,8 +2163,9 @@ async def incoming_handler(request: web.Request) -> web.Response:
             _metrics_conn, safe_cid, caller, payload.get("to", "?"), _node()
         )
         codec = phone_codec()
+        start_url = delegate_starts().get(str(payload.get("to", "")))
         async with httpx.AsyncClient() as client:
-            await _telnyx_cmd(client, cid, "answer", {
+            answer = _telnyx_cmd(client, cid, "answer", {
                 "command_id": f"answer-{cid}",
                 "stream_url": ws_url,
                 "stream_track": "inbound_track",
@@ -2098,10 +2174,48 @@ async def incoming_handler(request: web.Request) -> web.Response:
                 "stream_bidirectional_codec": "L16" if codec == "l16" else "PCMU",
                 "stream_bidirectional_sampling_rate": phone_rate(),
             })
+            if start_url is None:
+                await answer
+            else:
+                # Concurrent with `answer`, not before it. Serializing them would
+                # add the app's round trip to how long the caller hears ringing,
+                # which is the objection that first pushed this call to the media
+                # WebSocket — where it would have had no retry protection at all.
+                #
+                # Placed AFTER the `_answered` guard, which records the id before
+                # any await, so ordinary webhook redelivery cannot mint twice.
+                # Across workers and restarts it still can, which is what
+                # `conversation_key` is for: the delegate deduplicates.
+                started, _ = await asyncio.gather(
+                    start_conversation(
+                        client, start_url,
+                        conversation_key=conversation_key_for(cid),
+                        channel="phone",
+                        from_=str(payload.get("from", "") or ""),
+                        to=str(payload.get("to", "") or "")),
+                    answer,
+                )
+                now_routing = time.monotonic()
+                for key, (_url, at) in list(_call_routing.items()):
+                    if now_routing - at > _ROUTING_TTL_S:
+                        _call_routing.pop(key, None)
+                if started.ok:
+                    _call_routing[cid] = (started.delegate_url, now_routing)
+                    log.info("[phone] %s delegated for this call", safe_cid[:16])
+                else:
+                    # No entry means the turn hop finds no delegate and the call
+                    # is handled as it is today. Failing OPEN here rather than
+                    # closed: the alternative is refusing a call outright because
+                    # another service was down.
+                    log.error("[phone] delegate start failed for %s: %s",
+                              safe_cid[:16], started.failure)
     elif event == "call.hangup":
         safe_cid = _contained_call_id(cid)
         log.info("[phone] hangup cid=%s", safe_cid[:16])
         _answered.pop(cid, None)
+        # The delegate URL is a capability — riff-builder's contains its session
+        # id — so it does not outlive the call that earned it.
+        _call_routing.pop(cid, None)
         metrics_db.record_call_end(_metrics_conn, safe_cid)
 
     return web.json_response({"ok": True})
