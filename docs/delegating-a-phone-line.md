@@ -57,6 +57,28 @@ Non-loopback start URLs need an allowlist:
 NANO_CLAW_DELEGATE_HOSTS='builder.internal,other.internal'
 ```
 
+### If the gateway runs in a container — and here, it does
+
+`127.0.0.1` inside a container is the **container**, not your machine. The
+deployed node reaches every host service that way already —
+`STT_SERVICE_URL`, `TTS_SERVICE_URL` and `LUX_SERVICE_URL` all default to
+`host.docker.internal` — and the delegate is no different:
+
+```bash
+NANO_CLAW_DELEGATE_STARTS='{"+15125550100":{"start":"http://host.docker.internal:8790/api/delegate/start"}}'
+NANO_CLAW_DELEGATE_HOSTS='host.docker.internal'
+```
+
+Both lines are needed. Without the first, the start request goes nowhere; without
+the second, `validate_delegate_url` refuses the URL, because only loopback is
+allowed unnamed.
+
+**`scripts/check_delegate_setup.py` cannot catch this.** It runs on the host,
+where a loopback URL works perfectly — so it passes, and production fails
+silently: the start fails, the gateway falls open, and calls are answered
+undelegated. The preflight now says so when it sees a loopback URL, but saying is
+all it can do.
+
 Everything is read **per call**, so adding a line needs no restart — and
 restarting drops live calls.
 

@@ -27,6 +27,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -67,6 +68,20 @@ async def check_line(did: str, profile, probe_text: str) -> bool:
         line(NOTE, "loopback is always allowed; anything else needs "
                    "NANO_CLAW_DELEGATE_HOSTS")
         return False
+
+    # This script runs on the HOST. The gateway may not.
+    #
+    # nano-claw is deployed in a container — every other host service it uses is
+    # reached at `host.docker.internal` — and inside a container `127.0.0.1` is
+    # the container itself. A loopback start URL therefore passes here and fails
+    # in production, where the failure is silent: the start fails, the gateway
+    # falls OPEN, and calls are answered undelegated with nothing to see.
+    #
+    # This cannot be tested from here, so it is said rather than checked.
+    if urlparse(profile.start_url).hostname in {"127.0.0.1", "localhost", "::1"}:
+        line(NOTE, "loopback URL — fine if the gateway runs on this host. If it "
+                   "runs in a container, use host.docker.internal and add it to "
+                   "NANO_CLAW_DELEGATE_HOSTS; this check cannot tell.")
 
     # A key that is stable per call, so this probe does not mint a fresh
     # conversation every time it runs against a delegate that deduplicates.

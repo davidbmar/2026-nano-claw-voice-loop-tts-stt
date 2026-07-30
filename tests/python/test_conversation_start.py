@@ -248,3 +248,46 @@ def test_a_body_less_refusal_still_reports_its_status():
         assert result.failure == "status 502"
 
     asyncio.run(exercise())
+
+
+# ── the containerized deployment, which is the one that exists ───────────────
+
+def test_the_documented_container_recipe_validates():
+    """`docs/delegating-a-phone-line.md` tells an operator running the gateway in
+    a container to use `host.docker.internal` and allowlist it. Both halves are
+    required and neither is obvious: without the first the start request goes
+    nowhere (127.0.0.1 inside a container is the container), and without the
+    second `validate_delegate_url` refuses the URL outright.
+
+    Pinned because the recipe is advice a human follows by hand, and advice that
+    stops working is worse than none.
+    """
+    from voice.turn_delegate import validate_delegate_url
+
+    url = "http://host.docker.internal:8790/api/delegate/start"
+    assert validate_delegate_url(
+        url, allowed_hosts=frozenset({"host.docker.internal"})) == url
+
+
+def test_the_container_host_is_not_allowed_unnamed():
+    """It must NOT be admitted by default. It is the container's route to the
+    whole host — every service on it, not just riff-builder — so it is a
+    deliberate grant, not a convenience."""
+    from voice.turn_delegate import DelegateUrlRefused, validate_delegate_url
+
+    with pytest.raises(DelegateUrlRefused, match="NANO_CLAW_DELEGATE_HOSTS"):
+        validate_delegate_url("http://host.docker.internal:8790/start",
+                              allowed_hosts=frozenset())
+
+
+def test_a_returned_url_still_cannot_leave_that_origin():
+    """Allowlisting the container host widens what CONFIG may name. It must not
+    widen what a RESPONSE may name — otherwise an allowlisted app could redirect
+    every caller utterance to any other service on the host."""
+    from voice.turn_delegate import DelegateUrlRefused, resolve_returned_url
+
+    start = "http://host.docker.internal:8790/api/delegate/start"
+    assert resolve_returned_url(start, "/api/session/abc/turn") == (
+        "http://host.docker.internal:8790/api/session/abc/turn")
+    with pytest.raises(DelegateUrlRefused):
+        resolve_returned_url(start, "http://host.docker.internal:8200/transcribe")
