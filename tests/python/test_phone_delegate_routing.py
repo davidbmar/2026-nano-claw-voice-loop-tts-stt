@@ -888,3 +888,122 @@ def test_a_delegated_call_survives_a_failed_turn_and_answers_the_next(monkeypatc
     assert "Back now" in turns[1]["text"]
     assert "How can I help" in turns[1]["text"]
     assert DELEGATE_APOLOGY not in turns[1]["text"]
+
+
+# ── the caller hangs up while the app is still thinking ──────────────────────
+
+def test_a_hangup_mid_turn_cancels_the_delegate_call(monkeypatch):
+    """`PhoneCall.close` cancels the turn task. That must actually reach the
+    delegate request, or a caller who hung up leaves a 30-second HTTP call in
+    flight and the app processing a turn for a dead line.
+
+    It works because `CancelledError` is a BaseException, so `call_delegate`'s
+    broad `except Exception` — which exists to turn every delegate failure into
+    the apology — does not swallow it. That is load-bearing and not obvious.
+    """
+    from voice.turn_delegate import call_delegate
+
+    class SlowClient:
+        async def post(self, url, **kw):
+            await asyncio.sleep(30)
+
+    async def exercise():
+        task = asyncio.create_task(
+            call_delegate(SlowClient(), "http://127.0.0.1:8790/t", "hi",
+                          who="caller"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_turn_still_releases_the_call(monkeypatch):
+    """The finally in `_stream_reply` must run on cancellation too. If it does
+    not, `speaking` stays True on a call that is ending — harmless here, but the
+    same flag whose leak made every delegated call go dead after one turn."""
+    call, logged = _bargeable_call(monkeypatch, "unused")
+
+    async def slow_delegate(client, url, text, *, who):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(phone, "call_delegate", slow_delegate)
+
+    async def exercise():
+        task = asyncio.create_task(call._stream_reply("hi"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert call.speaking is False, "a cancelled turn left the call speaking"
+
+
+def test_a_hangup_forgets_the_conversation_even_mid_turn(quiet_webhook):
+    """The routing entry is a capability. A caller hanging up during a turn must
+    not leave the delegate URL — and riff-builder's session id inside it —
+    sitting in the map until the TTL."""
+    phone._call_routing["v3:mid"] = (route("http://h/api/session/s1/turn"), 0.0)
+
+    asyncio.run(phone.incoming_handler(hangup("v3:mid")))
+
+    assert phone.routing_for("v3:mid") is None
+
+
+def test_closing_the_call_cancels_an_in_flight_delegate_turn():
+    """`close` is what a hangup ultimately calls, and it is the thing that must
+    cancel the turn — the tests above cancel the task by hand, which proves
+    cancellation WORKS but not that anything issues it.
+
+    Without this, a caller who hangs up mid-reply leaves a 30-second HTTP call
+    in flight and the app finishing a turn for a line nobody is on.
+    """
+    class Pipeline:
+        async def aclose(self):
+            return None
+
+    class Stream:
+        async def close(self):
+            return None
+
+    class Http:
+        async def aclose(self):
+            return None
+
+    async def exercise():
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.call_id = "c1"
+        call.speaking = False
+        call.closed = False
+        call.interrupted = False
+        call._sentence_pipelines = {Pipeline()}
+        call._inbound_buffer = []
+        call._stt_stream = Stream()
+        call._http = Http()
+        call.tap = None
+        call._thinking_cue_stop = None
+        call._thinking_cue_task = None
+        call._idle_task = None
+        call._call_end_emitted = True   # skip the metrics leg; not what this tests
+        call._frame_pacer = None
+        call.telnyx_call_id = "v3:c1"
+
+        started = asyncio.Event()
+
+        async def in_flight_turn():
+            started.set()
+            await asyncio.sleep(30)      # the delegate is still thinking
+
+        call._turn_task = asyncio.create_task(in_flight_turn())
+        await started.wait()
+
+        await call.close()
+
+        assert call._turn_task.cancelled() or call._turn_task.cancelling(), (
+            "close() left the turn running — the app keeps working on a call "
+            "nobody is on")
+
+    asyncio.run(exercise())
