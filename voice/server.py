@@ -3303,7 +3303,13 @@ def create_app(
         lambda: getattr(phone, "_metrics_conn", None) or METRICS,
     )
     cost_ledger.ensure_schema(getattr(phone, "_metrics_conn", None))
-    app.router.add_get("/{filename}", static_handler)
+    # `{filename:.+}`, not `{filename}`: the default pattern matches a SINGLE
+    # path segment, so anything in a subdirectory (voice/web/vendor/...) had no
+    # matching route and 404'd. Widening the match is safe because the guard is
+    # on the RESOLVED path, not on the pattern — static_handler resolves the
+    # candidate and refuses anything that escapes STATIC_DIR, so traversal is
+    # still rejected. Verified by test_static_handler_rejects_traversal.
+    app.router.add_get("/{filename:.+}", static_handler)
     return app
 
 
