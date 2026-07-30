@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import hashlib
 import json
 import logging
@@ -2189,13 +2190,34 @@ class DelegateRoute:
     profile: DelegateProfile
 
 
+_PROFILE_KEYS = frozenset({"start", "greeting", "voice", "speed", "record_notice"})
+
+
 def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
-    """Accept either a bare start URL or a full profile object."""
+    """Accept either a bare start URL or a full profile object.
+
+    An unrecognised key is reported, not refused. Silently ignoring operator
+    config is a support trap this module already names elsewhere — a typo'd
+    value "applies" in the operator's head and never in the process — and here it
+    is worse than usual: `"greetng"` leaves the line answering nobody's name in
+    the node's voice, which looks exactly like a line that was never given a
+    greeting at all.
+
+    Reported rather than refused because refusing takes a working line off the
+    air over a spelling mistake in a field it does not need.
+    """
 
     if isinstance(value, str):
         return DelegateProfile(start_url=value) if value.strip() else None
     if not isinstance(value, dict):
         return None
+    unknown = sorted(set(value) - _PROFILE_KEYS)
+    for key in unknown:
+        suggestion = difflib.get_close_matches(key, sorted(_PROFILE_KEYS), n=1)
+        log.error("delegate line %s: unknown profile key %r%s — it is ignored",
+                  did, key,
+                  f", did you mean {suggestion[0]!r}?" if suggestion else "")
+
     start_url = str(value.get("start", "") or "").strip()
     if not start_url:
         log.error("delegate line %s names no start url", did)

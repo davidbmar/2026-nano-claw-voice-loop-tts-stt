@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -56,8 +58,20 @@ def line(status: str, text: str) -> None:
     print(f"[{status}] {text}")
 
 
-async def check_line(did: str, profile, probe_text: str) -> bool:
+async def check_line(did: str, profile, probe_text: str, raw: dict | None = None) -> bool:
     print(f"\n─── {did} ───")
+
+    # A key nobody recognises is dropped in silence, which looks identical to a
+    # field that was never set. The log says so; an operator running a preflight
+    # is not reading the log.
+    if isinstance(raw, dict):
+        from voice.phone import _PROFILE_KEYS
+        for key in sorted(set(raw) - _PROFILE_KEYS):
+            import difflib
+            close = difflib.get_close_matches(key, sorted(_PROFILE_KEYS), n=1)
+            line(BAD, f"unknown profile key {key!r}"
+                      + (f" — did you mean {close[0]!r}?" if close else "")
+                      + " — it is ignored")
 
     try:
         validate_delegate_url(
@@ -171,8 +185,17 @@ async def main() -> int:
             return 1
         lines = {args.did: lines[args.did]}
 
-    results = [await check_line(did, profile, args.say)
-               for did, profile in sorted(lines.items())]
+    # The raw JSON too, so unrecognised keys can be named — `delegate_starts()`
+    # has already dropped them by the time it returns profiles.
+    try:
+        raw_table = json.loads(os.environ.get("NANO_CLAW_DELEGATE_STARTS", "") or "{}")
+    except json.JSONDecodeError:
+        raw_table = {}
+    results = [
+        await check_line(did, profile, args.say,
+                         raw_table.get(did) if isinstance(raw_table.get(did), dict) else None)
+        for did, profile in sorted(lines.items())
+    ]
 
     print()
     passed = sum(1 for r in results if r)

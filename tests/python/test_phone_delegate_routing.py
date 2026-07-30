@@ -1131,3 +1131,48 @@ def test_the_call_site_passes_the_line_s_own_disclosure():
     assert any(len(c.args) >= 2 for c in composes), (
         "every _compose_greeting call passes only the greeting, so the node-wide "
         "disclosure is spoken on every line regardless of its own")
+
+
+# ── a typo must not look like an unset field ─────────────────────────────────
+
+def test_an_unknown_profile_key_is_reported(monkeypatch, caplog):
+    """Silently ignored operator config is a support trap this module already
+    names. Here it is worse than usual: `"greetng"` leaves the line answering
+    nobody's name in the node's voice — indistinguishable from a line that was
+    never given a greeting."""
+    import logging
+
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"start": START, "greetng": "Rivera Plumbing.", "voice_id": "af_heart"}}))
+
+    with caplog.at_level(logging.ERROR, logger="nano-claw.phone"):
+        phone.delegate_starts()
+
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "greetng" in messages
+    assert "greeting" in messages, "the suggestion is most of the value"
+    assert "voice_id" in messages
+
+
+def test_a_typo_does_not_take_the_line_off_the_air(monkeypatch):
+    """Reported, not refused. Refusing would drop a working line over a spelling
+    mistake in a field it does not need."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"start": START, "greetng": "Rivera Plumbing."}}))
+
+    profile = phone.delegate_starts()[LINE]
+
+    assert profile.start_url == START
+    assert profile.greeting == "", "the typo'd key must not be silently honoured"
+
+
+def test_every_documented_profile_key_is_recognised():
+    """The runbook and the parser must not drift. A key documented but not
+    accepted is the same trap with the operator following instructions."""
+    from pathlib import Path
+
+    runbook = (Path(__file__).resolve().parents[2] / "docs"
+               / "delegating-a-phone-line.md").read_text()
+    for key in phone._PROFILE_KEYS:
+        assert f'"{key}"' in runbook or f"`{key}`" in runbook, (
+            f"profile key {key!r} is accepted but appears nowhere in the runbook")
