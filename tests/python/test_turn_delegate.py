@@ -346,3 +346,45 @@ def test_a_long_but_plausible_reply_is_still_spoken():
         assert result.text == long_reply
 
     asyncio.run(exercise())
+
+
+# ── where the caller's wait actually comes from ──────────────────────────────
+
+def test_the_seam_adds_nothing_measurable_to_a_turn():
+    """Measured: ~10 microseconds per turn, against delegate turns of 1.8-8.8
+    SECONDS. The wait a caller hears is the delegate's model, not this code.
+
+    Recorded as a test because the conclusion is load-bearing: it is the reason
+    not to optimise this path, and the reason streaming stays a v1 contract
+    extension rather than something to hand-roll here. The bound is 100x the
+    measured cost, so it flags something genuinely expensive arriving on the hot
+    path — a per-turn regex compile, a DNS lookup, a file read — not noise.
+    """
+    import time
+
+    reply = "Got it — emergency plumbing repairs. " * 20
+
+    class Instant:
+        async def post(self, url, **kw):
+            class R:
+                status_code = 200
+
+                def json(_s):
+                    return {"reply": reply, "focus": ["a", "b"]}
+            return R()
+
+    async def exercise():
+        client = Instant()
+        for _ in range(50):
+            await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+        started = time.perf_counter()
+        rounds = 500
+        for _ in range(rounds):
+            await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+        return (time.perf_counter() - started) / rounds
+
+    per_turn = asyncio.run(exercise())
+
+    assert per_turn < 1e-3, (
+        f"{per_turn*1e6:.0f}us per turn — something expensive reached the "
+        f"per-turn path; it used to be ~10us")

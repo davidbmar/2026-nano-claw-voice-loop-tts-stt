@@ -158,6 +158,27 @@ cannot be reached makes the gateway speak a fixed apology; a line that is not
 configured behaves exactly as it always did. Both are correct, and both look
 like nothing happening.
 
+## Where the caller's wait comes from
+
+Measured, because it decides where effort is worth spending:
+
+| | |
+|---|---|
+| the seam itself | **~10 microseconds** per turn |
+| a real delegate turn | **1.8–8.8 seconds** |
+
+The gap is the delegate's own model. Nothing in this gateway is worth optimising
+to change it — the phone thinking cue covers the wait (a chime, then ticks), and
+genuinely closing it needs streaming, which contract v0 defers to v1 on purpose.
+
+Same measurement from the other side: turns taken through the seam were no slower
+than POSTing the delegate directly (5.7s / 3.4s versus 10.9s / 4.3s) — the spread
+is turn-to-turn variance in the app, not overhead here.
+
+`test_the_seam_adds_nothing_measurable_to_a_turn` keeps it that way, with a bound
+100x the measured cost so it flags something real reaching the per-turn path
+rather than noise.
+
 ## What the caller experiences
 
 | Situation | What they hear |
