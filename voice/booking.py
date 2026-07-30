@@ -105,9 +105,14 @@ class BookingFlow:
 
         slots = dict(region_turn.slots)
         if self._calendar is None:
+            # No calendar means no write — not to a calendar, not anywhere. This
+            # branch used to speak `booked_template`, so a caller completing the
+            # plumber flow heard "You're booked: burst pipe on Monday August
+            # third at 9 AM" for an appointment that existed in no system.
+            # `recorded_template` says what actually happened.
             return self._from_region(
                 region_turn,
-                reply=self._render_template(self._domain.booked_template, slots),
+                reply=self._render_template(self._domain.recorded_template, slots),
                 done=True,
                 outcome="booked",
             )

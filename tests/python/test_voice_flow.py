@@ -157,8 +157,13 @@ def test_booked_terminal_is_speech_friendly():
 
     assert reply == FlowReply(
         text=(
-            "You're booked: water heater repair on Monday July twentieth at "
-            "10 AM for 60 minutes. See you then. Goodbye!"
+            # Speech-friendly is what this test is named for and what it still
+            # checks: "Monday July twentieth at 10 AM", never the ISO string
+            # asserted absent below. The claim changed because this flow has no
+            # calendar and writes nothing.
+            "I've got that down: water heater repair on Monday July twentieth "
+            "at 10 AM for 60 minutes. Someone will call you back to confirm it. "
+            "Goodbye!"
         ),
         done=True,
         outcome="booked",

@@ -293,8 +293,15 @@ def test_calendar_errors_return_not_booked_apology_without_raising(failure_point
                 "slot_start": START,
                 "duration_minutes": 60,
             },
-            f"You're booked: clogged drain on {_spoken_datetime(START)} "
-            "for 60 minutes. See you then. Goodbye!",
+            # This case used to expect "You're booked: …". The assertion this
+            # test exists for is the SPEECH shape — `_spoken_datetime` rather
+            # than an ISO timestamp — and that is unchanged. What changed is the
+            # claim: plumber has no calendar, so this path writes nothing, and
+            # the old line told the caller an appointment existed that did not.
+            # See test_scheduling_domains.py::
+            # test_a_domain_that_writes_nothing_promises_nothing.
+            f"I've got that down: clogged drain on {_spoken_datetime(START)} "
+            "for 60 minutes. Someone will call you back to confirm it. Goodbye!",
         ),
         (
             "escape",

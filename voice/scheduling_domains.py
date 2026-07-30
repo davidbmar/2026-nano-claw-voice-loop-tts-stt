@@ -52,6 +52,14 @@ class SchedulingDomain:
     deadline_s: float
     uses_live_calendar: bool
     booked_template: str
+    # What to say when the flow completes but NOTHING was written — the case
+    # where `uses_live_calendar` is false, so `BookingFlow` holds no calendar.
+    # Kept separate from `booked_template` rather than reused, because the two
+    # describe different events and one of them must not claim the other:
+    # speaking "You're booked" with no calendar is a promise no part of this
+    # system keeps. Enforced by
+    # test_scheduling_domains.py::test_a_domain_that_writes_nothing_promises_nothing.
+    recorded_template: str
     escape_text: str
     budget_text: str
     confirm_template: str
@@ -137,6 +145,10 @@ DOMAINS: dict[str, SchedulingDomain] = {
             "You're booked: {job} on {slot_start} for {duration_minutes} minutes. "
             "See you then. Goodbye!"
         ),
+        recorded_template=(
+            "I've got that down: {job} on {slot_start} for {duration_minutes} "
+            "minutes. Someone will call you back to confirm it. Goodbye!"
+        ),
         escape_text="Of course — I'm transferring you now. Goodbye!",
         budget_text="Our scheduler will call you back to finish this up. Goodbye!",
         confirm_template=(
@@ -181,6 +193,13 @@ DOMAINS: dict[str, SchedulingDomain] = {
         max_turns=15,
         deadline_s=600,
         uses_live_calendar=True,
+        # Unreachable for this domain — it books against a live calendar, so
+        # `BookingFlow` always holds one. Present because the field is required,
+        # and honest in case that ever changes.
+        recorded_template=(
+            "I've taken your details and the office will call you back to "
+            "confirm. Goodbye!"
+        ),
         booked_template=(
             "You're booked: a {duration_minutes}-minute {label} by {location}, "
             "{slot_start}. See you then. Goodbye!"
