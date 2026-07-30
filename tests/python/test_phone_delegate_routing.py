@@ -606,3 +606,31 @@ def test_an_empty_reply_is_a_complete_turn(monkeypatch):
     if rows:  # only emitted when something was spoken
         assert rows[0]["complete"] is True
     assert call.speaking is False
+
+
+def test_first_audio_latency_is_logged_for_a_delegated_turn(monkeypatch, caplog):
+    """On a delegated line this is the number that matters: a slow app is
+    otherwise invisible from the gateway's logs. The streaming branch marks it;
+    the delegate branch did not."""
+    import logging
+
+    call, _ = _bargeable_call(monkeypatch, "First sentence. Second sentence.")
+
+    with caplog.at_level(logging.INFO, logger="nano-claw.phone"):
+        asyncio.run(call._stream_reply("hi"))
+
+    assert any("first sentence at" in r.message for r in caplog.records), (
+        "no first-audio latency was logged for a delegated turn")
+
+
+def test_first_audio_is_marked_once_not_per_sentence(monkeypatch, caplog):
+    import logging
+
+    call, _ = _bargeable_call(
+        monkeypatch, "One. Two. Three. Four.")
+
+    with caplog.at_level(logging.INFO, logger="nano-claw.phone"):
+        asyncio.run(call._stream_reply("hi"))
+
+    marks = [r for r in caplog.records if "first sentence at" in r.message]
+    assert len(marks) == 1, f"marked {len(marks)} times for one reply"

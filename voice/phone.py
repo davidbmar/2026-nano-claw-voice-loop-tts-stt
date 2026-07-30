@@ -1572,7 +1572,16 @@ class PhoneCall:
                     # is not merely wrong but self-contradictory next to the
                     # interrupted=True the same row carries.
                     async def delegate_units():
+                        # Marks first-audio latency the way the streaming branch
+                        # does. On a delegated line this is THE number that
+                        # matters — a slow app is invisible from here otherwise,
+                        # and the turn itself is already logged separately.
+                        nonlocal first_spoken_at
                         for unit in self._speech_units(reply.text):
+                            if first_spoken_at is None:
+                                first_spoken_at = time.monotonic()
+                                log.info("[phone %s] first sentence at %.1fs",
+                                         self.call_id[:8], first_spoken_at - t0)
                             yield unit
 
                     await self._speak_sentences(record_spoken(delegate_units()))
