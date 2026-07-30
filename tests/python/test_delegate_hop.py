@@ -103,7 +103,10 @@ def test_delegate_mode_diverts_the_turn_and_speaks_the_apps_words(spoken, monkey
         assert handled is True, "the turn must NOT also reach nano-claw's model"
         assert client.calls[0]["url"] == "http://127.0.0.1:8790/api/session/s1/turn"
         assert client.calls[0]["json"] == {
-            "text": "do you do water heaters", "who": "caller", "speak": False}
+            # "owner": a console operator is not a caller. This asserted
+            # "caller" until a real session showed riff-builder narrating the
+            # operator in the third person because of it.
+            "text": "do you do water heaters", "who": "owner", "speak": False}
         assert spoken == [
             {"type": "final", "response": "Rivera Plumbing, how can I help?"}]
 
@@ -371,3 +374,43 @@ class _JsonRequest:
 
     async def json(self):
         return self._body
+
+
+def test_the_browser_speaks_as_the_owner_not_a_caller(spoken, monkeypatch):
+    """The contract's `who` is asserted by the gateway from the CHANNEL, and a
+    console is not a phone.
+
+    Sending "caller" had riff-builder narrating the operator in the third
+    person — "That's a test caller coming through. They said…" — rather than
+    answering them. And `who == "owner"` is what gates voice approval there, so
+    "yes, that's right" approved nothing. Observed in a real session, not
+    inferred.
+    """
+    async def exercise():
+        monkeypatch.setenv("NANO_CLAW_DELEGATE_URL", "")
+        set_flow_mode("delegate")
+        client = RecordingClient(body={"reply": "Noted."})
+        await server._handle_delegate_request(
+            FakeWS(), FakeSession("http://127.0.0.1:8790/api/session/s1/turn"),
+            client, "we do emergency repairs")
+
+        assert client.calls[0]["json"]["who"] == "owner"
+
+    asyncio.run(exercise())
+
+
+def test_the_phone_still_speaks_as_a_caller():
+    """The other half of the same distinction: someone who dialled a number IS a
+    caller, and telling the app otherwise would hand a stranger owner rights."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    hop = next(n for n in ast.walk(ast.parse(source))
+               if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Name) and n.func.id == "call_delegate")
+    who = next((kw.value.value for kw in hop.keywords if kw.arg == "who"), None)
+
+    assert who == "caller", (
+        "the phone hop must not claim its caller is the owner — that would give "
+        "anyone who dials the number the owner's voice approval")

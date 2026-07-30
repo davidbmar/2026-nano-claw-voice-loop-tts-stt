@@ -84,7 +84,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("voice-server")
 client_log = logging.getLogger("client")
-APP_VERSION = "0.4.16"
+APP_VERSION = "0.4.17"
 DEEP_PROCESSING_CUE_INTERVAL_S = 2.6
 
 
@@ -1627,7 +1627,17 @@ async def _handle_delegate_request(
         return True
 
     req_start = time.monotonic()
-    reply = await call_delegate(client, url, text, who="caller")
+    # "owner", not "caller". The contract has three values so a gateway can say
+    # WHICH human is speaking, asserted from the channel: someone at this console
+    # is operating the app, not phoning it.
+    #
+    # Sending "caller" had riff-builder narrating the operator in the third
+    # person — "That's a test caller coming through. They said…" — instead of
+    # talking to them. Worse, `who == "owner"` is what gates voice approval
+    # there, so "yes, that's right" approved nothing. The phone builder line was
+    # given the same fix at the app end (`pinned_who`); the browser never was,
+    # because the browser is not a phone line and has no DID to pin.
+    reply = await call_delegate(client, url, text, who="owner")
     log.info("delegate turn %.1fs ok=%s%s", time.monotonic() - req_start,
              reply.ok, f" ({reply.failure})" if reply.failure else "")
     await _process_api_response(
