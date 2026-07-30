@@ -336,9 +336,17 @@ async def start_conversation(
 
     status = getattr(response, "status_code", None)
     if status != 200:
-        log.warning("conversation start %s returned %s",
-                    safe_url_for_log(start_url), status)
-        return ConversationStart("", ok=False, failure=f"status {status}")
+        # The body goes into `failure`, which is for logs and operators and is
+        # NEVER spoken — the app is the only thing that knows WHY it refused, and
+        # without this a ceiling, a misconfigured line and a crash all present as
+        # the same bare status. Truncated because it is untrusted text.
+        detail = ""
+        raw_body = getattr(response, "text", None)
+        if isinstance(raw_body, str) and raw_body.strip():
+            detail = f": {raw_body.strip()[:200]}"
+        log.warning("conversation start %s returned %s%s",
+                    safe_url_for_log(start_url), status, detail)
+        return ConversationStart("", ok=False, failure=f"status {status}{detail}")
 
     raw = getattr(response, "content", None)
     if isinstance(raw, (bytes, bytearray)) and len(raw) > _MAX_START_BODY_BYTES:

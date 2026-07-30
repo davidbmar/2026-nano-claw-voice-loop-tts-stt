@@ -68,6 +68,18 @@ RB_BUILDER_DIDS='{
 }'
 ```
 
+```bash
+# Ceiling on LIVE conversations. Every call mints a session and a ~60 KB
+# workspace that nothing deletes, and this is the one creation path with no
+# human present. Past it the app returns 503, the gateway falls open, and calls
+# are answered UNDELEGATED — so a busy real line needs this raised.
+RB_DELEGATE_MAX_LIVE=500
+
+# Where those workspaces go. Nothing deletes them; put it on a volume you are
+# willing to let grow, or clean it on a schedule.
+RB_SESSIONS_DIR=/var/lib/riff-builder/sessions
+```
+
 **This is an authorization boundary.** Whoever dials a configured number can
 edit that business by voice — no PIN, no caller-id check. It is acceptable only
 for unpublished builder lines. That is also why an unknown DID gets a 404 rather
@@ -133,6 +145,7 @@ like nothing happening.
 | A turn fails | a fixed apology; the line stays open |
 | The app has nothing to say | silence for that turn, which the contract permits |
 | A turn takes ~6s | the thinking cue — a chime, then ticks |
+| The app is at its conversation ceiling | answered undelegated; the reason is in the preflight and the gateway log, never in the call |
 
 The start failure **fails open** on purpose, unlike everything else in this
 seam. The alternative is dropping a real phone call because another service is
@@ -147,6 +160,9 @@ down.
 - **Nothing tells the app a call ended.** The app times its own conversations
   out. A teardown message is plausible for v0.2; adding an endpoint whose
   failure mode is a leak, before anything leaks, is speculative.
+- **A reply is capped at 32 KB** (~40 minutes of speech) and has C0 control
+  characters stripped. Past the cap the caller hears the fixed apology, because
+  a reply that long is a fault at the other end rather than a long answer.
 - **The app cannot supply a greeting.** By design, for now. Doing it safely
   needs byte/duration/TTS-time limits, plain-text enforcement with SSML and
   control-character escaping, and a fixed fallback for every violation.

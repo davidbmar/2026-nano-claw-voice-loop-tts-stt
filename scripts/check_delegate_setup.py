@@ -79,6 +79,10 @@ async def check_line(did: str, profile, probe_text: str) -> bool:
             channel="phone", to=did)
         start_ms = (time.monotonic() - t0) * 1000
         if not started.ok:
+            # `failure` carries the app's own explanation when it gave one. A
+            # ceiling, a misconfigured line and a crash are all "start failed"
+            # without it, and because the gateway fails OPEN the only symptom in
+            # production is calls quietly ceasing to be delegated.
             line(BAD, f"conversation start failed: {started.failure}")
             line(NOTE, "the gateway would answer the call and handle it "
                        "undelegated — start failures fail OPEN")
