@@ -714,3 +714,67 @@ def test_the_fallback_is_still_a_persona_turn_not_a_delegate_one(monkeypatch):
     asyncio.run(call._stream_reply("hi"))
 
     assert _turn(logged)["mode"] == "persona"
+
+
+# ── contract conformance, as a gateway ───────────────────────────────────────
+
+def test_a_failed_turn_keeps_the_line_open(monkeypatch):
+    """Contract: "Any non-200 → the gateway speaks a fixed apology and keeps the
+    channel open." A failed turn is not a failed call — the caller may simply
+    ask again, and the app may be back by then."""
+    from voice.turn_delegate import DELEGATE_APOLOGY, DelegateReply
+
+    call, logged = _bargeable_call(monkeypatch, "unused")
+
+    async def failing(client, url, text, *, who):
+        return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="status 502")
+
+    monkeypatch.setattr(phone, "call_delegate", failing)
+
+    asyncio.run(call._stream_reply("hi"))
+
+    assert call.closed is False, "the call was ended by one failed turn"
+    assert call.speaking is False, "the turn never finished cleanly"
+    row = _turn(logged)
+    assert DELEGATE_APOLOGY in row["text"], (
+        "the caller heard no apology for a failed turn — silence is the failure "
+        "this whole module exists to prevent")
+
+
+def test_the_delegate_turn_happens_inside_the_dead_air_cue():
+    """Contract: "the gateway should fill dead air past ~2s with an
+    acknowledgment sound or filler line." Measured delegate turns run 1.9-6.4s,
+    so this is not optional.
+
+    Read from the FILE rather than through `inspect.getsource`. Two earlier
+    attempts failed for opposite reasons: getsource returns the wrapper that
+    `cost_ledger.install_phone_tracking` installs, so it passed alone and failed
+    in the full suite; and driving `_run_turn` for real turned into an arms race
+    of stub attributes, which is a test at the wrong level. The file on disk is
+    neither wrapped nor expensive.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    tree = ast.parse(source)
+    run_turn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "_run_turn")
+
+    # By LINE NUMBER. `ast.walk` yields breadth-first, not in source order, so
+    # comparing walk positions asserts nothing — a first version of this did
+    # exactly that and passed with the cue moved after the reply.
+    lines = {}
+    for node in ast.walk(run_turn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            lines.setdefault(node.func.attr, node.lineno)
+
+    assert "_start_thinking_cue" in lines, "the turn no longer starts a cue"
+    assert "_stream_reply" in lines, (
+        "the delegate hop is reached through _stream_reply; if _run_turn no "
+        "longer calls it, this guarantee needs rechecking")
+    assert lines["_start_thinking_cue"] < lines["_stream_reply"], (
+        "the cue must start BEFORE the reply is fetched, or the silence it "
+        "exists to fill has already happened")
