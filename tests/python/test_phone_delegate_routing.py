@@ -1289,3 +1289,39 @@ def test_an_opted_out_line_opens_no_tap(monkeypatch):
     assert build(silent) == [], (
         "an opted-out line was still captured — the disclosure now truthfully "
         "says nothing while the call is recorded anyway")
+
+
+# ── two switches, deliberately not one ───────────────────────────────────────
+
+def test_a_phone_line_ignores_the_console_mode():
+    """A live phone line must not change what it does because someone touched a
+    dropdown while looking at something else.
+
+    The browser hop gates on `is_delegate_mode()`; the phone hop gates only on
+    whether the call has a routing entry. Undocumented until now, and surprising
+    in both directions — including the one that matters: there is NO WAY to turn
+    a delegated line off from the console.
+    """
+    from voice.flow_session import set_flow_mode
+
+    phone._call_routing["v3:mode-test"] = (route("http://h/api/session/s1/turn"), 0.0)
+
+    for mode in ("spacechannel", "delegate", "lawyer", "none"):
+        set_flow_mode(mode)
+        assert phone.routing_for("v3:mode-test") is not None, (
+            f"a configured line stopped being delegated in {mode!r} mode — a "
+            f"console dropdown must not silently change a phone line")
+
+    set_flow_mode("spacechannel")
+
+
+def test_removing_the_did_is_what_turns_a_line_off(monkeypatch):
+    """The documented way off, and it needs no restart: configuration is read
+    per call."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({LINE: START}))
+    assert LINE in phone.delegate_starts()
+
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", "{}")
+    assert phone.delegate_starts() == {}, (
+        "configuration must be re-read per call, or turning a line off would "
+        "need a restart and drop every live call to do it")

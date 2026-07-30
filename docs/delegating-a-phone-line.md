@@ -15,6 +15,30 @@ Design and review: `docs/design/2026-07-30-conversation-start-seam.md`.
 > used — 320 greeting frames against 778 for an undelegated call on the same
 > node. Still untested: a real carrier, real network jitter, and barge-in.
 
+## The console mode does not control the phone
+
+Two independent switches, and confusing them wastes an afternoon in either
+direction:
+
+| | what makes it delegate | |
+|---|---|---|
+| **browser** | the console MODE dropdown, or `NANO_CLAW_VOICE_FLOW=delegate` at startup | a console setting |
+| **phone** | a DID appearing in `NANO_CLAW_DELEGATE_STARTS` | config only |
+
+So:
+
+- Setting the console to **Turn Delegate** does **not** delegate the phone.
+- Setting it to anything else does **not** un-delegate a configured line —
+  **there is no way to turn a delegated phone line off from the console.** Remove
+  the DID from the configuration; it is re-read per call, so no restart is
+  needed.
+- A phone line works with the console showing any mode at all.
+
+That is deliberate. A live phone line must not change what it does because
+someone touched a dropdown while looking at something else — but it does mean
+the console tells you nothing about whether a number is delegated. The preflight
+does: `scripts/check_delegate_setup.py`.
+
 ## Why two settings and not one
 
 A DID is not a conversation — several people dial one number at once, while the
