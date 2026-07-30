@@ -120,6 +120,7 @@ echo
 echo "  2. TALK TO IT IN THE BROWSER"
 echo "       open http://127.0.0.1:$NC_PORT/"
 echo "       MODE dropdown -> 'Turn Delegate'"
+echo "       operator password when it asks: ${NANO_CLAW_OPERATOR_PASSWORD:-testing}"
 echo "       APP URL       -> already filled in: this rig minted a conversation"
 echo "                        and pointed the console at it"
 echo "       then hold the mic button and speak. Every reply comes from"

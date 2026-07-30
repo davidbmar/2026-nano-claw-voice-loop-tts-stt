@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from ipaddress import ip_address
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from aiohttp import WSCloseCode, web
 
@@ -260,7 +261,32 @@ def _origin_matches_request(request: web.Request) -> bool:
         return raw_host == "localhost:9090"
     if origin == PUBLIC_ORIGIN:
         return raw_host in PUBLIC_HOST_HEADERS
-    return False
+    return _loopback_origin_matches_host(origin, raw_host)
+
+
+def _loopback_origin_matches_host(origin: str | None, raw_host: str) -> bool:
+    """Allow a loopback console served on any port, same origin as itself.
+
+    `LOCAL_ORIGIN` pins port 9090, which is where this is deployed — but a second
+    node on another port (a test rig, a staging instance) had its operator
+    endpoints refused outright, so its console could not change a setting at all.
+    That is not a security property: the CSRF guarantee this function provides
+    comes from Origin MATCHING THE SERVER'S OWN HOST, which a cross-site page
+    cannot forge because a browser sets Origin itself. A page on
+    http://localhost:7777 calling this node still sends its own origin and still
+    fails to match. The port number was never what made it safe.
+
+    Loopback only. A non-loopback origin still has to be one of the two named
+    above, so this cannot admit a public host by accident.
+    """
+    if not origin or not raw_host:
+        return False
+    parsed = urlparse(origin)
+    if parsed.scheme != "http":
+        return False
+    if (parsed.hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    return parsed.netloc.lower() == raw_host
 
 
 def _strip_cors_headers(response: web.StreamResponse) -> None:

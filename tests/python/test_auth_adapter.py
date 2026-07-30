@@ -588,3 +588,51 @@ def test_ws_allowlist_and_trusted_tunnel_ip_source_are_exact():
     )
     assert trusted_client_ip(tunnel) == "203.0.113.22"
     assert trusted_client_ip(direct) == "127.0.0.1"
+
+
+# ── a loopback console on a port other than 9090 ─────────────────────────────
+
+def _origin_check(origin, host):
+    """The guard as the middleware calls it, with only the headers it reads."""
+    from types import SimpleNamespace
+
+    from voice.webauth.aiohttp_adapter import _origin_matches_request
+
+    return _origin_matches_request(
+        SimpleNamespace(headers={"Origin": origin, "Host": host}))
+
+
+def test_a_loopback_console_on_any_port_is_same_origin_with_itself():
+    """`LOCAL_ORIGIN` pins 9090, which is where this deploys — but a second node
+    on another port had every operator endpoint refused, so its console could
+    not change a setting at all. The port was never what made this safe."""
+    assert _origin_check("http://localhost:8080", "localhost:8080")
+    assert _origin_check("http://127.0.0.1:8080", "127.0.0.1:8080")
+    assert _origin_check("http://localhost:9090", "localhost:9090")
+
+
+def test_a_page_on_another_loopback_port_still_cannot_forge():
+    """The CSRF property, unchanged: a browser sets Origin itself, so a page on
+    another port sends ITS origin and fails to match this server's Host."""
+    assert not _origin_check("http://localhost:7777", "localhost:8080")
+    assert not _origin_check("http://127.0.0.1:7777", "127.0.0.1:8080")
+    assert not _origin_check("http://localhost:8080", "localhost:7777")
+
+
+def test_a_non_loopback_origin_is_still_restricted_to_the_named_hosts():
+    """Matching Host is not enough on its own — otherwise any host that could
+    get a request to this server would be trusted by echoing itself."""
+    assert not _origin_check("http://evil.example.com", "evil.example.com")
+    assert not _origin_check("https://evil.example.com", "evil.example.com")
+    assert not _origin_check("http://localhost.evil.com:8080", "localhost.evil.com:8080")
+
+
+def test_https_loopback_is_not_admitted_by_the_relaxation():
+    """The relaxation is for the plain-http local console only; anything else
+    must still be one of the two named origins."""
+    assert not _origin_check("https://localhost:8080", "localhost:8080")
+
+
+def test_a_missing_origin_or_host_is_refused():
+    assert not _origin_check(None, "localhost:8080")
+    assert not _origin_check("http://localhost:8080", "")
