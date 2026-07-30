@@ -1007,3 +1007,43 @@ def test_closing_the_call_cancels_an_in_flight_delegate_turn():
             "nobody is on")
 
     asyncio.run(exercise())
+
+
+def test_two_lines_on_one_node_resolve_to_different_identities(monkeypatch):
+    """The multi-tenant case, which is the whole point of per-line profiles.
+    Existing tests check ONE line against the node default; none checked two
+    lines against each other, which is the arrangement that would actually
+    embarrass someone — a law office answering in a plumber's voice.
+
+    Verified beyond config against the live TTS: the same sentence in `af_heart`
+    and `bm_george` produced 324000 vs 362400 bytes, different hashes, different
+    RMS. Config resolution is what this pins; that the voices differ is the TTS
+    service's job.
+    """
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        "+15125550100": {"start": START,
+                         "greeting": "Thanks for calling Rivera Plumbing.",
+                         "voice": "af_heart"},
+        "+15125550200": {"start": START,
+                         "greeting": "Lakeside Legal, how can I help?",
+                         "voice": "bm_george"},
+    }))
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "node_default")
+    lines = phone.delegate_starts()
+
+    calls = {}
+    for did, profile in lines.items():
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.call_id = did
+        call.default_greeting = "MODE GREETING"
+        call.delegate_route = phone.DelegateRoute("http://h/t", profile)
+        calls[did] = call
+
+    plumber, lawyer = calls["+15125550100"], calls["+15125550200"]
+
+    assert plumber.greeting_line != lawyer.greeting_line
+    assert plumber.configured_voice != lawyer.configured_voice
+    assert "Rivera" in plumber.greeting_line
+    assert "Lakeside" in lawyer.greeting_line
+    assert "node_default" not in {plumber.configured_voice, lawyer.configured_voice}, (
+        "a line with its own voice fell back to the node default")

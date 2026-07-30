@@ -156,9 +156,34 @@ same node gives ~780. That difference IS the per-DID greeting.
 
 ### C2 — Two lines can sound different
 
-Add a second line with its own voice to `NANO_CLAW_DELEGATE_STARTS`
-(see `docs/delegating-a-phone-line.md`) and call both. Each uses its own
-`voice`, not the node default.
+The multi-tenant case: one node answering for two businesses. Configure two
+lines with different greetings and voices:
+
+```bash
+NANO_CLAW_DELEGATE_STARTS='{
+  "+15125550100": {"start":"http://127.0.0.1:8795/api/delegate/start",
+                   "greeting":"Thanks for calling Rivera Plumbing.","voice":"af_heart"},
+  "+15125550200": {"start":"http://127.0.0.1:8795/api/delegate/start",
+                   "greeting":"Lakeside Legal, how can I help?","voice":"bm_george"}
+}'
+```
+
+**Expect** each line to resolve its own greeting and voice, and neither to fall
+back to `NANO_CLAW_PHONE_VOICE`.
+
+Verified against the live TTS — the same sentence in each voice:
+
+| voice | bytes | rms |
+|---|---|---|
+| `af_heart` | 324,000 | 1405 |
+| `bm_george` | 362,400 | 1657 |
+
+Different length, different hash, different loudness. Not a config difference
+that stops at the config.
+
+**Broken would look like:** a law office answering in a plumber's voice — which
+is what happens if a line without an explicit voice is treated the same as one
+with it.
 
 ---
 
