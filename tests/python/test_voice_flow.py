@@ -973,7 +973,16 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
         "replicantpm",
         "scheduler",
         "lawyer",
+        "delegate",
     ]
+    # Delegate mode speaks another app's words, so it must carry no persona of
+    # ours, no scheduler, and — checked below against the container config —
+    # the literal "none" profile.
+    assert FLOW_MODES["delegate"]["profile"] == "none"
+    assert FLOW_MODES["delegate"]["scheduler"] is False
+    assert "delegate_url" not in FLOW_MODES["delegate"], (
+        "the URL is per-conversation session state, not a process-global mode "
+        "key — one delegate URL == one conversation")
     assert FLOW_MODES["base"]["profile"] == "base"
     assert FLOW_MODES["base"]["scheduler"] is False
     assert all(mode.get("abstract") for mode in FLOW_MODES.values())
@@ -1109,6 +1118,10 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 ("replicantpm", "Replicant PM"),
                 ("scheduler", "Plumber Scheduler"),
                 ("lawyer", "Lawyer Scheduler"),
+                # Selectable from the console like any other mode — the point of
+                # putting the delegate in this registry rather than behind an
+                # env var only.
+                ("delegate", "Turn Delegate"),
             ]
             assert all(
                 isinstance(o.get("abstract"), str) and o["abstract"]

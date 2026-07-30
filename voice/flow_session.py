@@ -31,6 +31,7 @@ from voice.scheduling_domains import (
     SchedulingDomain,
     region_config_for,
 )
+from voice.turn_delegate import DelegateUrlRefused, validate_delegate_url
 
 if TYPE_CHECKING:
     from voice.booking import BookingFlow
@@ -143,6 +144,27 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
             "Goal-driven law-office scheduling with live calendar booking."
         ),
     },
+    # The only mode whose turns never reach nano-claw's own model. Everything
+    # acoustic stays here; the words come from another app over the turn-delegate
+    # contract (riff-builder `docs/turn-delegate-contract.md`).
+    #
+    # `profile` is "none" because no persona of ours may colour a reply we did
+    # not author — the delegate's text is spoken as written.
+    #
+    # The URL is deliberately NOT a key here. It is per-connection state on the
+    # Session, defaulting from NANO_CLAW_DELEGATE_URL, because the contract says
+    # "one delegate URL == one conversation". Putting it on this process-global
+    # entry would give one fact two homes, and two homes is where every drift bug
+    # in this system has started.
+    "delegate": {
+        "label": "Turn Delegate",
+        "profile": "none",
+        "scheduler": False,
+        "abstract": (
+            "Routes every turn to another app over HTTP and speaks its reply; "
+            "nano-claw supplies only the voice."
+        ),
+    },
 }
 DEFAULT_FLOW_MODE = "spacechannel"
 
@@ -175,6 +197,11 @@ _MODE_GREETINGS: dict[str, str] = {
     "replicantpm": (
         "You've reached the Replicant product assistant. How can I help?"
     ),
+    # Deliberately names nobody. The delegate contract (v0) has no greeting
+    # exchange, so the gateway does not know whose line this is — and a greeting
+    # that guessed would be the assistant claiming an identity it was never
+    # given. The delegate introduces itself on the first reply.
+    "delegate": "Hello — how can I help you today?",
 }
 _GENERIC_GREETING = (
     "Hello! You've reached the nano-claw voice assistant. How can I help?"
@@ -267,6 +294,46 @@ def get_flow_profile(mode: str | None = None) -> str:
     if active is None:
         active = DEFAULT_FLOW_MODE
     return FLOW_MODES[active]["profile"]
+
+
+def is_delegate_mode(mode: str | None = None) -> bool:
+    """True when turns must be routed to another app rather than to our model."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    return active == "delegate"
+
+
+def delegate_allowed_hosts() -> frozenset[str]:
+    """Non-loopback hosts a delegate URL may point at.
+
+    Loopback needs no entry. Anything else must be named here, because this URL
+    receives everything the human says, on every turn.
+    """
+
+    raw = os.environ.get("NANO_CLAW_DELEGATE_HOSTS", "")
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def default_delegate_url() -> str:
+    """The delegate URL a new session starts with, or "" for none.
+
+    A *default*, not the truth: the session owns its URL, because the contract
+    pairs one URL with one conversation. This only decides where a connection
+    points before anyone says otherwise.
+
+    An unset or refused value yields "", which leaves delegate mode inert rather
+    than dialling something unvetted — the same fail-closed choice as
+    `validate_delegate_url` itself.
+    """
+
+    configured = os.environ.get("NANO_CLAW_DELEGATE_URL", "").strip()
+    if not configured:
+        return ""
+    try:
+        return validate_delegate_url(configured, allowed_hosts=delegate_allowed_hosts())
+    except DelegateUrlRefused as exc:
+        log.warning("NANO_CLAW_DELEGATE_URL refused, delegate mode inert: %s", exc)
+        return ""
 
 
 def active_scheduling_domain(mode: str | None = None) -> str | None:

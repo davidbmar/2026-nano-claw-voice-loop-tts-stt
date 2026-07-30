@@ -28,11 +28,20 @@ from voice.flow_session import (
     REGION_MODELS,
     FlowSession,
     active_scheduling_domain,
+    default_delegate_url,
+    delegate_allowed_hosts,
     get_flow_mode,
     get_flow_profile,
     get_region_model,
+    is_delegate_mode,
     set_flow_mode,
     set_region_model,
+)
+from voice.turn_delegate import (
+    DELEGATE_APOLOGY,
+    DelegateUrlRefused,
+    call_delegate,
+    validate_delegate_url,
 )
 from voice.text_chunker import TextChunker
 from voice.speech_preparer import (
@@ -530,6 +539,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             log.info("Analysis style set (pending): %s", new_session.analysis_style)
         if "speech_mode" in pending_settings:
             new_session.set_speech_mode(pending_settings["speech_mode"])
+        if "delegate_url" in pending_settings:
+            new_session.delegate_url = pending_settings["delegate_url"]
+            log.info("Delegate URL set (pending): %s",
+                     new_session.delegate_url or "(none)")
         pending_settings.clear()
         return new_session
 
@@ -725,6 +738,32 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     log.info("Model set: %s", session.model or "(default)")
                 else:
                     pending_settings["model"] = canonical_model_id
+
+            elif msg_type == "set_delegate":
+                # Validated at SET time, not at call time: a refused URL must be
+                # rejected here, while someone is looking at the answer, rather
+                # than discovered mid-conversation. "" clears the delegate.
+                raw = msg.get("url", "")
+                if not isinstance(raw, str):
+                    raw = ""
+                raw = raw.strip()
+                if raw:
+                    try:
+                        raw = validate_delegate_url(
+                            raw, allowed_hosts=delegate_allowed_hosts())
+                    except DelegateUrlRefused as exc:
+                        await ws.send_json({
+                            "type": "error",
+                            "error": "refused",
+                            "setting": "delegate",
+                            "message": str(exc),
+                        })
+                        continue
+                if session:
+                    session.delegate_url = raw
+                    log.info("Delegate URL set: %s", raw or "(none)")
+                else:
+                    pending_settings["delegate_url"] = raw
 
             elif msg_type == "set_stt":
                 size = msg.get("size", "base")
@@ -1502,6 +1541,8 @@ async def _handle_agent_request(
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     _begin_agent_turn(session)
     try:
+        if await _handle_delegate_request(ws, session, client, text):
+            return
         await _refresh_agent_conversation_on_mode_switch(session, client)
         if await _handle_scheduler_request(ws, session, text):
             return
@@ -1535,6 +1576,58 @@ async def _handle_agent_request(
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+def resolve_delegate_url(session: Session) -> str:
+    """This conversation's delegate URL, falling back to the configured default.
+
+    Kept as one function so the WS handler, the operator API and the tests all
+    read the same precedence: whatever the session was told, else the
+    environment default, else nothing.
+    """
+
+    return getattr(session, "delegate_url", "") or default_delegate_url()
+
+
+async def _handle_delegate_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    client: httpx.AsyncClient,
+    text: str,
+) -> bool:
+    """Route this turn to another app instead of our model. True if handled.
+
+    Runs before the mode re-sync and the scheduler, because in delegate mode
+    neither applies: nano-claw holds no conversation of its own to re-sync, and a
+    scheduler turn would answer in our words rather than the delegate's.
+
+    `call_delegate` has already validated the status and the shape, so what
+    arrives here is safe to hand to `_process_api_response` — which then supplies
+    history, TTS and turn completion exactly as for a normal reply.
+    """
+
+    if not is_delegate_mode():
+        return False
+
+    url = resolve_delegate_url(session)
+    if not url:
+        # Delegate mode with nowhere to send. Say so rather than fall through to
+        # our own model: falling through would answer the caller in nano-claw's
+        # voice from a mode explicitly set to speak in someone else's.
+        log.warning("delegate mode active with no delegate URL configured")
+        await _process_api_response(
+            ws, session,
+            {"type": "final", "response": DELEGATE_APOLOGY},
+            req_start=time.monotonic())
+        return True
+
+    req_start = time.monotonic()
+    reply = await call_delegate(client, url, text, who="caller")
+    log.info("delegate turn %.1fs ok=%s%s", time.monotonic() - req_start,
+             reply.ok, f" ({reply.failure})" if reply.failure else "")
+    await _process_api_response(
+        ws, session, reply.as_agent_response(), req_start=req_start)
+    return True
 
 
 async def _handle_scheduler_request(

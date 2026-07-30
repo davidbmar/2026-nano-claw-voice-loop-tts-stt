@@ -108,6 +108,13 @@ class Session:
 
         # Pipeline settings: model + STT (Whisper) size for this session.
         self.model = ""       # "" → server uses its default
+        # Where this conversation's turns go when the delegate mode is active.
+        # Per-connection because the turn-delegate contract pairs one URL with
+        # one conversation; "" means no delegate, and delegate mode then says so
+        # rather than guessing at a destination. Seeded lazily from
+        # NANO_CLAW_DELEGATE_URL at first use so tests can set the environment
+        # after a Session already exists.
+        self.delegate_url = ""
         self.stt_size = "base"
         self.analysis_style = "topic_map"
         self.speech_mode = (
