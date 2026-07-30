@@ -652,7 +652,19 @@ class PhoneCall:
         self.session_id = f"phone-{safe_call_id[:24]}"
         codec = phone_codec()
         rate = 16000 if codec == "l16" else 8000
-        self.tap = CallTap.create(safe_call_id, codec, rate, rate)
+        # Resolved BEFORE the tap opens. The webhook minted this route at
+        # call.initiated, strictly earlier, and a line that opted out of
+        # recording must not be captured for the length of its own construction.
+        self.delegate_route = route_for(telnyx_call_id)
+        _profile = self.delegate_route.profile if self.delegate_route else None
+        self.tap = (
+            CallTap.create(safe_call_id, codec, rate, rate)
+            if _profile is None or _profile.record
+            else None
+        )
+        if _profile is not None and not _profile.record:
+            log.info("[phone %s] line opted out of recording — no capture, "
+                     "and no call review for it", safe_call_id[:8])
         self._tap_sentence_index = 0
         self._active_tap_sentence_index: int | None = None
         if self.tap:
@@ -729,9 +741,6 @@ class PhoneCall:
             self.flow = _flow
         self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
-        # The webhook mints the route at call.initiated, which is strictly before
-        # the media WebSocket opens, so it is already there to be read.
-        self.delegate_route = route_for(telnyx_call_id)
         self.default_greeting = (
             self.flow.greeting if self.flow else flow_mode_greeting()
         )
@@ -839,6 +848,15 @@ class PhoneCall:
         """
 
         profile = self._delegate_profile()
+        if profile is not None and not profile.record:
+            # A line that does not record must not announce that it does. Same
+            # rule as riff-builder's honest-copy gate: copy may not promise what
+            # the system does not do, and "this call may be recorded" is a claim
+            # about behaviour, not a courtesy.
+            if profile.record_notice:
+                log.error("delegate line has record=false but sets a recording "
+                          "notice; the notice is dropped rather than spoken")
+            return ""
         notice = profile.record_notice if profile and profile.record_notice else ""
         if not notice:
             notice = _cfg("NANO_CLAW_PHONE_RECORD_NOTICE", DEFAULT_RECORD_NOTICE)
@@ -2180,6 +2198,12 @@ class DelegateProfile:
     # review panel regardless — that was true of the node-wide setting too, and
     # silencing the sentence does not change it.
     record_notice: str = ""
+    # Whether this line's calls are captured at all. True keeps today's
+    # behaviour — recordings feed the call review panel. False means no capture
+    # for this line, and therefore no review of it: that is the trade, and it is
+    # the operator's to make on behalf of a business that has not agreed to be
+    # recorded.
+    record: bool = True
 
 
 @dataclass(frozen=True)
@@ -2190,7 +2214,8 @@ class DelegateRoute:
     profile: DelegateProfile
 
 
-_PROFILE_KEYS = frozenset({"start", "greeting", "voice", "speed", "record_notice"})
+_PROFILE_KEYS = frozenset(
+    {"start", "greeting", "voice", "speed", "record_notice", "record"})
 
 
 def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
@@ -2233,6 +2258,7 @@ def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
         voice=str(value.get("voice", "") or "").strip(),
         speed=speed if 0.0 < speed <= 3.0 else 0.0,
         record_notice=str(value.get("record_notice", "") or "").strip(),
+        record=bool(value.get("record", True)),
     )
 
 

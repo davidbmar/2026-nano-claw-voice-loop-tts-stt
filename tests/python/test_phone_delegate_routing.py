@@ -1176,3 +1176,116 @@ def test_every_documented_profile_key_is_recognised():
     for key in phone._PROFILE_KEYS:
         assert f'"{key}"' in runbook or f"`{key}`" in runbook, (
             f"profile key {key!r} is accepted but appears nowhere in the runbook")
+
+
+# ── a line that does not record must not say it does ─────────────────────────
+
+def test_a_line_can_opt_out_of_recording(monkeypatch):
+    """The gap the per-line disclosure exposed: the wording was configurable
+    while the behaviour was not, so a business that had not agreed to be
+    recorded was recorded anyway with someone else's sentence."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"start": START, "record": False}}))
+
+    assert phone.delegate_starts()[LINE].record is False
+    assert phone.delegate_starts()[LINE].record is not None
+
+
+def test_recording_stays_on_by_default(monkeypatch):
+    """Every existing line is unchanged: capture feeds the call review."""
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps({
+        LINE: {"start": START}}))
+
+    assert phone.delegate_starts()[LINE].record is True
+
+
+def test_a_non_recording_line_speaks_no_disclosure(monkeypatch):
+    """Same rule as riff-builder's honest-copy gate: copy may not promise what
+    the system does not do. "This call may be recorded" is a claim about
+    behaviour, not a courtesy."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+    silent = _bare_call(route("http://h/t", record=False))
+
+    assert silent.recording_notice == ""
+
+
+def test_claiming_to_record_while_not_recording_is_refused(monkeypatch, caplog):
+    """The dishonest combination, reported rather than spoken."""
+    import logging
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+    call = _bare_call(route("http://h/t", record=False,
+                            record_notice="This call may be recorded."))
+
+    with caplog.at_level(logging.ERROR, logger="nano-claw.phone"):
+        notice = call.recording_notice
+
+    assert notice == "", "the line would have claimed a recording it never makes"
+    assert any("record=false" in r.getMessage() for r in caplog.records)
+
+
+def test_the_tap_is_resolved_before_it_is_opened():
+    """Order matters: the route must be known BEFORE `CallTap.create`, or a line
+    that opted out is captured for the length of its own construction."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    tree = ast.parse(source)
+    init = next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "__init__"
+                and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                        and c.func.attr == "create" for c in ast.walk(n)))
+
+    lines = {}
+    for node in ast.walk(init):
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name in ("route_for", "create"):
+                lines.setdefault(name, node.lineno)
+
+    assert "route_for" in lines and "create" in lines
+    assert lines["route_for"] < lines["create"], (
+        "the tap opens before the route is known — an opted-out line is recorded")
+
+
+def test_an_opted_out_line_opens_no_tap(monkeypatch):
+    """The BEHAVIOUR, not the config. Every other test here checks that
+    `record: false` parses and silences the disclosure; making the tap open
+    regardless failed none of them. A recording opt-out that still records is
+    worse than none, because the disclosure now truthfully says nothing.
+    """
+    created = []
+
+    def fake_create(call_id, codec, inbound, outbound):
+        created.append(call_id)
+        return None
+
+    monkeypatch.setattr(phone, "CallTap", type("T", (), {"create": staticmethod(fake_create)}))
+    monkeypatch.setattr(phone, "_metrics_conn", None)
+    monkeypatch.setattr(phone.call_log, "emit", lambda *a, **k: None)
+
+    class WS:
+        async def send_json(self, _m):
+            return None
+
+    def build(profile):
+        phone._call_routing.clear()
+        if profile is not None:
+            phone._call_routing["v3:tapcheck"] = (
+                phone.DelegateRoute("http://h/t", profile), 0.0)
+        created.clear()
+        try:
+            phone.PhoneCall(WS(), "v3:tapcheck", _flow=None, _flow_domain_id=None)
+        except Exception:
+            pass          # __init__ touches far more than this test needs
+        return list(created)
+
+    recording = phone.DelegateProfile(start_url="http://h/s", record=True)
+    silent = phone.DelegateProfile(start_url="http://h/s", record=False)
+
+    assert build(recording), "a recording line opened no tap"
+    assert build(silent) == [], (
+        "an opted-out line was still captured — the disclosure now truthfully "
+        "says nothing while the call is recorded anyway")

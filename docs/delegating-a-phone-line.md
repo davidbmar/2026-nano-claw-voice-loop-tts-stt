@@ -56,11 +56,18 @@ and means "no profile, node defaults".
   and what it must say differs by jurisdiction. Omit to inherit;
   `"off"` says nothing.
 
-  **It controls the sentence, not the recording.** Calls are recorded for the
-  review panel regardless — that was already true of the node-wide setting.
-  There is no per-line switch for whether a call is recorded, and a business
-  that has not agreed to it is recorded anyway. That is worth knowing before
-  pointing a real number at this.
+  **It controls the sentence, not the recording** — see `record` below for that.
+- **`record`** (default `true`) is whether this line's calls are captured at
+  all. `false` means no recording, and therefore **no call review** for that
+  line: that is the trade, and it is yours to make on behalf of a business that
+  has not agreed to be recorded.
+
+  A line with `record: false` speaks **no** disclosure, whatever
+  `record_notice` says — a line that does not record must not announce that it
+  does. Setting both logs an error and drops the notice. That is the same rule
+  riff-builder's honest-copy gate enforces: copy may not promise what the system
+  does not do, and "this call may be recorded" is a claim about behaviour rather
+  than a courtesy.
 
 Non-loopback start URLs need an allowlist:
 
