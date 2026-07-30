@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Emotive Display — How nano-claw Decides What to Feel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 17px/1.65 -apple-system, "Segoe UI", sans-serif; max-width: 820px;
+         margin: 2.5rem auto; padding: 0 1.25rem; color: #1f2933; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e4e7eb; background: #16211f; } }
+  h1 { font-size: 1.7rem; line-height: 1.25; }
+  h2 { font-size: 1.25rem; margin-top: 2.4rem; color: #2f855a; }
+  h3 { font-size: 1.02rem; margin-top: 1.8rem; }
+  .lead { font-size: 1.05em; color: #52616b; }
+  @media (prefers-color-scheme: dark) { .lead { color: #a9b4b0; } }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: rgba(47,133,90,.12); padding: .1em .35em; border-radius: 4px; }
+  pre { background: rgba(47,133,90,.07); border-left: 4px solid #2f855a;
+        padding: .8em 1em; border-radius: 0 8px 8px 0; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: .84em; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: .92em;
+          display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: .45em .7em; border-bottom: 1px solid rgba(128,128,128,.25); }
+  th { color: #2f855a; font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
+  .win { font-weight: 700; }
+  .bad { color: #b23c17; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { .bad { color: #f0845c; } }
+  .note { border-left: 4px solid #2f855a; padding: .5em 1em; margin: 1.2em 0;
+          background: rgba(47,133,90,.07); border-radius: 0 8px 8px 0; }
+  .warn { border-left-color: #b23c17; background: rgba(178,60,23,.07); }
+  .meta { color: #6b7a76; font-size: .85em; margin-top: 3rem;
+          border-top: 1px solid rgba(128,128,128,.25); padding-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>The Emotive Display</h1>
+<p class="lead">How the thing in the middle of the console decides what to feel —
+and why it is built out of regular expressions rather than a language model.</p>
+
+<p>Written to be extended. If you are here to add an emotion, a rule, or a third
+renderer, skip to <em>Adding a rule</em>. If you are here because you think a
+model would do this better, read <em>Why not a model</em> first — that experiment
+has already been run.</p>
+
+<h2>What the display is</h2>
+<p>The centre of the voice console is the agent's face. Two renderers can occupy
+it, chosen from <strong>VISUALIZATION → DISPLAY</strong>:</p>
+<ul>
+  <li><strong>Voice constellation</strong> — a 2D canvas particle field that reacts to audio.</li>
+  <li><strong>Computer mascot</strong> — a pen-and-ink robot whose screen is its face.</li>
+</ul>
+<p>Both speak the same vocabulary, so nothing else in the system needs to know
+which is on screen.</p>
+
+<p><strong>Eleven emotions:</strong> <code>neutral</code> <code>calm</code>
+<code>curious</code> <code>confused</code> <code>warm</code> <code>joyful</code>
+<code>confident</code> <code>tense</code> <code>somber</code> <code>awe</code>
+<code>urgent</code></p>
+<p><strong>Seven presences</strong> — what the pipeline is doing, as distinct
+from how it feels: <code>idle</code> <code>listening</code> <code>silent</code>
+<code>thinking</code> <code>confused</code> <code>speaking</code>
+<code>paused</code></p>
+<p>These are independent layers. The agent can be <code>thinking</code> and
+<code>somber</code> at once; that is a different picture from
+<code>thinking</code> and <code>joyful</code>.</p>
+
+<h2>Two signals, two rule sets</h2>
+<p>The display reads <strong>both sides</strong> of the conversation, with
+different rules for each.</p>
+<pre><code>caller stops speaking
+  └─ transcript arrives ──▶ inferInboundEmotion(text)   ~0ms
+                                └─▶ display reacts WHILE the agent thinks
+
+agent replies
+  └─ reply text ─────────▶ inferEmotion(text)           ~0ms
+                                └─▶ display reacts as it speaks</code></pre>
+<p>Before this, only the second half existed — the display sat still until the
+agent answered. Now a caller saying <em>"my basement is flooding right now"</em>
+moves it immediately, which is what makes the agent look like it is
+<strong>listening</strong> rather than merely talking.</p>
+
+<h3>Why the rule sets are separate</h3>
+<p>This is the part most likely to be "simplified" later, so here is the reason
+in full. The outbound rules were written for agent replies and are correct
+there. Run them on caller speech and they misfire specifically:</p>
+<div class="note warn">
+<p style="margin:0"><strong>Caller:</strong> <em>"Wait, sorry, I don't understand
+what you just said."</em></p>
+<p style="margin:.5em 0 0">The outbound <code>somber</code> rule matches on
+<code>sorry</code> — which in an agent reply means <em>"I'm sorry, we're fully
+booked"</em>, and in caller speech means <em>"sorry, could you repeat that"</em>.
+The display would go sad at someone who is merely confused.</p>
+</div>
+<p><code>tests/inbound-emotion.test.ts</code> asserts both halves of that
+misfire, so anyone merging the rule sets gets a failing test rather than a subtly
+sad robot. The asymmetry runs the other way too: a caller's <em>"is it
+booked?"</em> must not read as joy — affirmative outcome words belong to the
+agent, not to someone asking whether something happened.</p>
+
+<h2>Why not a model</h2>
+<p>Measured 2026-07-30 on the machine this runs on. Recorded so nobody re-runs it.</p>
+
+<h3>Could the agent just decide?</h3>
+<p>The obvious design: give the model a <code>set_emotion</code> tool. Tested
+against <code>gemma4:e2b</code>, one of the local models the console offers.</p>
+<table>
+<tr><th>Prompt</th><th>Tool call</th><th>Reply text</th></tr>
+<tr><td>"Before replying, call set_emotion… then reply"</td><td class="bad">no</td><td><em>"I need more context to answer that question."</em></td></tr>
+<tr><td>"Call set_emotion with emotion=somber. <strong>Do this now.</strong>"</td><td class="win">yes</td><td class="bad">empty</td></tr>
+<tr><td>"Call set_emotion for how your reply should feel, and reply in one sentence."</td><td class="bad">no</td><td>"What would you like to book?"</td></tr>
+</table>
+<p>Ollama reports <code>capabilities: tools</code> for this model and is telling
+the truth — it emits a valid call with the right enum value when ordered to. What
+it will not do is <em>volunteer</em> one in natural conversation, which is the
+only shape that would be useful.</p>
+<p>The second row matters more. When it did call the tool, the reply was
+<strong>empty</strong> — the turn was spent, and getting the sentence needs a
+second inference. At ~6.1s per turn locally that roughly doubles
+time-to-first-word for a cosmetic effect. That cost is structural, not a quirk of
+this model: tool-call turns do not carry the reply.</p>
+
+<h3>Could a tiny classifier decide?</h3>
+<p>Tested with ollama's JSON-schema constrained decoding, which is essential — an
+off-vocabulary name is silently dropped by <code>setVisualEmotion</code>, so the
+display simply fails to move.</p>
+<table>
+<tr><th>Input</th><th>gemma3:270m<br>~391ms</th><th>gemma3:1b<br>~537ms</th><th>Rules<br>~0ms</th></tr>
+<tr><td>"third time I've called, nobody has helped"</td><td>neutral</td><td class="win">urgent</td><td class="win">urgent</td></tr>
+<tr><td>"my basement is flooding <strong>right now</strong>"</td><td class="bad">calm</td><td class="win">urgent</td><td class="win">urgent</td></tr>
+<tr><td>"wait, sorry, I don't understand"</td><td class="bad">concerned*</td><td>neutral</td><td class="win">confused</td></tr>
+<tr><td>"yeah that works great, thanks so much"</td><td>neutral</td><td>neutral</td><td class="win">warm</td></tr>
+<tr><td>"uh. hmm. i guess. maybe?"</td><td>neutral</td><td>neutral</td><td class="win">curious</td></tr>
+<tr><td>"hi! hoping to get someone out…"</td><td>calm</td><td>neutral</td><td class="win">neutral</td></tr>
+<tr><td><em>(silence)</em></td><td class="bad">calm</td><td>neutral</td><td class="win">neutral</td></tr>
+</table>
+<p style="font-size:.88em">* not in the vocabulary — <code>setVisualEmotion</code>
+rejects it and nothing happens.</p>
+<p>Constrained decoding fixed enum-safety completely (0/7 off-vocabulary for
+both). It did not fix usefulness. <code>270m</code> is fast but inert — it
+answered <code>calm</code> to a flooding basement <em>and</em> to an empty
+string. <code>1b</code> respects the vocabulary and catches genuine arousal, but
+returns <code>neutral</code> for most things.</p>
+<p><strong>Five hand-written rules scored 7/7 where <code>gemma3:1b</code> scored
+3/7, at ~0ms, with no ollama dependency and nothing to keep running.</strong></p>
+
+<div class="note warn">
+<p style="margin:0"><strong>The honest caveat.</strong> Those seven cases and
+those five rules were written by the same author in the same sitting, so 7/7
+measures self-consistency, not accuracy. The metrics database held no stored
+caller utterances to score against. <strong>Before trusting the rule set, pull
+real transcripts from the <code>/calls</code> panel and re-score it.</strong>
+Expect to rewrite half of them.</p>
+<p style="margin:.6em 0 0">What the measurement does establish is narrower and
+still useful: a small local model is not obviously better than rules here, and it
+costs a dependency, a running service, and 400–500ms.</p>
+</div>
+
+<h2>Two renderers, one vocabulary</h2>
+<p>The mascot ships its own adapter, written against this console's
+<em>actual</em> renderer calls — its method list and per-method usage counts were
+derived from the source and match a grep of <code>app.js</code> exactly:</p>
+<pre><code>pulse 10, setColors 5, importProfile 4, setSpeaking 2, setPattern 2,
+disconnectAnalyser 2, connectAnalyser 2, setPanelOpen 1, pushAudioFrame 1,
+getProfile 1, destroy 1, configure 1</code></pre>
+<p>Two are deliberate no-ops returning <code>true</code>: <code>setColors</code>
+and <code>setPattern</code> mean nothing to monochrome line art, and throwing
+would break a host entitled to call them.</p>
+<p>Three things must survive a swap or it looks broken, and all three are easy to
+forget:</p>
+<ol>
+  <li><strong>The live TTS analyser</strong> — reconnect it, or the new renderer never reacts to audio.</li>
+  <li><strong>Current emotion and presence</strong> — re-apply them, or it starts blank mid-conversation.</li>
+  <li><strong>The outgoing renderer's teardown</strong> — the mascot documents a <em>measured</em> leak of 14 writes plus a stray animation loop per unmount when <code>destroy()</code> is skipped.</li>
+</ol>
+<p>The new renderer is built <strong>before</strong> the old one is torn down, so
+a failed mount leaves a working display rather than an empty stage.</p>
+
+<h3>Drift between the repos is the real risk</h3>
+<p>The adapter is verified against <em>today's</em> <code>app.js</code>. Add a
+renderer call here and the mascot breaks silently — the call lands on
+<code>undefined</code> with no error at the call site.</p>
+<p><code>tests/mascot-renderer-contract.test.ts</code> is the guard. It runs the
+adapter's own <code>rendererGaps()</code> and <code>coverageGaps()</code> and
+checks both repos still agree on the eleven emotion names. <strong>A failure
+there is a genuine divergence, not a flaky test.</strong></p>
+
+<h2>Adding a rule</h2>
+<p>One line in <code>voice/web/emotion-layer.js</code>, in
+<code>INBOUND_RULES</code> or <code>EMOTION_RULES</code> depending on which side
+of the conversation you mean:</p>
+<pre><code>{ emotion: "urgent", intensity: 0.85, re: /\b(right now|flooding|emergency)\b/i },</code></pre>
+<p>Rules are ordered and <strong>first match wins</strong>, so put arousal above
+the generic <code>/\?\s*$/ → curious</code> rule, or every urgent question reads
+as merely curious.</p>
+<p>Two ways to get this wrong, both silent:</p>
+<ul>
+  <li><strong>Emitting a name not in <code>EMOTION_PROFILES</code>.</strong>
+      <code>setVisualEmotion</code> returns <code>false</code> and does nothing.
+      No error, no log — the display simply stops responding to that rule. The
+      tests assert every emitted name exists.</li>
+  <li><strong>Routing caller text through <code>inferEmotion()</code></strong>
+      (or agent text through <code>inferInboundEmotion()</code>). This produces
+      confidently wrong expressions rather than none.</li>
+</ul>
+<p>Also: an inbound <code>neutral</code> deliberately does <strong>not</strong>
+clear a live emotion. Most utterances match no rule, and letting every
+unremarkable sentence flatten the display makes it less alive, not more.</p>
+
+<h2>Extension points — not built</h2>
+<p>Considered and deliberately deferred.</p>
+<ul>
+  <li><strong>Repolling while the caller speaks.</strong> Streaming STT commits a
+      growing prefix during the utterance and the chat model is idle then, so
+      classification there is free. It is gated behind
+      <code>NANO_CLAW_PHONE_STT_STREAM</code>, which ships dark, and adding load
+      beside Whisper risks the STT latency task 088 existed to fix.</li>
+  <li><strong>Agent-chosen emotion.</strong> See <em>Why not a model</em>.
+      Reconsider only for large models, and only once the capability platform
+      clears its review.</li>
+  <li><strong>Barge-in sensitivity and adaptive state.</strong> These live only
+      in the browser; the server never learns them. Reporting them would mean
+      rendering a client-supplied value into the system prompt — the injection
+      channel task 094 closed. They are the two left-panel controls the agent
+      still cannot describe.</li>
+  <li><strong>A presence signal during delegate waits.</strong> Delegated turns
+      can take 7–11 seconds with nothing to show, and the display is the only
+      thing on screen while that happens. The vocabulary already has
+      <code>thinking</code>.</li>
+</ul>
+
+<p class="meta">
+Source: <code>voice/web/emotion-layer.js</code> (rules),
+<code>voice/web/app.js</code> (state + <code>switchRenderer()</code>),
+<code>voice/web/vendor/mascot/</code> (vendored character, see its README).<br>
+Tests: <code>tests/inbound-emotion.test.ts</code>,
+<code>tests/mascot-renderer-contract.test.ts</code>, and
+<code>tests/voice-ui.test.mjs</code> via <code>npm run test:web</code>.
+<code>npm run test:all</code> runs both suites; <code>npm test</code> alone is
+vitest and will not catch markup regressions.<br>
+Measurements taken 2026-07-30.
+</p>
+</body>
+</html>
