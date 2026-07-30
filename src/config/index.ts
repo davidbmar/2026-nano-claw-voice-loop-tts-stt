@@ -100,6 +100,30 @@ export function createDefaultConfig(): Config {
 }
 
 /**
+ * An integer from the environment, or undefined so the schema default applies.
+ *
+ * `Number('')` is 0 and `Number.isInteger(0)` is true, so the obvious guard —
+ * `Number.isInteger(Number(process.env.X))` — accepts an EMPTY string as a
+ * legitimate zero. That is not hypothetical: `run.sh` passes 76 variables as
+ * `-e VAR="$VAR"`, which sends an empty string when the host var is unset rather
+ * than omitting the variable. Three of those feed schema fields with a minimum
+ * (`deepReasoning.threshold` min 1, `deepReasoning.taskTimeoutMs` min 1000,
+ * `intelligence.timeoutMs` min 10), so an unset var became 0, failed validation,
+ * and took the WHOLE config down with it — the Node API never started, the
+ * container died every three minutes, and the public console served 502 until a
+ * human looked (2026-07-29 22:40, `logs/voice_watchdog.ALERT`).
+ *
+ * Treating empty as absent is what the callers already meant: fall back to the
+ * documented default. Garbage like "abc" is still rejected, as before.
+ */
+function envInt(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) ? value : undefined;
+}
+
+/**
  * Merge environment variables into configuration
  */
 export function mergeEnvConfig(config: Config): Config {
@@ -175,10 +199,7 @@ export function mergeEnvConfig(config: Config): Config {
   // embeds the query) retrieval routinely exceeds it and the document-
   // intelligence mode silently answers without evidence. Deployments that
   // prioritize document access set this higher (voice pays the wait).
-  const intelligenceTimeoutValue = Number(process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS);
-  const intelligenceTimeoutMs = Number.isInteger(intelligenceTimeoutValue)
-    ? intelligenceTimeoutValue
-    : undefined;
+  const intelligenceTimeoutMs = envInt('NANO_CLAW_INTELLIGENCE_TIMEOUT_MS');
   const intelligenceCollections = process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS?.split(',')
     .map((value) => value.trim())
     .filter(Boolean);
@@ -187,14 +208,18 @@ export function mergeEnvConfig(config: Config): Config {
   const deepEnabled = deepEnabledValue
     ? ['1', 'true', 'yes'].includes(deepEnabledValue)
     : undefined;
-  const deepThresholdValue = Number(process.env.NANO_CLAW_DEEP_THRESHOLD);
-  const deepThreshold = Number.isInteger(deepThresholdValue) ? deepThresholdValue : undefined;
-  const deepTimeoutValue = Number(process.env.NANO_CLAW_DEEP_TIMEOUT_MS);
-  const deepTimeoutMs = Number.isInteger(deepTimeoutValue) ? deepTimeoutValue : undefined;
-  const analysisStyle = process.env.NANO_CLAW_ANALYSIS_STYLE?.trim();
+  const deepThreshold = envInt('NANO_CLAW_DEEP_THRESHOLD');
+  const deepTimeoutMs = envInt('NANO_CLAW_DEEP_TIMEOUT_MS');
+  // `|| undefined` so an EMPTY value is absent, not "the operator asked for the
+  // empty string". run.sh sends unset host vars as empty (-e VAR="$VAR"), and
+  // `''.trim()` is `''`, which is `!== undefined` — so without this an unset
+  // NANO_CLAW_ANALYSIS_STYLE or NANO_CLAW_DEEP_ROUTING silently materialises a
+  // whole deepReasoning block out of nothing.
+  const analysisStyle = process.env.NANO_CLAW_ANALYSIS_STYLE?.trim() || undefined;
+  const deepRouting = process.env.NANO_CLAW_DEEP_ROUTING?.trim() || undefined;
   const hasDeepOverride =
     deepEnabled !== undefined ||
-    process.env.NANO_CLAW_DEEP_ROUTING !== undefined ||
+    deepRouting !== undefined ||
     deepThreshold !== undefined ||
     deepTimeoutMs !== undefined ||
     analysisStyle !== undefined;
@@ -202,8 +227,8 @@ export function mergeEnvConfig(config: Config): Config {
     ? {
         ...existingIntelligence?.deepReasoning,
         ...(deepEnabled !== undefined && { enabled: deepEnabled }),
-        ...(process.env.NANO_CLAW_DEEP_ROUTING && {
-          routingMode: process.env.NANO_CLAW_DEEP_ROUTING,
+        ...(deepRouting && {
+          routingMode: deepRouting,
         }),
         ...(deepThreshold !== undefined && { threshold: deepThreshold }),
         ...(deepTimeoutMs !== undefined && { taskTimeoutMs: deepTimeoutMs }),
