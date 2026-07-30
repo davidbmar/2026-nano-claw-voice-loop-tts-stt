@@ -50,6 +50,17 @@ and means "no profile, node defaults".
   businesses must not greet both as the first one.
 - **`voice` / `speed`** are per line, so two businesses on one node do not have
   to sound alike. Omit to inherit the node defaults.
+- **`record_notice`** is the recording disclosure this line speaks. It was
+  node-wide, which is wrong once one node answers for two businesses: the
+  wording is a legal statement made to a caller **on behalf of that business**,
+  and what it must say differs by jurisdiction. Omit to inherit;
+  `"off"` says nothing.
+
+  **It controls the sentence, not the recording.** Calls are recorded for the
+  review panel regardless — that was already true of the node-wide setting.
+  There is no per-line switch for whether a call is recorded, and a business
+  that has not agreed to it is recorded anyway. That is worth knowing before
+  pointing a real number at this.
 
 Non-loopback start URLs need an allowlist:
 

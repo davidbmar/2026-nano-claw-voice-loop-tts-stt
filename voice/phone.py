@@ -334,15 +334,19 @@ def _load_persisted_overrides() -> None:
         )
 
 
-def _compose_greeting(base: str) -> str:
+def _compose_greeting(base: str, notice: str | None = None) -> str:
     """Append the recording disclosure to the greeting.
 
     Calls are recorded for the review panel, so the caller must hear a
     disclosure up front. ``NANO_CLAW_PHONE_RECORD_NOTICE`` overrides the
     spoken line; ``off``/``0`` restores the plain greeting (for deployments
     whose owner has not approved the line — recording stays on regardless).
+
+    `notice` lets a delegated line speak its own wording; None keeps the
+    node-wide behaviour for every existing caller.
     """
-    notice = _cfg("NANO_CLAW_PHONE_RECORD_NOTICE", DEFAULT_RECORD_NOTICE)
+    if notice is None:
+        notice = _cfg("NANO_CLAW_PHONE_RECORD_NOTICE", DEFAULT_RECORD_NOTICE)
     if notice.lower() in ("off", "0", ""):
         return base
     return f"{base} {notice}"
@@ -821,6 +825,23 @@ class PhoneCall:
             _warn_config_fallback(
                 "NANO_CLAW_PHONE_SPEED", _cfg("NANO_CLAW_PHONE_SPEED", "1.0"), 1.0)
             return 1.0
+
+    @property
+    def recording_notice(self) -> str:
+        """The disclosure this call speaks, or "" for none.
+
+        Line, then node, then the default — the same precedence as the greeting
+        and for the same reason: one node answering two businesses must not
+        speak one business's legal wording to the other's callers.
+
+        This is the SENTENCE, not the behaviour. Recording continues either way.
+        """
+
+        profile = self._delegate_profile()
+        notice = profile.record_notice if profile and profile.record_notice else ""
+        if not notice:
+            notice = _cfg("NANO_CLAW_PHONE_RECORD_NOTICE", DEFAULT_RECORD_NOTICE)
+        return "" if notice.lower() in ("off", "0", "") else notice
 
     @property
     def greeting_line(self) -> str:
@@ -2149,6 +2170,15 @@ class DelegateProfile:
     greeting: str = ""
     voice: str = ""
     speed: float = 0.0   # 0 = inherit the node default
+    # The recording disclosure this line speaks. Node-wide otherwise, which is
+    # wrong once one node answers for two businesses: the wording is a legal
+    # statement made to a caller ON BEHALF OF that business, and what it must say
+    # differs by jurisdiction. "" inherits the node setting; "off" says nothing.
+    #
+    # It controls the DISCLOSURE, never the recording. Calls are recorded for the
+    # review panel regardless — that was true of the node-wide setting too, and
+    # silencing the sentence does not change it.
+    record_notice: str = ""
 
 
 @dataclass(frozen=True)
@@ -2180,6 +2210,7 @@ def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
         greeting=str(value.get("greeting", "") or "").strip(),
         voice=str(value.get("voice", "") or "").strip(),
         speed=speed if 0.0 < speed <= 3.0 else 0.0,
+        record_notice=str(value.get("record_notice", "") or "").strip(),
     )
 
 
@@ -2426,7 +2457,8 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 metrics_db.record_call_start(
                     _metrics_conn, safe_cid, "?", "?", _node()
                 )
-                greeting = _compose_greeting(call.greeting_line)
+                greeting = _compose_greeting(
+                    call.greeting_line, call.recording_notice)
                 # Pre-answer health gate (07-26 incident: the node answered
                 # while the pipeline was dying and the caller talked into a
                 # line that couldn't hear). TTS-down is survivable — the

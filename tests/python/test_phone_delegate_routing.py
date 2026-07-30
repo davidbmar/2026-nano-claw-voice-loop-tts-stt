@@ -1047,3 +1047,87 @@ def test_two_lines_on_one_node_resolve_to_different_identities(monkeypatch):
     assert "Lakeside" in lawyer.greeting_line
     assert "node_default" not in {plumber.configured_voice, lawyer.configured_voice}, (
         "a line with its own voice fell back to the node default")
+
+
+# ── the disclosure is a legal statement made on a business's behalf ──────────
+
+def test_a_line_can_speak_its_own_recording_disclosure(monkeypatch):
+    """Node-wide until now, which is wrong once one node answers for two
+    businesses: the wording is a statement made TO A CALLER ON BEHALF OF that
+    business, and what it must say differs by jurisdiction."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+
+    inherits = _bare_call(route("http://h/t"))
+    assert inherits.recording_notice == "Node-wide notice."
+
+    own = _bare_call(route("http://h/t",
+                           record_notice="Calls to this office are recorded."))
+    assert own.recording_notice == "Calls to this office are recorded."
+
+
+def test_a_line_can_say_nothing(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+    silent = _bare_call(route("http://h/t", record_notice="off"))
+
+    assert silent.recording_notice == ""
+
+
+def test_silencing_the_disclosure_does_not_stop_the_recording(monkeypatch):
+    """The property this must not be mistaken for. Calls are recorded for the
+    review panel regardless — that was true of the node-wide setting too, and
+    is why this returns a SENTENCE rather than a decision about recording.
+
+    Asserted on the type: anything that reads like a switch invites someone to
+    use it as one.
+    """
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "off")
+    call = _bare_call(route("http://h/t"))
+
+    assert call.recording_notice == ""
+    assert isinstance(call.recording_notice, str), (
+        "a boolean here would read as 'recording on/off', which it is not")
+
+
+def test_the_greeting_carries_the_line_s_own_disclosure(monkeypatch):
+    """Composed at the call site, so the caller hears the right one."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+    call = _bare_call(route("http://h/t", greeting="Rivera Plumbing.",
+                            record_notice="Recorded for training."))
+
+    composed = phone._compose_greeting(call.greeting_line, call.recording_notice)
+
+    assert composed == "Rivera Plumbing. Recorded for training."
+    assert "Node-wide" not in composed
+
+
+def test_an_undelegated_call_keeps_the_node_disclosure(monkeypatch):
+    """Every existing deployment is unchanged: no route, no per-line wording."""
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Node-wide notice.")
+
+    assert _bare_call().recording_notice == "Node-wide notice."
+    assert phone._compose_greeting("Hello.") == "Hello. Node-wide notice."
+
+
+def test_the_call_site_passes_the_line_s_own_disclosure():
+    """A correct property the greeting path never reads is the same as none.
+
+    The test above composes the greeting by hand; this checks the media handler
+    actually hands `_compose_greeting` the CALL's notice rather than letting it
+    fall back to the node-wide one. Removing that argument failed nothing until
+    this existed — the same shape as an adapter written and never wired.
+
+    Read from the file, not `inspect.getsource`: these methods get wrapped.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "phone.py").read_text()
+    composes = [n for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "_compose_greeting"]
+
+    assert composes, "the greeting is no longer composed — find where it moved"
+    assert any(len(c.args) >= 2 for c in composes), (
+        "every _compose_greeting call passes only the greeting, so the node-wide "
+        "disclosure is spoken on every line regardless of its own")
