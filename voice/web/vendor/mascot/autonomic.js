@@ -69,7 +69,33 @@ export function createAutonomic({ rng, blinkMeanS = 4, doubleBlinkChance = 0.15 
   };
   newSaccade();
 
+  /**
+   * Breathing, with the rate varying breath to breath.
+   *
+   * It used to be `sin(t * 2*PI * 0.25)`: 15 breaths a minute, which is the right
+   * rate, but the SAME 4.000 s every cycle forever. Measured across 40 s the
+   * period variation was exactly 0.0000 s — a metronome.
+   *
+   * That contradicts a principle this file already states, fifty lines above, as
+   * the reason blinks are Poisson-distributed rather than evenly spaced:
+   * "irregularity is what avoids a mechanical feel". Real effort went into
+   * avoiding regularity in a 165 ms event, while the breath — continuous, always
+   * on screen, and 26 px peak to peak — was left perfectly periodic.
+   *
+   * It matters more since the eyes were given fixations, because the bob became
+   * the only exactly periodic signal left in the system, and a single metronome
+   * among irregular signals is what an eye picks out.
+   *
+   * The rate is redrawn each cycle from a band that stays inside the human
+   * resting range (12.6–17.4 breaths/min), so the motion never settles into a
+   * predictable loop. Phase is advanced incrementally rather than computed from
+   * `t`, since the rate now changes underneath it.
+   */
+  const BREATH_MIN_HZ = 0.21;
+  const BREATH_MAX_HZ = 0.29;
   const breathPhase = rand() * Math.PI * 2;
+  let breathT = breathPhase;
+  let breathHz = BREATH_MIN_HZ + rand() * (BREATH_MAX_HZ - BREATH_MIN_HZ);
 
   function blinkValue(elapsed) {
     if (elapsed < BLINK_DOWN) return 1 - elapsed / BLINK_DOWN;
@@ -120,7 +146,14 @@ export function createAutonomic({ rng, blinkMeanS = 4, doubleBlinkChance = 0.15 
     const px = sacFrom[0] + (sacTarget[0] - sacFrom[0]) * ease + driftX;
     const py = sacFrom[1] + (sacTarget[1] - sacFrom[1]) * ease + driftY;
 
-    const bob = Math.sin(t * 2 * Math.PI * 0.25 + breathPhase);
+    breathT += dt * 2 * Math.PI * breathHz;
+    if (breathT >= Math.PI * 2) {
+      // A whole breath done: wrap the phase and draw the next one's rate. Wrapping
+      // rather than resetting keeps the waveform continuous across the seam.
+      breathT -= Math.PI * 2;
+      breathHz = BREATH_MIN_HZ + rand() * (BREATH_MAX_HZ - BREATH_MIN_HZ);
+    }
+    const bob = Math.sin(breathT);
 
     return { eyeLOpen: open, eyeROpen: open, pupilX: px, pupilY: py, bodyBob: bob };
   }

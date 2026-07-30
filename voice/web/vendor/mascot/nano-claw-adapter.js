@@ -55,6 +55,11 @@ export const NANO_CLAW_RENDERER_METHODS = [
   'getProfile',         //  1
   'destroy',            //  1
   'configure',          //  1
+  // Added by nano-claw after this list was first written. `npm run contract`
+  // caught the drift by re-deriving from their source; this list is only a
+  // convenience for rendererGaps() and is not what the check trusts.
+  'applyEmotion',       //  1 — feature-detected at the call site
+  'applyPresence',      //  1
 ];
 
 /**
@@ -146,6 +151,31 @@ export function createRendererShim(rig, director) {
       rig.disconnectAnalyser();
       rig.stop();
       return true;
+    },
+
+    /**
+     * Emotion and presence, in the vocabulary nano-claw already emits.
+     *
+     * These appeared in nano-claw after this shim was written — its renderer
+     * surface grew from 12 methods to 14 — and `npm run contract` caught it by
+     * re-deriving from their source rather than from a list here. The call site
+     * is feature-detected (`if (talkingCube.applyEmotion)`), so a renderer
+     * without them is not broken; it simply never receives emotion or presence
+     * on a renderer swap, which is a silent loss rather than a crash.
+     *
+     * Booleans, false for a name this build cannot resolve, matching what
+     * `window.VoiceEmotion.set`/`presence` already promise.
+     */
+    applyEmotion(name, intensity) {
+      return director?.emotion(name, { intensity }) === true;
+    },
+    applyPresence(name) {
+      // nano-claw's emotionState.presence is null before the first turn. Treating
+      // that as "no overlay" rather than as an unknown name avoids warning on
+      // every renderer swap, and matches what the command envelope does with
+      // `{ action: 'presence' }` and no name.
+      if (name == null) return director?.clearPresence() === true;
+      return director?.presence(name) === true;
     },
 
     // --- cube-specific, deliberately inert --------------------------------

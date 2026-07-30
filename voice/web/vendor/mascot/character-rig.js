@@ -52,10 +52,55 @@ export function bodyTransform(ch, reduced = false) {
 
 const ORDER = ['tl', 'tr', 'br', 'bl'];
 
+/**
+ * The styles this rig's GEOMETRY depends on, applied to the elements a host
+ * hands in. Not presentation — those are inputs to the maths below.
+ *
+ * The homography maps canvas space to the body's displayed space assuming the
+ * canvas is absolutely positioned at the body's top-left corner and transforms
+ * about `0 0`. Body motion pivots about `stageEl`, and it has to pivot about the
+ * character's FEET or the whole thing rotates around a point in mid-air.
+ *
+ * These used to live only in the harness's own `src/styles.css`, which is not a
+ * JS module and so was never part of what a host vendors. nano-claw copied the
+ * fourteen modules, built its own DOM, and got none of them. Measured in their
+ * running console: the canvas was `position: static`, so instead of overlaying
+ * the character it stacked 908 px BELOW it and made the container 1734 px tall
+ * against an 819 px character; and `transform-origin` was the browser default
+ * 50% 50%, putting the pivot 48 px below the character's feet. The face still
+ * landed correctly, which is exactly why nobody would have caught it — body
+ * language was rotating about empty space and the layout was twice its true
+ * height, both silently.
+ *
+ * A component that documents its CSS requirements is relying on someone reading
+ * a file that is not in the payload. Asserting them costs four lines.
+ * Presentation — how large the character is, whether it is centred, what happens
+ * when the viewport is short — stays entirely the host's business.
+ */
+export function applyMountStyles({ bodyEl, canvasEl, stageEl, calibrationEl = null }) {
+  // Inline so a host stylesheet cannot quietly override a geometric requirement.
+  if (stageEl) {
+    stageEl.style.position = 'relative';   // anchors the absolutely-placed canvas
+    stageEl.style.transformOrigin = '50% 92%';
+  }
+  // `inline` puts the image on a text baseline, adding descender space beneath it
+  // and shifting every measurement taken from its box.
+  if (bodyEl) bodyEl.style.display = 'block';
+  for (const el of [canvasEl, calibrationEl]) {
+    if (!el) continue;
+    el.style.position = 'absolute';
+    el.style.top = '0';
+    el.style.left = '0';
+    el.style.transformOrigin = '0 0';
+  }
+}
+
 export function createRig({ config, bodyEl, canvasEl, stageEl, calibrationEl = null }) {
   const { screen, body } = config;
   let quad = screen.quad;
   let raf = null;
+
+  applyMountStyles({ bodyEl, canvasEl, stageEl, calibrationEl });
 
   // Canvas resolution: the quad's average edge lengths, supersampled so the
   // tapered ink stays crisp after the transform downsamples it.
