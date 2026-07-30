@@ -86,6 +86,31 @@ def validate_delegate_url(url: str, *, allowed_hosts: frozenset[str] | set[str] 
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise DelegateUrlRefused(
             f"delegate URL scheme {parsed.scheme!r} is not http or https")
+
+    # `urlparse().hostname` strips BOTH userinfo and port, which makes it the
+    # right accessor for identifying a host and the wrong one for authorizing a
+    # destination. Checking it alone accepted every one of these (verified, not
+    # supposed) before the 2026-07-30 Codex review:
+    #
+    #   http://user:pass@127.0.0.1:2375/containers/json   → the Docker daemon
+    #   http://evil.com@127.0.0.1/t                       → reads as evil.com
+    #   http://127.0.0.1:99999/t                          → not even a port
+    #
+    # So userinfo and port are checked explicitly, before the host.
+    if parsed.username is not None or parsed.password is not None:
+        # Never legitimate here, and doubly unwanted: it is a credential leak to
+        # whatever host is dialled, and `user@host` reads to a human skimming a
+        # config as though `user` were the destination.
+        raise DelegateUrlRefused("delegate URL must not contain credentials")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        # `.port` is the only thing that parses it. Without touching the
+        # attribute an unparseable port is simply never noticed.
+        raise DelegateUrlRefused(f"delegate URL has an invalid port: {exc}")
+    if port is not None and not (0 < port < 65536):
+        raise DelegateUrlRefused(f"delegate URL port {port} is out of range")
+
     host = (parsed.hostname or "").lower()
     if not host:
         raise DelegateUrlRefused("delegate URL has no host")
@@ -96,6 +121,26 @@ def validate_delegate_url(url: str, *, allowed_hosts: frozenset[str] | set[str] 
             f"delegate host {host!r} is not loopback and not in "
             "NANO_CLAW_DELEGATE_HOSTS")
     return url
+
+
+def safe_url_for_log(url: str) -> str:
+    """`scheme://host[:port]` — never the path, query, or credentials.
+
+    Failure paths log the URL they could not reach, and a delegate URL can carry
+    a capability in its path (riff-builder's is a session id). Logging the whole
+    thing writes that capability to disk on every outage.
+    """
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "(unparseable url)"
+    host = parsed.hostname or "?"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
 
 
 async def call_delegate(
@@ -127,27 +172,29 @@ async def call_delegate(
             follow_redirects=False,
         )
     except Exception as exc:  # connection refused, timeout, DNS, TLS — all the same
-        log.warning("delegate %s unreachable: %s: %s", url, type(exc).__name__, exc)
+        log.warning("delegate %s unreachable: %s: %s", safe_url_for_log(url), type(exc).__name__, exc)
         return DelegateReply(DELEGATE_APOLOGY, ok=False,
                              failure=f"{type(exc).__name__}: {exc}")
 
     status = getattr(response, "status_code", None)
     if status != 200:
         # The status code is the gateway's ONLY failure signal, per the contract.
-        log.warning("delegate %s returned %s", url, status)
+        log.warning("delegate %s returned %s", safe_url_for_log(url), status)
         return DelegateReply(DELEGATE_APOLOGY, ok=False, failure=f"status {status}")
 
     try:
         body = response.json()
     except Exception as exc:
-        log.warning("delegate %s returned unparseable body: %s", url, exc)
+        log.warning("delegate %s returned unparseable body: %s",
+                    safe_url_for_log(url), exc)
         return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="unparseable body")
 
     if not isinstance(body, dict) or not isinstance(body.get("reply"), str):
         # Includes riff-builder's own 502 shape, {"detail": ...}. Without this the
         # turn falls through _process_api_response and the caller hears nothing.
         log.warning("delegate %s returned a body with no string reply: %r",
-                    url, list(body) if isinstance(body, dict) else type(body))
+                    safe_url_for_log(url),
+                    list(body) if isinstance(body, dict) else type(body))
         return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="no reply field")
 
     # `focus` is app-defined and the gateway ignores it. Any `error` key is

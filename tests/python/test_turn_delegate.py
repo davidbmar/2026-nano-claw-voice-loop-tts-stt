@@ -226,3 +226,50 @@ def test_non_http_schemes_and_hostless_urls_are_refused(url):
 def test_the_allowlist_is_case_insensitive_on_the_host():
     url = "https://Builder.Internal/t"
     assert validate_delegate_url(url, allowed_hosts={"builder.internal"}) == url
+
+
+# ── what `.hostname` alone did not see (Codex review, 2026-07-30) ────────────
+#
+# Every URL below was ACCEPTED by the validator as first shipped. They are here
+# as literals rather than as a description because the finding was that the
+# guard checked the wrong attribute, and only concrete URLs prove which
+# attribute is now checked.
+
+@pytest.mark.parametrize("url", [
+    "http://user:pass@127.0.0.1:2375/containers/json",  # the Docker daemon API
+    "http://evil.com@127.0.0.1/t",                      # reads as evil.com
+    "https://attacker@builder.internal/t",              # leaks creds to the host
+    "http://:pass@127.0.0.1/t",                         # password only
+])
+def test_credentials_in_the_url_are_refused(url):
+    with pytest.raises(DelegateUrlRefused, match="credentials"):
+        validate_delegate_url(url, allowed_hosts={"builder.internal"})
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:99999/t",     # out of range
+    "http://127.0.0.1:notaport/t",  # not a number
+    "http://127.0.0.1:-1/t",
+])
+def test_an_unparseable_or_out_of_range_port_is_refused(url):
+    """`.port` is the only thing that parses it. The original guard never
+    touched the attribute, so these were invisible."""
+    with pytest.raises(DelegateUrlRefused):
+        validate_delegate_url(url)
+
+
+def test_a_normal_port_still_works():
+    """The fix must not break the ordinary case — riff-builder is on :8790."""
+    url = "http://127.0.0.1:8790/api/session/abc/turn"
+    assert validate_delegate_url(url) == url
+
+
+def test_the_log_form_drops_the_path_and_credentials():
+    """A delegate URL's path carries a capability (riff-builder's is a session
+    id), and every failure path logs the URL it could not reach."""
+    from voice.turn_delegate import safe_url_for_log
+
+    logged = safe_url_for_log("http://user:pass@127.0.0.1:8790/api/session/s3cr3t/turn")
+    assert logged == "http://127.0.0.1:8790"
+    assert "s3cr3t" not in logged
+    assert "pass" not in logged

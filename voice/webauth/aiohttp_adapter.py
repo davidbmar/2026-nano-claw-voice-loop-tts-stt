@@ -86,6 +86,7 @@ OPERATOR_PATHS = frozenset(
     {
         "/api/phone/config",
         "/api/phone/vad",
+        "/api/voice/delegate",
         "/api/voice/flow",
         "/api/voice/region-model",
     }

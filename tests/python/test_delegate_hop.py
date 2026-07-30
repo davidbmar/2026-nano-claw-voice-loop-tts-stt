@@ -205,3 +205,63 @@ def test_delegate_mode_carries_no_persona():
     persona's system prompt under words the delegate authored."""
     assert FLOW_MODES["delegate"]["profile"] == "none"
     assert FLOW_MODES["delegate"]["scheduler"] is False
+
+
+# ── the operator endpoint ────────────────────────────────────────────────────
+#
+# Auth for /api/voice/delegate is covered automatically: test_operator_auth.py is
+# parametrized over OPERATOR_PATHS, so adding the path there earned it six tests.
+# These cover what it DOES.
+
+def test_setting_a_url_changes_where_new_conversations_go(monkeypatch):
+    from voice.flow_session import set_default_delegate_url
+
+    monkeypatch.delenv("NANO_CLAW_DELEGATE_URL", raising=False)
+    assert default_delegate_url() == ""
+
+    assert set_default_delegate_url("http://127.0.0.1:8790/api/session/x/turn") is True
+    assert default_delegate_url() == "http://127.0.0.1:8790/api/session/x/turn"
+
+
+def test_the_operator_choice_beats_the_environment(monkeypatch):
+    """Same precedence as the flow mode and the region model: a runtime choice
+    overrides the env it was seeded from."""
+    from voice.flow_session import set_default_delegate_url
+
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_URL", "http://127.0.0.1:1111/env")
+    assert default_delegate_url() == "http://127.0.0.1:1111/env"
+
+    set_default_delegate_url("http://127.0.0.1:2222/operator")
+    assert default_delegate_url() == "http://127.0.0.1:2222/operator"
+
+
+def test_clearing_actually_clears_rather_than_revealing_the_env(monkeypatch):
+    """The one that would be a real incident: an operator clears the field, the
+    console shows empty, and the env value quietly rearms the delegate."""
+    from voice.flow_session import set_default_delegate_url
+
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_URL", "http://127.0.0.1:1111/env")
+    set_default_delegate_url("")
+
+    assert default_delegate_url() == "", (
+        "clearing fell back to the environment — the console would show no "
+        "delegate while turns still went to one")
+
+
+def test_a_refused_url_is_rejected_without_changing_anything(monkeypatch):
+    from voice.flow_session import set_default_delegate_url
+
+    monkeypatch.delenv("NANO_CLAW_DELEGATE_HOSTS", raising=False)
+    set_default_delegate_url("http://127.0.0.1:8790/good")
+
+    assert set_default_delegate_url("https://evil.example.com/t") is False
+    assert set_default_delegate_url("http://user:pass@127.0.0.1:2375/") is False
+    assert default_delegate_url() == "http://127.0.0.1:8790/good", (
+        "a refused URL must not clobber the working one")
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_delegate_url():
+    import voice.flow_session as fs
+    yield
+    fs._delegate_url = None

@@ -34,6 +34,7 @@ from voice.flow_session import (
     get_flow_profile,
     get_region_model,
     is_delegate_mode,
+    set_default_delegate_url,
     set_flow_mode,
     set_region_model,
 )
@@ -3134,6 +3135,41 @@ async def region_model_set_handler(request: web.Request) -> web.Response:
     return web.json_response(_region_model_api_payload())
 
 
+def _delegate_api_payload() -> dict:
+    """What the console shows about where delegate turns go."""
+
+    url = default_delegate_url()
+    return {
+        "url": url,
+        "active": is_delegate_mode(),
+        # The console has to be able to explain a refusal without the operator
+        # reading server logs, so the allowlist is reported alongside.
+        "allowed_hosts": sorted(delegate_allowed_hosts()),
+    }
+
+
+async def delegate_get_handler(request: web.Request) -> web.Response:
+    """Report the delegate URL new conversations start with."""
+
+    return web.json_response(_delegate_api_payload())
+
+
+async def delegate_set_handler(request: web.Request) -> web.Response:
+    """Point new conversations at a delegate. Empty string clears it."""
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.Response(status=400, text="bad json")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="bad json")
+    if not set_default_delegate_url(body.get("url", "")):
+        # 400 rather than 500: a refused URL is the operator's input being
+        # rejected, which is a normal answer to give them.
+        return web.Response(status=400, text="delegate URL refused")
+    return web.json_response(_delegate_api_payload())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -3173,6 +3209,8 @@ def create_app(
     app.router.add_get("/api/costs", costs_handler)
     app.router.add_get("/api/voice/flow", flow_get_handler)
     app.router.add_post("/api/voice/flow", flow_set_handler)
+    app.router.add_get("/api/voice/delegate", delegate_get_handler)
+    app.router.add_post("/api/voice/delegate", delegate_set_handler)
     app.router.add_get("/api/voice/region-model", region_model_get_handler)
     app.router.add_post("/api/voice/region-model", region_model_set_handler)
     app.router.add_post("/api/client-log", client_log_handler)

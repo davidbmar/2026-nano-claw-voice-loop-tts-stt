@@ -231,6 +231,11 @@ REGION_MODELS = {
 }
 DEFAULT_REGION_MODEL = "claude-haiku-4-5"
 _region_model: str | None = None
+# None = "nobody has chosen", so fall through to the environment. "" = an
+# operator explicitly cleared it, which must NOT fall back to the env value —
+# clearing has to actually clear, or the console would appear to disarm a
+# delegate that is still armed.
+_delegate_url: str | None = None
 _AVAILABILITY_ERRORS = (
     OSError,
     json.JSONDecodeError,
@@ -321,11 +326,17 @@ def default_delegate_url() -> str:
     pairs one URL with one conversation. This only decides where a connection
     points before anyone says otherwise.
 
+    Precedence is the one this module already uses twice — for the flow mode and
+    for the region model: an operator's runtime choice beats the environment.
+    Per-session state then beats both, which is `resolve_delegate_url`'s job.
+
     An unset or refused value yields "", which leaves delegate mode inert rather
     than dialling something unvetted — the same fail-closed choice as
     `validate_delegate_url` itself.
     """
 
+    if _delegate_url is not None:
+        return _delegate_url
     configured = os.environ.get("NANO_CLAW_DELEGATE_URL", "").strip()
     if not configured:
         return ""
@@ -334,6 +345,31 @@ def default_delegate_url() -> str:
     except DelegateUrlRefused as exc:
         log.warning("NANO_CLAW_DELEGATE_URL refused, delegate mode inert: %s", exc)
         return ""
+
+
+def set_default_delegate_url(url: str) -> bool:
+    """Point new conversations at `url`. "" clears it. False if refused.
+
+    Validated here rather than at dial time so a bad value is rejected while an
+    operator is looking at the answer. Returning False instead of raising keeps
+    the refusal a 400 to the operator, not a 500.
+    """
+
+    global _delegate_url
+    if not isinstance(url, str):
+        return False
+    candidate = url.strip()
+    if candidate:
+        try:
+            candidate = validate_delegate_url(
+                candidate, allowed_hosts=delegate_allowed_hosts())
+        except DelegateUrlRefused as exc:
+            log.warning("delegate URL refused: %s", exc)
+            return False
+    _delegate_url = candidate
+    log.info("Delegate URL set to %s (applies to new conversations)",
+             candidate or "(none)")
+    return True
 
 
 def active_scheduling_domain(mode: str | None = None) -> str | None:
