@@ -1281,6 +1281,84 @@ flowSelect.addEventListener('change', function () {
 // Populate independently on page load; the assistant mode control never waits
 // for the voice WebSocket to open.
 loadFlowConfig();
+
+// ── turn delegate ───────────────────────────────────────────────────────────
+// In delegate mode every turn is answered by another app over HTTP; nano-claw
+// supplies only the voice. The URL is what makes the mode do anything, so the
+// field appears with the mode and hides with it.
+var delegateRow = document.getElementById('delegate-row');
+var delegateUrlInput = document.getElementById('delegate-url');
+var delegateWarning = document.getElementById('delegate-warning');
+
+function showDelegateWarning(message) {
+  if (!delegateWarning) return;
+  delegateWarning.textContent = message || '';
+  delegateWarning.classList.toggle('hidden', !message);
+}
+
+function renderDelegateConfig(config) {
+  if (!delegateRow || !delegateUrlInput) return;
+  delegateRow.classList.toggle('hidden', flowSelect.value !== 'delegate');
+  // Never clobber a URL the operator is mid-way through typing.
+  if (document.activeElement !== delegateUrlInput) {
+    delegateUrlInput.value = (config && config.url) || '';
+  }
+  if (flowSelect.value === 'delegate' && !(config && config.url)) {
+    showDelegateWarning('No app URL set — turns cannot be answered');
+  } else {
+    showDelegateWarning('');
+  }
+}
+
+function loadDelegateConfig() {
+  if (!delegateRow) return Promise.resolve();
+  return fetch('/api/voice/delegate')
+    .then(function (r) {
+      if (!r.ok) throw new Error('delegate load failed');
+      return r.json();
+    })
+    .then(renderDelegateConfig)
+    .catch(function () {
+      showDelegateWarning('Could not load the delegate setting');
+    });
+}
+
+function saveDelegateUrl() {
+  if (!delegateUrlInput) return;
+  var url = delegateUrlInput.value.trim();
+  delegateUrlInput.disabled = true;
+  operatorFetch('/api/voice/delegate', { url: url })
+    .then(function (r) {
+      if (r.status === 400) {
+        // The server refuses non-loopback hosts that are not allowlisted, URLs
+        // carrying credentials, and invalid ports. Say which, rather than
+        // making the operator read server logs.
+        throw new Error(
+          'Refused — must be loopback or an allowed host, with no credentials'
+        );
+      }
+      if (!r.ok) throw new Error('Could not save the app URL');
+      return r.json();
+    })
+    .then(function (config) {
+      delegateUrlInput.disabled = false;
+      renderDelegateConfig(config || {});
+      statusText.textContent = url ? 'Delegate URL updated' : 'Delegate cleared';
+    })
+    .catch(function (err) {
+      delegateUrlInput.disabled = false;
+      showDelegateWarning(err.message);
+    });
+}
+
+if (delegateUrlInput) {
+  delegateUrlInput.addEventListener('change', saveDelegateUrl);
+  flowSelect.addEventListener('change', function () {
+    if (delegateRow) delegateRow.classList.toggle('hidden', flowSelect.value !== 'delegate');
+    if (flowSelect.value === 'delegate') loadDelegateConfig();
+  });
+  loadDelegateConfig();
+}
 var activeRegionModel = '';
 
 function renderRegionModelConfig(config) {

@@ -1495,3 +1495,27 @@ def test_browser_switch_away_from_scheduler_disengages_flow(monkeypatch):
     assert len(client.calls) == 1
     assert client.calls[0][2]["json"]["profile"] == "intelligence"
     assert session._scheduler_flow is not None, "flow is retained for switch-back"
+
+
+def test_the_console_dropdown_matches_the_mode_registry():
+    """The static <select> in index.html and FLOW_MODES are two spellings of one
+    fact, which is this codebase's recurring bug shape — two business-id
+    derivations, two routing-table parsers, two honest-copy lists.
+
+    The page also repopulates itself from /api/voice/flow on load, so a stale
+    option would not fail visibly: it would flash the wrong list, then correct
+    itself, and a mode missing from the HTML would still be missing for anyone
+    whose fetch failed. That silence is why this is asserted rather than trusted.
+    """
+    import re
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[2]
+            / "voice" / "web" / "index.html").read_text()
+    block = re.search(r'<select id="flow-select".*?</select>', html, re.S)
+    assert block, "the mode <select> moved or was renamed"
+    in_html = re.findall(r'<option value="([^"]+)"', block.group(0))
+
+    assert in_html == list(FLOW_MODES), (
+        f"console dropdown {in_html} does not match FLOW_MODES "
+        f"{list(FLOW_MODES)} — add the mode to both, in the same order")

@@ -111,6 +111,7 @@
                   <option value="replicantpm">Replicant PM</option>
                   <option value="scheduler">Plumber Scheduler</option>
                   <option value="lawyer">Lawyer Scheduler</option>
+                  <option value="delegate">Turn Delegate</option>
                 </select>
                 <span id="flow-warning" class="pipe-warning hidden"
                   >Scheduler availability is unavailable</span
@@ -118,6 +119,27 @@
               </span>
             </div>
             <p id="mode-abstract" class="context-hint"></p>
+            <!-- Only shown in delegate mode: in every other mode there is no
+                 destination to name, and a URL box that does nothing is worse
+                 than no box. -->
+            <div class="pipe-row hidden" id="delegate-row">
+              <label
+                for="delegate-url"
+                title="The app whose replies this assistant speaks"
+                >APP URL</label
+              >
+              <span class="pipe-control-stack">
+                <input
+                  id="delegate-url"
+                  type="url"
+                  inputmode="url"
+                  spellcheck="false"
+                  placeholder="http://127.0.0.1:8790/api/session/…/turn"
+                  aria-label="Turn delegate URL"
+                />
+                <span id="delegate-warning" class="pipe-warning hidden"></span>
+              </span>
+            </div>
             <div class="pipe-row">
               <label
                 for="speech-mode-select"
