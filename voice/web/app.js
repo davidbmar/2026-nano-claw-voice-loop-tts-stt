@@ -1360,6 +1360,29 @@ function renderFlowConfig(config) {
 function updateModeAbstract(modeId) {
   if (!modeAbstract) return;
   modeAbstract.textContent = flowModeAbstracts[modeId] || '';
+  reflectModelRelevance(modeId);
+}
+
+// In delegate mode nano-claw runs no model: `_handle_delegate_request` never
+// reads `session.model`, because the app on the other end already chose one.
+// The control still accepted a choice and logged "Model set: …", which is a
+// control that looks live and is not — the same trap as a delegate URL field
+// with nowhere to send.
+function reflectModelRelevance(modeId) {
+  var note = document.getElementById('model-inert-note');
+  var inert = modeId === 'delegate';
+  if (note) note.classList.toggle('hidden', !inert);
+  var select = document.getElementById('model-select');
+  if (!select) return;
+  if (inert) {
+    select.dataset.inertForDelegate = '1';
+    select.disabled = true;
+  } else if (select.dataset.inertForDelegate) {
+    // Only re-enable what THIS disabled; the catalog disables it too when no
+    // model is available, and that decision is not ours to undo.
+    delete select.dataset.inertForDelegate;
+    select.disabled = false;
+  }
 }
 
 function loadFlowConfig() {

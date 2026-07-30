@@ -191,3 +191,48 @@ console.log('voice-ui tests passed');
     );
   }
 }
+
+// ── a control that looks live and is not ────────────────────────────────────
+//
+// In delegate mode nano-claw runs no model: `_handle_delegate_request` never
+// reads `session.model`, because the app answering each turn already chose one.
+// The MODEL control still accepted a choice and logged "Model set: …" — the
+// same trap as a delegate URL field with nowhere to send.
+{
+  const appJs = await readFile(new URL('../voice/web/app.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../voice/web/index.html', import.meta.url), 'utf8');
+
+  assert.ok(
+    appJs.includes('reflectModelRelevance'),
+    'nothing reflects that the model control does not apply in delegate mode',
+  );
+  assert.match(
+    appJs,
+    /reflectModelRelevance[\s\S]{0,400}modeId === 'delegate'/,
+    'the model control must be marked inert for the delegate mode specifically',
+  );
+  assert.ok(
+    html.includes('model-inert-note'),
+    'the console must SAY why the control is disabled, not just grey it out',
+  );
+
+  // It must be called when the mode changes, not only at load — switching modes
+  // is exactly when the answer changes.
+  assert.match(
+    appJs,
+    /function updateModeAbstract\([\s\S]{0,300}reflectModelRelevance\(modeId\)/,
+    'the model control is not re-evaluated when the mode changes',
+  );
+
+  // And it must not fight the catalog, which disables the same control when no
+  // model is available. Re-enabling unconditionally would undo that.
+  // The BRANCH, not just the two strings near each other: a first version of
+  // this matched the `if (inert)` block above and passed while the else-branch
+  // re-enabled unconditionally.
+  assert.match(
+    appJs,
+    /\} else if \(select\.dataset\.inertForDelegate\) \{/,
+    'leaving delegate mode must only re-enable what delegate mode disabled — ' +
+      'the catalog disables the same control when no model is available',
+  );
+}
