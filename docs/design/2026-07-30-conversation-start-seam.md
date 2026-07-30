@@ -198,11 +198,31 @@ consequence of it.
 
 ## Implementation order
 
-1. Gateway-controlled hangup after playback drains — prerequisite, MEDIUM-2.
-2. `_call_routing`, keyed by raw `call_control_id`, TTL'd, cleared on hangup.
-3. `start_conversation()` in `voice/turn_delegate.py`, same bounded controls as
-   `call_delegate`, plus the same-origin rule for the returned URL.
-4. The `call.initiated` hook, concurrent with `answer`.
-5. The phone turn hop, mirroring the browser hop.
-6. riff-builder's `POST /api/delegate/start`, returning a relative
-   `/api/session/<fresh id>/turn` and honouring `conversation_key`.
+1. **TODO** — gateway-controlled hangup after playback drains (MEDIUM-2). Still
+   the blocker: the gateway only issues `answer`, `call.hangup` is an inbound
+   notification, and tearing the WebSocket down truncates the apology mid-word.
+2. **TODO** — `_call_routing`, keyed by raw `call_control_id`, TTL'd, cleared on
+   hangup.
+3. **DONE** (`3cd953e`) — `start_conversation()` in `voice/turn_delegate.py`,
+   same bounded controls as `call_delegate`, plus the same-origin rule.
+4. **TODO** — the `call.initiated` hook, concurrent with `answer`.
+5. **TODO** — the phone turn hop, mirroring the browser hop.
+6. **DONE** (riff-builder `42636e6`) — `POST /api/delegate/start`, returning a
+   relative `/api/session/<fresh id>/turn` and honouring `conversation_key`.
+
+### The two ends are verified against each other
+
+Over real HTTP, nano-claw's own `start_conversation` and `call_delegate` against
+a live riff-builder, 2026-07-30:
+
+- two callers on ONE DID got two conversations — the collision this seam exists
+  to prevent;
+- a redelivered webhook (same `conversation_key`) returned the SAME conversation
+  rather than splitting one caller across two graphs;
+- a withheld caller id was accepted rather than 400'd;
+- a turn came back spoken in 5.9s, writing **0 WAVs** — `speak: false` holds on
+  this path;
+- the turn was attributed `who="owner"` even though the gateway sent
+  `who="caller"`, so voice approval works on a phone builder line.
+
+What remains is entirely the phone transport inside nano-claw: items 1, 2, 4, 5.
