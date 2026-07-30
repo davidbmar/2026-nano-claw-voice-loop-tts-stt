@@ -61,8 +61,16 @@ def _slot_type(name: str, spec: dict) -> str:
     return "text"
 
 
-def build_supervisor_schema(slots: dict) -> dict:
-    """Build the strict structured-output contract for a slot configuration."""
+def build_supervisor_schema(slots: dict, *, exit_name: str = "booked") -> dict:
+    """Build the strict structured-output contract for a slot configuration.
+
+    `exit_name` is the ONE value the supervisor may propose as an exit. It
+    defaults to "booked" so every existing caller is unchanged, but it is a
+    parameter because "booked" is a scheduling word and this runner is not
+    inherently a scheduler: riff-builder authors intake regions whose exit is
+    "classified", and hardcoding the enum meant nano-claw could not run a single
+    one of them.
+    """
 
     candidate_properties: dict[str, dict] = {}
     for name, spec in slots.items():
@@ -99,7 +107,7 @@ def build_supervisor_schema(slots: dict) -> dict:
                 # The structured-outputs validator rejects enum paired with a
                 # union type; anyOf is the supported spelling of "booked or null".
                 "anyOf": [
-                    {"type": "string", "enum": ["booked"]},
+                    {"type": "string", "enum": [exit_name]},
                     {"type": "null"},
                 ],
             },
@@ -141,6 +149,9 @@ class RegionConfig:
     deadline_s: float
     escape_on_provider_failure: bool = True
     suppress_premature_confirmation: bool = True
+    # The single exit this region may take. Defaults to the scheduling word so
+    # every existing domain is unchanged; riff-builder subgoals use "classified".
+    exit_name: str = "booked"
 
 
 @dataclass
@@ -163,7 +174,8 @@ class GoalRegionRunner:
         client=None,
     ) -> None:
         self.config = config
-        self._schema = build_supervisor_schema(config.slots)
+        self._schema = build_supervisor_schema(
+            config.slots, exit_name=config.exit_name)
         self.free_windows = sorted(
             (
                 FreeWindow(_local_wall_time(window.start), _local_wall_time(window.end))
@@ -347,7 +359,11 @@ class GoalRegionRunner:
             {"role": "assistant", "content": reply},
         ])
         return RegionTurn(
-            reply="" if exit_name == "booked" else reply,
+            # Suppressed on a successful exit so the DETERMINISTIC tail speaks
+            # instead of the model's prose. That reasoning is about exiting, not
+            # about scheduling, so it follows the configured exit name — else a
+            # "classified" region would speak both its own prose AND the tail.
+            reply="" if exit_name == self.config.exit_name else reply,
             exit=exit_name,
             slots=dict(self._slots),
             supervisor_ms=supervisor_ms,
@@ -723,7 +739,7 @@ class GoalRegionRunner:
     def _validated_exit(self, candidate, rejected: list[str]) -> str | None:
         if candidate is None:
             return None
-        if candidate != "booked":
+        if candidate != self.config.exit_name:
             rejected.append(f"exit_candidate: unsupported value {candidate!r}")
             return None
         if rejected:
@@ -737,7 +753,7 @@ class GoalRegionRunner:
         if missing:
             rejected.append("exit_candidate: missing required slots: " + ", ".join(missing))
             return None
-        return "booked"
+        return self.config.exit_name
 
 
 def _local_wall_time(value: datetime) -> datetime:

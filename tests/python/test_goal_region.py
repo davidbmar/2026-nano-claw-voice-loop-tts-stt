@@ -849,3 +849,75 @@ def test_structured_payload_tolerates_markdown_fences():
         _structured_payload("no json here")
     with pytest.raises(ValueError):
         _structured_payload("{unterminated")
+
+
+# ── the exit name is configuration, not a scheduling word ────────────────────
+
+def _classify_config(**over):
+    """A region shaped like a riff-builder intake subgoal, not a booking."""
+    base = dict(
+        goal="Classify what the caller needs.",
+        persona="A calm dispatcher.",
+        digest="",
+        slots={"request_details": {"type": "text", "required": True}},
+        escape_phrases=("operator",),
+        max_turns=8,
+        deadline_s=60.0,
+        exit_name="classified",
+    )
+    base.update(over)
+    return RegionConfig(**base)
+
+
+def test_the_default_exit_is_unchanged():
+    """Every existing domain and call site depends on this. The parameter was
+    added with a default precisely so none of them had to change."""
+    from voice.goal_region import RegionConfig as RC
+
+    assert RC(goal="g", persona="p", digest="", slots={}, escape_phrases=(),
+              max_turns=1, deadline_s=1.0).exit_name == "booked"
+    assert build_supervisor_schema({})["properties"]["exit_candidate"]["anyOf"][0][
+        "enum"] == ["booked"]
+
+
+def test_a_classified_region_offers_only_its_own_exit():
+    """riff-builder authors `exit_names: ["classified"]` for every intake
+    subgoal (rb/subgoal.py EXIT_NAMES_ALLOWED). With the enum hardcoded to
+    "booked", the supervisor could not name that exit at all — so nano-claw
+    could not run a single subgoal riff-builder is able to author."""
+    schema = build_supervisor_schema(
+        _classify_config().slots, exit_name="classified")
+
+    assert schema["properties"]["exit_candidate"]["anyOf"][0]["enum"] == [
+        "classified"]
+
+
+def test_the_runner_accepts_its_configured_exit_and_rejects_others():
+    config = _classify_config()
+    runner = GoalRegionRunner(config, ())
+    runner._slots = {"request_details": "burst pipe under the sink"}
+
+    rejected: list[str] = []
+    assert runner._validated_exit("classified", rejected) == "classified"
+    assert rejected == []
+
+    # "booked" is now the WRONG word for this region, and must be refused by the
+    # same mechanism that used to refuse everything except it.
+    rejected = []
+    assert runner._validated_exit("booked", rejected) is None
+    assert rejected and "unsupported value" in rejected[0]
+
+
+def test_a_successful_exit_still_suppresses_the_models_prose():
+    """The reply is blanked on a successful exit so the DETERMINISTIC tail
+    speaks. That reasoning is about exiting, not about scheduling — a second
+    hardcoded "booked" here would have let a classified region speak both its
+    own prose and its tail."""
+    import inspect
+
+    from voice import goal_region
+
+    source = inspect.getsource(goal_region.GoalRegionRunner.turn)
+    assert 'exit_name == self.config.exit_name' in source, (
+        "the reply-suppression check went back to comparing against a literal")
+    assert 'exit_name == "booked"' not in source
