@@ -397,3 +397,93 @@ def test_a_line_speed_does_not_need_the_node_value_to_parse(monkeypatch):
     styled = _bare_call(route("http://h/t", speed=1.3))
 
     assert styled.configured_speed == 1.3
+
+
+# ── the delegate turn must clean up after itself ─────────────────────────────
+#
+# All three of these failed when the delegate branch sat OUTSIDE _stream_reply's
+# try/finally. Each one is a different job that finally does, and skipping it
+# broke the call in a different way.
+
+def _delegate_call(monkeypatch, reply_text, ok=True):
+    from voice.turn_delegate import DelegateReply
+
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.session_id = "p"
+    call.tap = None
+    call.call_id = "c1"
+    call.telnyx_call_id = "v3:c1"
+    call._http = object()
+    call.barge = type("B", (), {"reset": lambda s: None})()
+    call.speaking = False
+    call.interrupted = False
+    call._playback_flush_sent = False
+    call.endpointer = type("E", (), {"reset": lambda s: None})()
+    call.closed = False
+
+    state = {"cue_stopped": False, "spoke": [], "logged": []}
+    call._stop_thinking_cue = lambda: state.__setitem__("cue_stopped", True)
+
+    async def fake_speak(units):
+        state["spoke"].append(units)
+        call._stop_thinking_cue()
+
+    call._speak_sentences = fake_speak
+    call._speech_units = lambda t: [t]
+
+    monkeypatch.setattr(phone.call_log, "emit",
+                        lambda conn, cid, kind, payload, **k:
+                        state["logged"].append((kind, payload)))
+
+    async def fake_delegate(client, url, text, *, who):
+        return DelegateReply(reply_text, ok=ok)
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+    phone._call_routing["v3:c1"] = (route("http://h/t"), 0.0)
+    return call, state
+
+
+def test_a_delegate_turn_releases_the_speaking_flag(monkeypatch):
+    """`self.speaking` is set True before the turn and cleared only in finally.
+    Skipping it left every delegated call stuck speaking after ONE turn."""
+    call, _ = _delegate_call(monkeypatch, "Hello there.")
+
+    asyncio.run(call._stream_reply("hi"))
+
+    assert call.speaking is False
+
+
+def test_an_empty_delegate_reply_still_stops_the_thinking_cue(monkeypatch):
+    """The contract permits an app to have nothing to say. That is not a
+    failure — but the cue must stop, or the caller hears ticking forever for a
+    turn that is already over."""
+    call, state = _delegate_call(monkeypatch, "")
+
+    asyncio.run(call._stream_reply("hi"))
+
+    assert state["spoke"] == [], "nothing should have been synthesized"
+    assert state["cue_stopped"] is True
+    assert call.speaking is False
+
+
+def test_a_delegate_turn_reaches_the_call_review(monkeypatch):
+    """Without the finally, delegated calls left no assistant_turn row at all —
+    a review of the call would show the caller talking to nobody."""
+    call, state = _delegate_call(monkeypatch, "Hello there.")
+
+    asyncio.run(call._stream_reply("hi"))
+
+    turns = [payload for kind, payload in state["logged"] if kind == "assistant_turn"]
+    assert turns, "no assistant_turn was logged for a delegated turn"
+    assert turns[0]["text"] == "Hello there."
+
+
+def test_the_review_does_not_call_a_delegated_turn_our_persona(monkeypatch):
+    """A delegated turn is not this node's persona speaking. Labelling it so
+    misattributes every word to a model that never produced it."""
+    call, state = _delegate_call(monkeypatch, "Hello there.")
+
+    asyncio.run(call._stream_reply("hi"))
+
+    turns = [payload for kind, payload in state["logged"] if kind == "assistant_turn"]
+    assert turns[0]["mode"] == "delegate"

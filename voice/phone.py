@@ -1511,6 +1511,10 @@ class PhoneCall:
         # Which model actually wrote the turn (fallback-aware, from the API's
         # debug payload); requested is present only when a fallback answered.
         turn_model: dict[str, str | None] = {"served": None, "requested": None}
+        # Recorded rather than assumed: a delegated turn is not this node's
+        # persona speaking, and a review that says otherwise misattributes every
+        # word to a model that never produced it.
+        turn_mode = "persona"
         # Streaming prepared speech: set when the final response diverged from
         # the streamed deltas (guard rewrite) — surfaced on the turn event.
         stream_flags = {"mismatch": False}
@@ -1534,28 +1538,40 @@ class PhoneCall:
                         spoken_parts.append(unit_text.strip())
                 yield unit
 
-        # getattr, matching this file's idiom for attributes that may be absent
-        # on a bare-constructed call (see _play_synthesized's _frame_pacer). A
-        # call with no carrier id has no routing entry by definition.
-        delegate_url = routing_for(getattr(self, "telnyx_call_id", ""))
-        if delegate_url:
-            # This call belongs to another app. Everything acoustic stayed here —
-            # mic, VAD, endpointing, STT, TTS, barge-in — and the words come from
-            # there. `call_delegate` has already validated status and shape, so
-            # what returns is safe to speak; a failure is its fixed apology, never
-            # the delegate's own words.
-            reply = await call_delegate(
-                self._http, delegate_url, text, who="caller")
-            record_agent_done()
-            reply_complete = True
-            spoken_parts.append(reply.text)
-            log.info("[phone %s] delegate turn ok=%s (%.1fs)",
-                     self.call_id[:8], reply.ok, time.monotonic() - t0)
-            if reply.text:
-                await self._speak_sentences(self._speech_units(reply.text))
-            return
-
         try:
+            # INSIDE the try, so the finally below runs. It was outside once, and
+            # that skipped all three of its jobs: `self.speaking` stayed True
+            # (set above, cleared only there) so the call broke after one turn,
+            # no assistant_turn row reached the call review, and an empty reply
+            # left the thinking cue ticking with nothing coming.
+            #
+            # getattr, matching this file's idiom for attributes that may be
+            # absent on a bare-constructed call (see _play_synthesized's
+            # _frame_pacer). A call with no carrier id has no routing entry.
+            delegate_url = routing_for(getattr(self, "telnyx_call_id", ""))
+            if delegate_url:
+                # This call belongs to another app. Everything acoustic stayed
+                # here — mic, VAD, endpointing, STT, TTS, barge-in — and the
+                # words come from there. `call_delegate` has already validated
+                # status and shape, so what returns is safe to speak; a failure
+                # is its fixed apology, never the delegate's own words.
+                turn_mode = "delegate"
+                reply = await call_delegate(
+                    self._http, delegate_url, text, who="caller")
+                record_agent_done()
+                reply_complete = True
+                spoken_parts.append(reply.text)
+                log.info("[phone %s] delegate turn ok=%s (%.1fs)",
+                         self.call_id[:8], reply.ok, time.monotonic() - t0)
+                if reply.text:
+                    await self._speak_sentences(self._speech_units(reply.text))
+                else:
+                    # The contract permits an app to have nothing to say. That is
+                    # not a failure, but the cue must still stop — otherwise the
+                    # caller hears ticking forever for a turn that is over.
+                    self._stop_thinking_cue()
+                return
+
             payload: dict = {
                 "message": text,
                 "sessionId": self.session_id,
@@ -1768,7 +1784,7 @@ class PhoneCall:
                     "assistant_turn",
                     {
                         "text": " ".join(spoken_parts),
-                        "mode": "persona",
+                        "mode": turn_mode,
                         "complete": reply_complete,
                         "interrupted": self.interrupted,
                         "model": turn_model["served"],
