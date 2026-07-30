@@ -55,6 +55,25 @@ RB_BUILDER_DIDS="{\"$DID\":{\"business_name\":\"Test Plumbing\",\"industry\":\"p
   "$RB_ROOT/.venv/bin/python" -m uvicorn rb.server:app \
   --host 127.0.0.1 --port "$RB_PORT" > "$RUN/riff-builder.log" 2>&1 &
 
+# Wait for riff-builder before minting: the browser needs a CONVERSATION url,
+# and unlike the phone it has no start seam to get one. Without this the console
+# offers "Turn Delegate" with nowhere to send, and every turn is an apology.
+for _ in $(seq 1 90); do
+  curl -sf -m 2 -o /dev/null "http://127.0.0.1:$RB_PORT/" 2>/dev/null && break
+  sleep 0.5
+done
+BROWSER_SESSION="$(curl -sf -m 15 -X POST "http://127.0.0.1:$RB_PORT/api/session" \
+  -H 'Content-Type: application/json' \
+  -d '{"industry":"plumbing","business_name":"Test Plumbing"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["session_id"])' 2>/dev/null)"
+if [ -z "${BROWSER_SESSION:-}" ]; then
+  echo "could not create a riff-builder session — is :$RB_PORT healthy?" >&2
+  tail -20 "$RUN/riff-builder.log" >&2
+  exit 1
+fi
+BROWSER_DELEGATE="http://127.0.0.1:$RB_PORT/api/session/$BROWSER_SESSION/turn"
+echo "browser conversation: $BROWSER_SESSION"
+
 echo "starting the carrier sink on :$SINK_PORT ..."
 "$NC_ROOT/.venv-test/bin/python" "$RUN/sink.py" > "$RUN/sink.log" 2>&1 &
 
@@ -74,6 +93,7 @@ env VOICE_PORT="$NC_PORT" \
   TELNYX_API_KEY=not-a-real-key \
   NANO_CLAW_PHONE_WEBHOOK_BASE="http://127.0.0.1:$NC_PORT" \
   NANO_CLAW_DELEGATE_STARTS="{\"$DID\":{\"start\":\"http://127.0.0.1:$RB_PORT/api/delegate/start\",\"greeting\":\"Thanks for calling Test Plumbing.\",\"voice\":\"af_heart\"}}" \
+  NANO_CLAW_DELEGATE_URL="$BROWSER_DELEGATE" \
   "$NC_ROOT/.venv-test/bin/python" -m voice > "$RUN/nano-claw.log" 2>&1 &
 
 for _ in $(seq 1 90); do
@@ -100,8 +120,8 @@ echo
 echo "  2. TALK TO IT IN THE BROWSER"
 echo "       open http://127.0.0.1:$NC_PORT/"
 echo "       MODE dropdown -> 'Turn Delegate'"
-echo "       APP URL       -> paste the delegate_url the check above printed,"
-echo "                        or leave blank and it uses this rig's default"
+echo "       APP URL       -> already filled in: this rig minted a conversation"
+echo "                        and pointed the console at it"
 echo "       then hold the mic button and speak. Every reply comes from"
 echo "       riff-builder; nano-claw only supplies the voice."
 echo

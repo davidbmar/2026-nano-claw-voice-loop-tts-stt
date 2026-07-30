@@ -163,6 +163,13 @@ down.
 - **A reply is capped at 32 KB** (~40 minutes of speech) and has C0 control
   characters stripped. Past the cap the caller hears the fixed apology, because
   a reply that long is a fault at the other end rather than a long answer.
+- **The browser has no start seam.** A phone call mints its own conversation
+  through `POST <start_url>`; a browser session cannot, so an operator must
+  obtain a conversation URL by hand and paste it into APP URL.
+  `scripts/try_delegate.sh` does that minting for you, which is how the gap was
+  found — the console offered "Turn Delegate" with nowhere to send, and every
+  turn was an apology. Tolerable because an operator pastes it once; worth
+  closing if browser delegation becomes more than a way to try the seam.
 - **The app cannot supply a greeting.** By design, for now. Doing it safely
   needs byte/duration/TTS-time limits, plain-text enforcement with SSML and
   control-character escaping, and a fixed fallback for every violation.
