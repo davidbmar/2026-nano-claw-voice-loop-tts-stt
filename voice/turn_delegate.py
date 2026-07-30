@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 log = logging.getLogger("nano-claw.delegate")
 
@@ -201,3 +201,143 @@ async def call_delegate(
     # deliberately NOT read: a 200 is a success by contract, and delegate-authored
     # text must never reach TTS.
     return DelegateReply(body["reply"], ok=True)
+
+
+# ── conversation start (contract v0.1) ───────────────────────────────────────
+#
+# A DID is not a conversation — several people can dial one number at once —
+# but the contract pairs one delegate URL with one conversation. So the app
+# hands out a fresh conversation URL per call, and the gateway stays ignorant of
+# what that URL means. Design and review:
+# `docs/design/2026-07-30-conversation-start-seam.md`.
+
+START_TIMEOUT_S = 10.0
+_MAX_START_BODY_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class ConversationStart:
+    """Where this conversation's turns go, or why we could not find out."""
+
+    delegate_url: str
+    ok: bool
+    failure: str | None = None
+
+
+def resolve_returned_url(start_url: str, returned: str) -> str:
+    """Resolve a returned delegate URL against the start URL, or raise.
+
+    The rule is **same origin as the start URL** — identical scheme, host and
+    port — with relative URLs resolved against it.
+
+    An earlier draft said "validate the returned URL against the same host
+    allowlist". Codex review showed that is not enough: the allowlist admits any
+    port on an allowed host and unconditionally admits all of loopback, so an
+    allowlisted app could return `http://127.0.0.1:3001/...` (the Node agent API,
+    which has no auth) or `http://127.0.0.1:8000/...` (the platform, which reads
+    tenant_id and permissions from the request body) and the gateway would POST
+    everything the caller says there, on every turn.
+
+    Same origin closes the class instead of narrowing it: a *response* cannot
+    introduce a destination that *config* did not already authorize. It costs
+    nothing real — an app handing out its own conversation URLs serves them from
+    itself.
+    """
+
+    if not isinstance(returned, str) or not returned.strip():
+        raise DelegateUrlRefused("start response had no delegate_url")
+
+    absolute = urljoin(start_url, returned.strip())
+    start, target = urlparse(start_url), urlparse(absolute)
+
+    # Compare the parsed origin rather than a string prefix: a prefix test would
+    # accept `http://127.0.0.1:8790.evil.com/`.
+    try:
+        same_origin = (
+            start.scheme == target.scheme
+            and (start.hostname or "").lower() == (target.hostname or "").lower()
+            and start.port == target.port
+        )
+    except ValueError as exc:
+        raise DelegateUrlRefused(f"start response URL has an invalid port: {exc}")
+    if not same_origin:
+        raise DelegateUrlRefused(
+            f"start response pointed at {safe_url_for_log(absolute)}, which is "
+            f"not the start origin {safe_url_for_log(start_url)}")
+
+    # Still refuse credentials: same-origin says nothing about userinfo, and the
+    # returned string is attacker-influenced in a way the config value is not.
+    if target.username is not None or target.password is not None:
+        raise DelegateUrlRefused("start response URL must not contain credentials")
+    return absolute
+
+
+async def start_conversation(
+    client,
+    start_url: str,
+    *,
+    conversation_key: str,
+    who: str = "caller",
+    channel: str = "phone",
+    from_: str | None = None,
+    to: str | None = None,
+    timeout: float = START_TIMEOUT_S,
+) -> ConversationStart:
+    """Ask the app for a conversation URL. Never raises.
+
+    `conversation_key` is a stable, call-derived idempotency key. The delegate
+    must return the SAME conversation for the same key, because retries are not
+    hypothetical — Telnyx redelivers webhooks and media streams reconnect, and
+    neither the gateway nor any placement of this call gives exactly-once
+    delivery across workers or restarts. Correctness comes from the delegate
+    being idempotent, not from the gateway managing never to retry.
+    """
+
+    payload: dict = {"who": who, "channel": channel,
+                     "conversation_key": conversation_key}
+    # Absent rather than null when withheld: the contract says the app must
+    # tolerate a missing caller id, and an explicit null invites a delegate to
+    # treat "withheld" as a distinct routing case it then gets wrong.
+    if from_:
+        payload["from"] = from_
+    if to:
+        payload["to"] = to
+
+    try:
+        response = await client.post(
+            start_url, json=payload, timeout=timeout, follow_redirects=False)
+    except Exception as exc:
+        log.warning("conversation start %s unreachable: %s: %s",
+                    safe_url_for_log(start_url), type(exc).__name__, exc)
+        return ConversationStart("", ok=False,
+                                 failure=f"{type(exc).__name__}: {exc}")
+
+    status = getattr(response, "status_code", None)
+    if status != 200:
+        log.warning("conversation start %s returned %s",
+                    safe_url_for_log(start_url), status)
+        return ConversationStart("", ok=False, failure=f"status {status}")
+
+    raw = getattr(response, "content", None)
+    if isinstance(raw, (bytes, bytearray)) and len(raw) > _MAX_START_BODY_BYTES:
+        log.warning("conversation start %s returned %d bytes, over the limit",
+                    safe_url_for_log(start_url), len(raw))
+        return ConversationStart("", ok=False, failure="body too large")
+
+    try:
+        body = response.json()
+    except Exception as exc:
+        log.warning("conversation start %s returned unparseable body: %s",
+                    safe_url_for_log(start_url), exc)
+        return ConversationStart("", ok=False, failure="unparseable body")
+
+    if not isinstance(body, dict):
+        return ConversationStart("", ok=False, failure="body is not an object")
+
+    try:
+        url = resolve_returned_url(start_url, body.get("delegate_url", ""))
+    except DelegateUrlRefused as exc:
+        log.warning("conversation start %s: %s", safe_url_for_log(start_url), exc)
+        return ConversationStart("", ok=False, failure=str(exc))
+
+    return ConversationStart(url, ok=True)
