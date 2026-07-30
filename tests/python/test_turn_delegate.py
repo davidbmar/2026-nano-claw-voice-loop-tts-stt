@@ -273,3 +273,76 @@ def test_the_log_form_drops_the_path_and_credentials():
     assert logged == "http://127.0.0.1:8790"
     assert "s3cr3t" not in logged
     assert "pass" not in logged
+
+
+# ── the reply is untrusted text that reaches TTS on every turn ───────────────
+
+def test_a_reply_cannot_impersonate_the_processing_cue():
+    """`PROCESSING_CUE_SENTINEL` is a plain string compared BY VALUE in
+    `_synthesize_sentence` (phone.py:1931). In raw speech mode a delegate
+    returning it verbatim had its turn played as the gateway's internal chime —
+    and recorded as though words were spoken. Verified reachable before this."""
+    async def exercise():
+        from voice.phone import PROCESSING_CUE_SENTINEL
+
+        client = FakeClient(FakeResponse(body={"reply": PROCESSING_CUE_SENTINEL}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.ok is True
+        assert result.text != PROCESSING_CUE_SENTINEL
+        assert "\x00" not in result.text
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("hello\x00world", "helloworld"),
+    ("bell\x07here", "bellhere"),
+    ("esc\x1b[31mred", "esc[31mred"),
+    ("del\x7fchar", "delchar"),
+])
+def test_control_characters_are_stripped(raw, expected):
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": raw}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+        assert result.text == expected
+
+    asyncio.run(exercise())
+
+
+def test_ordinary_whitespace_survives():
+    """Tabs and newlines are punctuation to a sentence splitter, not control
+    codes to strip — removing them would run sentences together."""
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "one.\ntwo.\tthree."}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+        assert result.text == "one.\ntwo.\tthree."
+
+    asyncio.run(exercise())
+
+
+def test_an_absurdly_long_reply_is_refused_not_spoken():
+    """The start response was capped at 64 KB and the far more frequent turn
+    reply was not — an inconsistency, not a decision. 32 KB is roughly 40
+    minutes of speech, so anything past it is a fault at the other end."""
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "a" * (32 * 1024 + 1)}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.ok is False
+        assert result.text == DELEGATE_APOLOGY
+        assert result.failure == "reply too long"
+
+    asyncio.run(exercise())
+
+
+def test_a_long_but_plausible_reply_is_still_spoken():
+    async def exercise():
+        long_reply = "This is a sentence. " * 200      # ~4 KB
+        client = FakeClient(FakeResponse(body={"reply": long_reply}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.ok is True
+        assert result.text == long_reply
+
+    asyncio.run(exercise())

@@ -41,6 +41,22 @@ DELEGATE_APOLOGY = "Sorry — I couldn't reach the assistant just then. Please t
 # has to be passed per request rather than inherited.
 DELEGATE_TIMEOUT_S = 30.0
 
+# A reply is delegate-authored text that reaches TTS on every turn. The start
+# response is capped at 64 KB; leaving the far more frequent path unbounded was
+# an inconsistency in this module, not a decision. A reply past this is a fault
+# at the other end, not a long answer: 32 KB is roughly 40 minutes of speech.
+_MAX_REPLY_CHARS = 32 * 1024
+
+# C0 controls except tab and newline. Null bytes are the specific hazard —
+# `PROCESSING_CUE_SENTINEL` is "\0nano-claw-processing-cue\0", and in raw speech
+# mode a reply equal to it is compared BY VALUE in `_synthesize_sentence`
+# (phone.py:1931), so a delegate could replace its own turn with the gateway's
+# internal chime and have it recorded as though words were spoken. Stripping
+# controls at the boundary removes that and every neighbouring trick, rather than
+# special-casing one sentinel that may be joined by others.
+_CONTROL_CHARS = {c: None for c in range(0x20) if c not in (0x09, 0x0A)}
+_CONTROL_CHARS[0x7F] = None
+
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _ALWAYS_ALLOWED_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -197,10 +213,16 @@ async def call_delegate(
                     list(body) if isinstance(body, dict) else type(body))
         return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="no reply field")
 
+    text = body["reply"]
+    if len(text) > _MAX_REPLY_CHARS:
+        log.warning("delegate %s returned %d chars, over the %d limit",
+                    safe_url_for_log(url), len(text), _MAX_REPLY_CHARS)
+        return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="reply too long")
+
     # `focus` is app-defined and the gateway ignores it. Any `error` key is
     # deliberately NOT read: a 200 is a success by contract, and delegate-authored
     # text must never reach TTS.
-    return DelegateReply(body["reply"], ok=True)
+    return DelegateReply(text.translate(_CONTROL_CHARS), ok=True)
 
 
 # ── conversation start (contract v0.1) ───────────────────────────────────────
