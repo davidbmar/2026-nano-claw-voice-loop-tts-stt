@@ -108,6 +108,10 @@ DEFAULT_RECORD_NOTICE = "This call may be recorded for quality and training."
 MAX_BUFFERED_INBOUND_FRAMES = 30_000 // FRAME_MS
 FRAME_S = FRAME_MS / 1000.0
 DEFAULT_PHONE_PREBUFFER_MS = 200.0
+# Added to the pacer's own measured surplus before hanging up. Covers what this
+# process cannot observe — network transit to the carrier and its jitter buffer.
+# Long on purpose; see PhoneCall.hangup_after_playback.
+_HANGUP_MARGIN_S = 0.35
 DEFAULT_PHONE_PACE_FACTOR = 1.0
 PROCESSING_CUE_SENTINEL = "\0nano-claw-processing-cue\0"
 THINKING_TICK_INTERVAL_S = 0.5  # cadence of the thinking-cue clock tick
@@ -163,6 +167,23 @@ class FramePacer:
     def now(self) -> float:
         """Read the monotonic clock used by this deadline sequence."""
         return self._clock()
+
+    @property
+    def buffered_s(self) -> float:
+        """Seconds of audio already SENT but not yet DUE — still to be heard.
+
+        `reset` anchors the deadline `prebuffer_ms` in the past so the reply
+        starts with headroom, which means frames go out ahead of wall clock by
+        up to that much. The surplus is therefore `deadline - now`, and it is
+        exactly the audio sitting in the carrier's buffer that the caller has
+        not heard yet.
+
+        Read-only on purpose: `next_deadline` advances the schedule, so asking
+        it how far ahead we are would move the answer.
+        """
+        if self._deadline is None:
+            return 0.0
+        return max(0.0, self._deadline - self._clock())
 
     def next_deadline(self) -> float:
         """Return the next frame's absolute monotonic send deadline."""
@@ -753,6 +774,40 @@ class PhoneCall:
             _flow_domain_id=domain_id,
             _telnyx_call_id=telnyx_call_id,
         )
+
+    async def hangup_after_playback(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        margin_s: float = _HANGUP_MARGIN_S,
+    ) -> bool:
+        """End the call from OUR side, once the caller has heard the last word.
+
+        The gateway had no way to do this. It issues `answer`; `call.hangup` is an
+        inbound notification, and `close()` is local teardown — dropping the media
+        WebSocket leaves the carrier with a half-played buffer and cuts the last
+        syllables off. That is why "speak the apology and end the call" was not
+        implementable before this.
+
+        The wait is computed, not guessed: `buffered_s` is how far ahead of wall
+        clock the pacer sent, which is precisely the audio the carrier still owes
+        the caller. `margin_s` covers what we cannot see from here — network
+        transit and the carrier's own jitter buffer. It errs long deliberately: a
+        late hangup costs a moment of silence, an early one truncates the words we
+        stayed on the line to say.
+        """
+
+        pacer = getattr(self, "_frame_pacer", None)
+        buffered = getattr(pacer, "buffered_s", 0.0) if pacer is not None else 0.0
+        wait_s = max(0.0, buffered) + max(0.0, margin_s)
+        log.info("[phone %s] hangup in %.2fs (%.2fs still buffered)",
+                 self.call_id[:8], wait_s, buffered)
+        await asyncio.sleep(wait_s)
+        # The RAW id, not self.call_id: that one is sanitized for tap paths and
+        # logs, and Telnyx would not recognize it as a call.
+        return await _telnyx_cmd(
+            client, self.telnyx_call_id, "hangup",
+            {"command_id": f"hangup-{self.telnyx_call_id}"})
 
     async def close(self) -> None:
         was_speaking = self.speaking
