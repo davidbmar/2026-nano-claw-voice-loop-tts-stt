@@ -45,6 +45,9 @@ from phone_loopback_test import (  # noqa: E402
     FRAME_SAMPLES, WS_BASE, _encode, env_codec, env_token, synthesize_caller_audio,
 )
 
+# 20 ms per frame. ~400 ms of room tone before each utterance so VAD has
+# something to open on before the first syllable arrives.
+_LEAD_IN_FRAMES = 35
 STT_URL = os.environ.get("STT_SERVICE_URL_HOST", "http://127.0.0.1:8200")
 HTTP_BASE = WS_BASE.replace("wss://", "https://").replace("ws://", "http://")
 
@@ -104,6 +107,15 @@ async def run(script: list[dict], did: str | None, caller: str) -> int:
     frame_bytes = FRAME_SAMPLES if codec == "pcmu" else FRAME_SAMPLES * 2 * 2
     silence_samples = FRAME_SAMPLES if codec == "pcmu" else FRAME_SAMPLES * 2
     silence = _encode(np.zeros(silence_samples, dtype=np.int16), codec)
+    # A real phone line is never digitally silent, and energy VAD tuned for a
+    # line (NANO_CLAW_PHONE_RMS_MIN=70) needs something to sit above. Feeding
+    # exact zeros and then a full-amplitude first syllable is a step function
+    # no caller produces, and the onset was being clipped: "the smoke
+    # detector in the hallway" arrived as "With a snooker catcher". Room tone
+    # is what the carrier would have sent.
+    _rng = np.random.default_rng(1729)
+    room_tone = _encode(
+        (_rng.normal(0, 40, silence_samples)).astype(np.int16), codec)
     call_id = os.environ.get("LOOPBACK_CALL_ID", f"harness-{int(time.time())}")
 
     if did:
@@ -156,6 +168,19 @@ async def run(script: list[dict], did: str | None, caller: str) -> int:
                                             "dtmf": {"digit": step["press"]}})
                     else:
                         print(f"CALLER says {step['say']!r}")
+                        # LEAD-IN SILENCE, or the harness lies to you. Sending
+                        # speech on the first frame after the agent stops gives
+                        # VAD nothing to latch onto, and the opening words are
+                        # swallowed: "the smoke detector in the hallway keeps
+                        # chirping at three in the morning" reached STT as "Keep
+                        # searching at 3-in-1", and the agent was then blamed for
+                        # not understanding a sentence it never received. A real
+                        # caller is always preceded by line noise; this is the
+                        # cheapest way to stop measuring an artefact of the test.
+                        for _ in range(_LEAD_IN_FRAMES):
+                            await ws.send_json({"event": "media", "media": {
+                                "payload": base64.b64encode(room_tone).decode()}})
+                            await asyncio.sleep(0.02)
                         audio = synthesize_caller_audio(step["say"], codec)
                         for i in range(0, len(audio), frame_bytes):
                             await ws.send_json({"event": "media", "media": {
