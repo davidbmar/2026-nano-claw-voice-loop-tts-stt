@@ -573,6 +573,25 @@ def set_vad_mode(mode: str) -> bool:
     return True
 
 
+def phone_end_silence_ms() -> int:
+    """Silence after the caller stops before their turn is treated as over.
+
+    700 ms by default, which is what the Gemini live path this gateway replaced
+    used (RIFF_LIVE_SILENCE_MS=700) — the setting these calls actually worked
+    under, so it is the parity number rather than a guess.
+
+    Dynamic mode used to force 450 ms on the theory that the semantic tail check
+    would rescue anything cut short. That check only fires when a transcript
+    ends MID-THOUGHT. A caller pausing between two complete clauses — "weekdays
+    are good" … "after five o'clock" — reads as finished, so the pause became a
+    turn boundary: one sentence arrived as two turns, and the caller heard the
+    thinking cue while they were still speaking (reported and reproduced from
+    call logs, 2026-07-31). The two settings are now independent — the tail
+    check is a rescue, not a licence to endpoint early.
+    """
+    return _clamped_phone_int("NANO_CLAW_PHONE_END_SILENCE_MS", 700, 200, 3000)
+
+
 def dynamic_endpoint_enabled() -> bool:
     """Two-stage endpointing (NANO_CLAW_PHONE_DYNAMIC_ENDPOINT=1): endpoint
     on a short pause, but if the transcript ends mid-thought ('...tell me
@@ -673,11 +692,13 @@ class PhoneCall:
                 codec=codec,
                 voice=_cfg("NANO_CLAW_PHONE_VOICE", "af_heart"),
             )
-        # Dynamic mode endpoints fast (450 ms) because the semantic tail
-        # check can rescue fragments; fixed mode keeps the safer 700 ms.
+        # The tail check rescues a transcript that ends mid-thought. It is not a
+        # reason to endpoint early, because a caller pausing between two
+        # COMPLETE clauses reads as finished and gets cut off. See
+        # phone_end_silence_ms.
         self.dynamic = dynamic_endpoint_enabled()
         self.endpointer = UtteranceEndpointer(
-            end_silence_ms=450 if self.dynamic else 700,
+            end_silence_ms=phone_end_silence_ms(),
             rate_hz=phone_rate(),
             codec=codec,
         )

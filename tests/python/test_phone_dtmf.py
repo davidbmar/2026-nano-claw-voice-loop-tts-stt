@@ -121,3 +121,44 @@ def test_the_keypress_is_recorded_for_review():
     _press(call, "4")
 
     assert ("dtmf", {"digit": "4"}) in call.tap.events
+
+
+# --- endpointing: a pause is not a turn boundary ---------------------------
+# Reported from a live call 2026-07-31: "I begin to hear the bell as I talk."
+# The thinking cue starting while the caller is still speaking means the
+# endpointer already called their turn over. The transcript agreed — one
+# sentence arrived as two turns ("...weekdays are good" / "after five o'clock").
+
+def test_the_endpoint_silence_matches_the_path_this_replaced():
+    """700 ms is RIFF_LIVE_SILENCE_MS, the setting the Gemini live path used and
+    these calls worked under. Parity is the default, not a guess."""
+    from voice.phone import phone_end_silence_ms
+
+    assert phone_end_silence_ms() == 700
+
+
+def test_an_operator_can_tune_the_endpoint_silence(monkeypatch):
+    from voice.phone import phone_end_silence_ms
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_END_SILENCE_MS", "900")
+    assert phone_end_silence_ms() == 900
+
+
+def test_an_absurd_endpoint_silence_is_clamped_not_obeyed(monkeypatch):
+    """A typo'd zero would end every turn on the first frame of silence; a typo'd
+    minute would hold the line open."""
+    from voice.phone import phone_end_silence_ms
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_END_SILENCE_MS", "0")
+    assert phone_end_silence_ms() == 200
+    monkeypatch.setenv("NANO_CLAW_PHONE_END_SILENCE_MS", "60000")
+    assert phone_end_silence_ms() == 3000
+
+
+def test_dynamic_endpointing_no_longer_shortens_the_pause(monkeypatch):
+    """The tail check is a rescue, not a licence to endpoint early. Enabling it
+    must not change how long a caller may pause."""
+    from voice.phone import phone_end_silence_ms
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "1")
+    assert phone_end_silence_ms() == 700
