@@ -1325,3 +1325,41 @@ def test_removing_the_did_is_what_turns_a_line_off(monkeypatch):
     assert phone.delegate_starts() == {}, (
         "configuration must be re-read per call, or turning a line off would "
         "need a restart and drop every live call to do it")
+
+
+# ── the line's identity does not wait for a round trip ───────────────────────
+# The media stream connects on its own schedule and PhoneCall picks its greeting
+# at construction from route_for(). On 2026-07-31 the stream started 68ms BEFORE
+# the delegate start returned, found no route, and answered a Property
+# Maintenance line with the node's default Space Channel greeting — while the
+# turns that followed WERE delegated, because those look the route up later. The
+# caller heard one business and talked to another.
+
+def test_the_profile_is_available_before_the_delegate_url_is_known():
+    """Which business a DID answers as is local configuration. It must be
+    readable the instant the media stream asks, with no URL yet."""
+    phone._call_routing["cid-1"] = (
+        route("", greeting="Thanks for calling Property Maintenance Desk."), 0.0)
+
+    found = phone.route_for("cid-1")
+
+    assert found is not None
+    assert found.profile.greeting == "Thanks for calling Property Maintenance Desk."
+
+
+def test_no_delegate_url_yet_means_no_delegated_turn_yet():
+    """The claim covers the greeting only. A turn arriving inside that window
+    must not be sent to an empty URL — it falls through exactly as an unrouted
+    call does."""
+    phone._call_routing["cid-2"] = (route("", greeting="Property Maintenance."), 0.0)
+
+    assert not phone.routing_for("cid-2")
+
+
+def test_a_completed_start_upgrades_the_claim_to_a_real_conversation():
+    phone._call_routing["cid-3"] = (route("", greeting="Property Maintenance."), 0.0)
+    phone._call_routing["cid-3"] = (
+        route("/api/delegate/f/s/turn", greeting="Property Maintenance."), 1.0)
+
+    assert phone.routing_for("cid-3") == "/api/delegate/f/s/turn"
+    assert phone.route_for("cid-3").profile.greeting == "Property Maintenance."

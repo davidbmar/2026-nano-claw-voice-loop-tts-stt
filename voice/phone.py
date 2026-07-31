@@ -2474,6 +2474,22 @@ async def incoming_handler(request: web.Request) -> web.Response:
                 # any await, so ordinary webhook redelivery cannot mint twice.
                 # Across workers and restarts it still can, which is what
                 # `conversation_key` is for: the delegate deduplicates.
+                # CLAIM THE LINE'S IDENTITY BEFORE THE ROUND TRIP.
+                #
+                # The media stream connects on its own schedule and PhoneCall
+                # picks its greeting at construction, from route_for(). On
+                # 2026-07-31 the stream started 68ms BEFORE this gather
+                # returned, found no route, and answered a Property Maintenance
+                # line in the node's default Space Channel greeting — while the
+                # turns that followed were delegated correctly, because those
+                # look the route up later. A caller heard one business and
+                # talked to another.
+                #
+                # The profile is local configuration and needs no network; only
+                # `delegate_url` does. So register the profile now with an empty
+                # URL and fill the URL in below. Which business a DID answers as
+                # must never depend on a round trip completing in time.
+                _call_routing[cid] = (DelegateRoute("", profile), time.monotonic())
                 started, _ = await asyncio.gather(
                     start_conversation(
                         client, start_url,
@@ -2492,10 +2508,12 @@ async def incoming_handler(request: web.Request) -> web.Response:
                         DelegateRoute(started.delegate_url, profile), now_routing)
                     log.info("[phone] %s delegated for this call", safe_cid[:16])
                 else:
-                    # No entry means the turn hop finds no delegate and the call
-                    # is handled as it is today. Failing OPEN here rather than
-                    # closed: the alternative is refusing a call outright because
-                    # another service was down.
+                    # Drop the identity claim staked above. No entry means the
+                    # turn hop finds no delegate and the call is handled as it is
+                    # today. Failing OPEN here rather than closed: the
+                    # alternative is refusing a call outright because another
+                    # service was down.
+                    _call_routing.pop(cid, None)
                     log.error("[phone] delegate start failed for %s: %s",
                               safe_cid[:16], started.failure)
     elif event == "call.hangup":
