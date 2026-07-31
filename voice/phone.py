@@ -874,8 +874,26 @@ class PhoneCall:
         """
 
         profile = self._delegate_profile()
-        if profile and profile.greeting:
-            return profile.greeting
+        if profile:
+            # The operator's words first, then the app's opening. The order
+            # matters: the caller learns WHO answered before hearing anything
+            # the app composed, and the operator's sentence is never replaced by
+            # app text — only followed by it.
+            #
+            # Either half may stand alone. An app whose opening already names
+            # the business would be read twice if the operator repeated it, so
+            # an empty `greeting` plus `speak_app_opening` is a supported and
+            # deliberate configuration — not a line that forgot its name.
+            parts = []
+            if profile.greeting:
+                parts.append(profile.greeting)
+            if profile.speak_app_opening:
+                route = getattr(self, "delegate_route", None)
+                opening = (getattr(route, "app_opening", "") or "").strip()
+                if opening:
+                    parts.append(opening)
+            if parts:
+                return " ".join(parts)
         return _cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
 
     async def hangup_after_playback(
@@ -2243,6 +2261,18 @@ class DelegateProfile:
     # the operator's to make on behalf of a business that has not agreed to be
     # recorded.
     record: bool = True
+    # Whether this line may speak the opening the APP returns at start, after
+    # the operator's own greeting.
+    #
+    # Off by default, and that default is the security posture: delegate text
+    # going straight to TTS is an arbitrary-speech capability, which is why the
+    # start exchange refuses an app greeting outright. But a personalized
+    # opening cannot come from static config — "Unit B at 14723 Martell Ave" is
+    # known only after the caller-id lookup — and a line that greets a known
+    # tenant as a stranger is the failure this seam exists to prevent. An
+    # operator opting IN one line they configured is the same trust level as
+    # every other setting in this module.
+    speak_app_opening: bool = False
 
 
 @dataclass(frozen=True)
@@ -2251,10 +2281,14 @@ class DelegateRoute:
 
     delegate_url: str
     profile: DelegateProfile
+    # What the app opened the conversation with, spoken only when the operator
+    # opted this line in. Empty for an unidentified caller, which is ordinary.
+    app_opening: str = ""
 
 
 _PROFILE_KEYS = frozenset(
-    {"start", "greeting", "voice", "speed", "record_notice", "record"})
+    {"start", "greeting", "voice", "speed", "record_notice", "record",
+     "speak_app_opening"})
 
 
 def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
@@ -2298,6 +2332,7 @@ def _parse_delegate_profile(did: str, value) -> DelegateProfile | None:
         speed=speed if 0.0 < speed <= 3.0 else 0.0,
         record_notice=str(value.get("record_notice", "") or "").strip(),
         record=bool(value.get("record", True)),
+        speak_app_opening=bool(value.get("speak_app_opening", False)),
     )
 
 
@@ -2505,7 +2540,9 @@ async def incoming_handler(request: web.Request) -> web.Response:
                         _call_routing.pop(key, None)
                 if started.ok:
                     _call_routing[cid] = (
-                        DelegateRoute(started.delegate_url, profile), now_routing)
+                        DelegateRoute(started.delegate_url, profile,
+                                      app_opening=started.app_opening),
+                        now_routing)
                     log.info("[phone] %s delegated for this call", safe_cid[:16])
                 else:
                     # Drop the identity claim staked above. No entry means the

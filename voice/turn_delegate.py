@@ -46,6 +46,9 @@ DELEGATE_TIMEOUT_S = 30.0
 # an inconsistency in this module, not a decision. A reply past this is a fault
 # at the other end, not a long answer: 32 KB is roughly 40 minutes of speech.
 _MAX_REPLY_CHARS = 32 * 1024
+# A spoken greeting is a sentence or two. The reply cap is far too
+# generous for something a caller hears before they can say anything.
+_MAX_OPENING_CHARS = 1000
 
 # C0 controls except tab and newline. Null bytes are the specific hazard —
 # `PROCESSING_CUE_SENTINEL` is "\0nano-claw-processing-cue\0", and in raw speech
@@ -244,6 +247,11 @@ class ConversationStart:
     delegate_url: str
     ok: bool
     failure: str | None = None
+    # What the app says the conversation opened with. CARRIED, not spoken: only
+    # a line whose operator set `speak_app_opening` will ever voice it. Parsing
+    # it here is not the capability — speaking it is, and that decision lives
+    # with the operator in DelegateProfile.
+    app_opening: str = ""
 
 
 def resolve_returned_url(start_url: str, returned: str) -> str:
@@ -370,4 +378,14 @@ async def start_conversation(
         log.warning("conversation start %s: %s", safe_url_for_log(start_url), exc)
         return ConversationStart("", ok=False, failure=str(exc))
 
-    return ConversationStart(url, ok=True)
+    opening = body.get("greeting")
+    if not isinstance(opening, str):
+        opening = ""
+    if len(opening) > _MAX_OPENING_CHARS:
+        # A greeting is one or two sentences. Anything past this is a fault at
+        # the app's end, not a long hello, and it would be read aloud to a
+        # caller who cannot skip it.
+        log.warning("conversation start %s returned a %d-char opening; dropping it",
+                    safe_url_for_log(start_url), len(opening))
+        opening = ""
+    return ConversationStart(url, ok=True, app_opening=opening.strip())

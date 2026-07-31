@@ -81,6 +81,27 @@ and means "no profile, node defaults".
   `"off"` says nothing.
 
   **It controls the sentence, not the recording** — see `record` below for that.
+- **`speak_app_opening`** (default `false`) lets this line speak the opening the
+  APP returned at start, **after** your greeting — never instead of it.
+
+  Off by default, and that default is the point: delegate text going straight to
+  TTS is an arbitrary-speech capability, which is why the start exchange refuses
+  an app `greeting` outright. Turning it on for one line you configured is the
+  same trust level as every other setting here.
+
+  Use it when the opening cannot be static. A personalized line —
+  "Unit B at 14723 Martell Ave — is that right?" — is only knowable after the
+  app's caller-id lookup, so a static greeting either omits it or contradicts
+  it. On 2026-07-31 a caller heard "press one for a new maintenance request"
+  while the app was asking them to confirm their unit: the greeting and the
+  question came from different places and disagreed.
+
+  Keep your own `greeting` short when you enable it — the business's name is
+  enough, because the app supplies the rest. The opening is capped at 1000
+  characters; anything longer is dropped and logged rather than read aloud to a
+  caller who cannot skip it. An unidentified caller simply produces no opening,
+  and the line speaks your greeting alone.
+
 - **`record`** (default `true`) is whether this line's calls are captured at
   all. `false` means no recording, and therefore **no call review** for that
   line: that is the trade, and it is yours to make on behalf of a business that

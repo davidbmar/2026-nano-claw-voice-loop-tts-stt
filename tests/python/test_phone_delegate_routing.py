@@ -1363,3 +1363,81 @@ def test_a_completed_start_upgrades_the_claim_to_a_real_conversation():
 
     assert phone.routing_for("cid-3") == "/api/delegate/f/s/turn"
     assert phone.route_for("cid-3").profile.greeting == "Property Maintenance."
+
+
+# ── an opted-in line may speak the app's opening ─────────────────────────────
+# The start exchange refuses an app-authored greeting by default, because
+# delegate text going straight to TTS is an arbitrary-speech capability. But a
+# personalized opening cannot come from static config: "Unit B at 14723 Martell
+# Ave" is known only after the caller-id lookup. So the OPERATOR opts a specific
+# line in, which is the same trust level as every other setting here.
+
+def test_a_line_does_not_speak_the_app_opening_by_default():
+    """The capability stays closed unless someone opens it deliberately."""
+    assert DelegateProfile(start_url=START).speak_app_opening is False
+
+
+def test_an_opted_in_line_appends_the_apps_opening():
+    call = object.__new__(phone.PhoneCall)
+    call.delegate_route = DelegateRoute(
+        "/turn",
+        DelegateProfile(start_url=START,
+                        greeting="Thanks for calling Property Maintenance Desk.",
+                        speak_app_opening=True),
+        app_opening="Unit B at 14723 Martell Ave - is that right?",
+    )
+
+    line = call.greeting_line
+
+    assert line.startswith("Thanks for calling Property Maintenance Desk.")
+    assert "Unit B at 14723 Martell Ave" in line
+
+
+def test_a_line_that_did_not_opt_in_speaks_only_the_operators_words():
+    call = object.__new__(phone.PhoneCall)
+    call.delegate_route = DelegateRoute(
+        "/turn",
+        DelegateProfile(start_url=START,
+                        greeting="Thanks for calling Property Maintenance Desk."),
+        app_opening="Unit B at 14723 Martell Ave - is that right?",
+    )
+
+    assert call.greeting_line == "Thanks for calling Property Maintenance Desk."
+
+
+def test_an_opted_in_line_with_no_opening_is_just_the_greeting():
+    """An unidentified caller gets no personalized line; the greeting stands
+    alone rather than trailing whitespace or an empty sentence."""
+    call = object.__new__(phone.PhoneCall)
+    call.delegate_route = DelegateRoute(
+        "/turn",
+        DelegateProfile(start_url=START, greeting="Property Maintenance Desk.",
+                        speak_app_opening=True),
+        app_opening="",
+    )
+
+    assert call.greeting_line == "Property Maintenance Desk."
+
+
+def test_speak_app_opening_is_a_recognised_profile_key(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_DELEGATE_STARTS", json.dumps(
+        {LINE: {"start": START, "greeting": "Hi.", "speak_app_opening": True}}))
+
+    profile = phone.delegate_starts()[LINE]
+
+    assert profile.speak_app_opening is True
+
+
+def test_the_app_opening_can_stand_alone():
+    """An app whose opening already names the business would be read twice if
+    the operator repeated it. Empty `greeting` + `speak_app_opening` is a
+    supported configuration, not a line that forgot its name."""
+    call = object.__new__(phone.PhoneCall)
+    call.delegate_route = DelegateRoute(
+        "/turn",
+        DelegateProfile(start_url=START, greeting="", speak_app_opening=True),
+        app_opening="Thanks for calling Property Maintenance Desk. Unit B?",
+    )
+
+    assert call.greeting_line == (
+        "Thanks for calling Property Maintenance Desk. Unit B?")
