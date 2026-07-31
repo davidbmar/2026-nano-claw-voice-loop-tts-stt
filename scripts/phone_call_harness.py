@@ -24,6 +24,23 @@ Usage:
 A delegated line needs a routing entry, which is normally minted by the
 `call.initiated` webhook. --did posts that webhook first so a delegated line can
 be exercised without a carrier.
+
+WHAT THIS CANNOT MEASURE, and has twice claimed to:
+
+1. TURN LATENCY. End-of-reply detection here is a silence window, and it is not
+   reliable: replies that begin before the window opens, or that the pump misses
+   the tail of, leave it waiting until the node's own 30s idle prompt. It then
+   reports "34s" and an empty transcript for a turn the gateway logged as
+   ok=True in 6s. Take timings from the gateway log
+   (`delegate turn ok=True (Ns)`), which is the real clock.
+
+2. RECOGNITION QUALITY. `synthesize_caller_audio` is TTS, and the node runs
+   neural Silero VAD, which is entitled to doubt a synthetic caller. Use --wav
+   with real speech before believing anything this says about STT.
+
+It IS trustworthy for what it was built for: whether DTMF arrives, whether menus
+route, whether the greeting is the right business, and whether a call reaches
+the state it should. Those are the defects it found, and they are real.
 """
 from __future__ import annotations
 
@@ -141,11 +158,22 @@ async def run(script: list[dict], did: str | None, caller: str) -> int:
                             (data.get("media") or {}).get("payload", "")))
                         last_audio_at[0] = time.monotonic()
 
-            async def quiet_for(seconds: float, timeout: float = 45.0) -> None:
-                """Wait until the agent has been silent for `seconds`."""
+            async def quiet_for(seconds: float, timeout: float = 45.0,
+                                since: float = 0.0) -> None:
+                """Wait until the agent has been silent for `seconds`.
+
+                `since` is when the caller finished, so a reply that BEGINS
+                before we start waiting still counts. The earlier version reset
+                last_audio_at to 0 after sending and then required fresh audio,
+                so a fast reply was invisible and the harness sat until the
+                node's 30s idle prompt — reporting empty replies and 34s turns
+                for a call the gateway logged as ok=True in 6s. The instrument
+                was the defect, twice over.
+                """
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
-                    if last_audio_at[0] and time.monotonic() - last_audio_at[0] >= seconds:
+                    heard_at = last_audio_at[0]
+                    if heard_at > since and time.monotonic() - heard_at >= seconds:
                         return
                     await ws.send_json({"event": "media", "media": {
                         "payload": base64.b64encode(silence).decode()}})
@@ -187,8 +215,8 @@ async def run(script: list[dict], did: str | None, caller: str) -> int:
                                 "payload": base64.b64encode(
                                     audio[i:i + frame_bytes]).decode()}})
                             await asyncio.sleep(0.02)
-                    last_audio_at[0] = 0.0
-                    await quiet_for(1.5)
+                    spoke_at = time.monotonic()
+                    await quiet_for(1.5, since=spoke_at)
                     text = transcribe(take(), rate)
                     if "say that again" in text.lower() or "didn't catch" in text.lower():
                         apologies += 1
