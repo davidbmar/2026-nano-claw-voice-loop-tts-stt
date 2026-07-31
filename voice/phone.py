@@ -1301,6 +1301,45 @@ class PhoneCall:
             )
         asyncio.create_task(self._flush_playback())
 
+    async def inject_dtmf(self, digit: str) -> None:
+        """Feed a keypad digit in as though the caller had said it.
+
+        A digit is not audio, so it never reaches VAD or STT — which is exactly
+        why this line ignored keypresses completely: `call.dtmf.received` had no
+        handler anywhere in this module, and a greeting that says "Press one"
+        was inviting an input the gateway could not receive. A real call on
+        2026-07-31 pressed 1 and nothing happened; speech on the same call
+        worked, which is the signature of this gap rather than a routing bug.
+
+        It enters at `_stream_reply`, the same place a transcript enters, so the
+        delegate sees the digit as ordinary caller text and every locked choice
+        that already accepts "1" keeps working with no flow change.
+
+        A digit arriving DURING speech is a barge-in: a caller who presses a key
+        while the menu is still playing has heard enough. That is the standing
+        operator ruling for DTMF-during-readback, and it is why this stops the
+        current reply rather than queueing behind it.
+        """
+        digit = str(digit or "").strip()
+        if not digit or self.closed:
+            return
+        log.info("[phone %s] dtmf %r", self.call_id[:8], digit)
+        if self.tap:
+            self.tap.event("dtmf", digit=digit)
+        if self.speaking:
+            self._stop_thinking_cue()
+            self.interrupted = True
+            self.speaking = False  # the speak() loop sees this and aborts
+            await self._flush_playback()
+        self._mark_activity()
+        # Unlike audio barge-in there are no frames to re-prime the endpointer
+        # with: the digit IS the whole utterance.
+        if self._turn_task and not self._turn_task.done():
+            self._turn_task.cancel()
+        task = asyncio.create_task(self._stream_reply(digit))
+        self._turn_task = task
+        task.add_done_callback(self._turn_finished)
+
     def _reset_barge_in(self) -> None:
         """Start a reply with empty sustain and inbound comparison windows."""
         self.barge.reset()
@@ -2544,6 +2583,17 @@ async def media_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     )
             elif event == "media" and call:
                 call.feed_media((msg.get("media") or {}).get("payload", ""))
+            elif event == "dtmf" and call:
+                # The carrier sends keypresses down this same socket, beside the
+                # audio. Nothing here read them, so a line whose greeting says
+                # "Press one" could not receive a keypress at all: a real call on
+                # 2026-07-31 pressed 1 and got silence while speech on the same
+                # call worked. riff's live path has always taken DTMF from this
+                # event (riff/phone/server.py), and the shape is the carrier's,
+                # not ours — same event name, same payload key.
+                digit = str((msg.get("dtmf") or {}).get("digit") or "").strip()
+                if digit:
+                    await call.inject_dtmf(digit)
             elif event == "stop":
                 log.info("[phone] media stream stopped")
                 break
