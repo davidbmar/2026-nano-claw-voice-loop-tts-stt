@@ -196,3 +196,48 @@ def test_dashes_become_commas_and_semicolons_keep_their_pause(monkeypatch):
     semi = sp.compile_speech("We shipped it; the numbers look good.")
     assert semi.chunks[0].text == "We shipped it;"
     assert semi.chunks[0].pause_after_ms == sp._pause_table()["semicolon"]
+
+
+# ── an address has to survive a phone speaker ────────────────────────────────
+# Captured through scripts/phone_call_harness.py on 2026-07-31: the line
+# "I've got you in Unit B at 14723 Martell Ave" reached the caller, and Whisper
+# heard it back as "14723 Martell OVE". A house number read as one cardinal and
+# a two-letter suffix read as a word are both wrong for the ONE line a caller is
+# asked to confirm.
+
+def test_a_house_number_is_spoken_as_digits():
+    out, records = normalize_spoken_forms("I've got you at 14723 Martell Ave.")
+    assert "1 4 7 2 3" in out
+    assert any(r.kind == "address" for r in records)
+
+
+def test_a_street_suffix_becomes_a_word():
+    out, _ = normalize_spoken_forms("14723 Martell Ave")
+    assert "Avenue" in out and "Ave " not in out
+
+
+def test_the_street_name_is_left_alone():
+    """Pronunciation of a proper noun belongs to the voice, not to us."""
+    out, _ = normalize_spoken_forms("14723 Martell Ave")
+    assert "Martell" in out
+
+
+def test_a_menu_digit_is_not_an_address():
+    """The anchor is the SUFFIX. Without it a bare number in a sentence must be
+    left alone — these lines are read on every call."""
+    out, records = normalize_spoken_forms("Press 1 for status, or 2 to add an update.")
+    assert out == "Press 1 for status, or 2 to add an update."
+    assert not [r for r in records if r.kind == "address"]
+
+
+def test_a_duration_is_not_an_address():
+    out, records = normalize_spoken_forms("It will take 3 days.")
+    assert not [r for r in records if r.kind == "address"]
+
+
+def test_a_readback_line_carrying_an_address_is_normalized():
+    """The pre-file readback is the other line that must be checkable, and it
+    gets this for free by living at the speech boundary."""
+    out, _ = normalize_spoken_forms(
+        "Request for David Mar at 14723 Martell Ave, San Leandro, CA 94578.")
+    assert "1 4 7 2 3 Martell Avenue" in out

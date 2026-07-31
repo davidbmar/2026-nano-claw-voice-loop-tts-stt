@@ -488,6 +488,41 @@ def _parse_segments(source: str) -> tuple[list[_Segment], str]:
     return merged, _open_tail_raw(source)
 
 
+# Postal abbreviations a TTS engine reads as words. "Ave" comes out "Ove", which
+# is what a caller heard when asked to confirm their own address (captured
+# through the call harness, 2026-07-31).
+_STREET_SUFFIX_WORDS = {
+    "ave": "Avenue", "st": "Street", "rd": "Road", "blvd": "Boulevard",
+    "dr": "Drive", "ln": "Lane", "ct": "Court", "pl": "Place",
+    "hwy": "Highway", "pkwy": "Parkway", "ter": "Terrace", "cir": "Circle",
+}
+# A house number, one to three name words, then a suffix abbreviation. Anchored
+# on the SUFFIX so a bare number in a sentence ("press 1", "for 3 days") is never
+# mistaken for an address — the suffix is what makes it one.
+_STREET_ADDRESS_RE = re.compile(
+    r"\b(\d{3,6})\s+((?:[A-Za-z][\w'’-]*\s+){1,3}?)"
+    r"(" + "|".join(_STREET_SUFFIX_WORDS) + r")\b\.?",
+    re.IGNORECASE,
+)
+
+
+def _render_street_address(match: re.Match[str]) -> str:
+    """Say a street address the way a caller can check it against their door.
+
+    The house number becomes a digit run rather than one cardinal: TTS reads
+    "14723" as "fourteen thousand seven hundred twenty-three", which nobody
+    matches against an address. The suffix becomes a word. The street NAME is
+    left exactly as written — pronunciation there belongs to the voice.
+
+    This lives at the SPEECH boundary, not in the app, so it applies to every
+    line carrying an address — the identity confirmation, the pre-file readback,
+    and anything added later — rather than to whichever template someone
+    remembered to change.
+    """
+    number, name, suffix = match.group(1), match.group(2).strip(), match.group(3)
+    return f"{' '.join(number)} {name} {_STREET_SUFFIX_WORDS[suffix.lower()]}"
+
+
 def normalize_spoken_forms(text: str) -> tuple[str, tuple[NormalizationRecord, ...]]:
     """Render only unambiguous, high-value en-US forms for a TTS engine."""
 
@@ -506,6 +541,13 @@ def normalize_spoken_forms(text: str) -> tuple[str, tuple[NormalizationRecord, .
         ),
         "phone",
         _render_phone,
+        text,
+        records,
+    )
+    text = _recording_sub(
+        _STREET_ADDRESS_RE,
+        "address",
+        _render_street_address,
         text,
         records,
     )

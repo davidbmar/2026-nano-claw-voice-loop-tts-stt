@@ -259,6 +259,12 @@ def test_audio_during_running_turn_replays_as_next_turn():
 
 def test_tail_prime_merges_buffered_continuation(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "1")
+    # This exercises tail-MERGING, not the endpoint threshold, but its audio
+    # fixture is built from silence(450) and so silently depended on dynamic
+    # mode forcing 450 ms. That default is now 700 ms (parity with the Gemini
+    # path — see phone_end_silence_ms), which left this waiting for an endpoint
+    # that never came. Pin the precondition the fixture actually needs.
+    monkeypatch.setenv("NANO_CLAW_PHONE_END_SILENCE_MS", "450")
     monkeypatch.setattr(phone.metrics_db, "bump_call_turns", lambda *args: None)
 
     async def _run():
