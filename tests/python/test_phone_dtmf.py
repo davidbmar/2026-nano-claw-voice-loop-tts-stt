@@ -162,3 +162,60 @@ def test_dynamic_endpointing_no_longer_shortens_the_pause(monkeypatch):
 
     monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "1")
     assert phone_end_silence_ms() == 700
+
+
+# --- a setting that is present, valid, and ignored ---------------------------
+# `.env` said NANO_CLAW_PHONE_STT_SIZE=medium. The node ran `small`, because
+# persisted console settings shadow the environment. Four settings were inert
+# that way, and the STT one silently degraded every call — the investigation
+# went streaming-STT -> neural VAD -> band-limiting before reaching model size,
+# and every wrong turn came from reading a configuration that was not in effect.
+#
+# The boot log named the restored KEYS and never said they disagreed with the
+# environment, so there was nothing to notice.
+
+def test_an_override_that_contradicts_the_environment_is_logged(monkeypatch, caplog):
+    import logging
+
+    from voice import phone
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_STT_SIZE", "medium")
+    monkeypatch.setattr(phone, "_overrides", {"NANO_CLAW_PHONE_STT_SIZE": "small"})
+
+    with caplog.at_level(logging.WARNING, logger="nano-claw.phone"):
+        phone._warn_overridden_env()
+
+    blob = caplog.text
+    assert "NANO_CLAW_PHONE_STT_SIZE" in blob
+    assert "medium" in blob and "small" in blob, (
+        "both values must appear, or the log cannot settle which one is live")
+
+
+def test_an_override_that_agrees_with_the_environment_is_quiet(monkeypatch, caplog):
+    """Only a CONTRADICTION is worth a warning; agreement is noise."""
+    import logging
+
+    from voice import phone
+
+    monkeypatch.setenv("NANO_CLAW_PHONE_STT_SIZE", "small")
+    monkeypatch.setattr(phone, "_overrides", {"NANO_CLAW_PHONE_STT_SIZE": "small"})
+
+    with caplog.at_level(logging.WARNING, logger="nano-claw.phone"):
+        phone._warn_overridden_env()
+
+    assert "NANO_CLAW_PHONE_STT_SIZE" not in caplog.text
+
+
+def test_an_override_with_no_env_counterpart_is_quiet(monkeypatch, caplog):
+    """Setting something the environment never mentioned is not a contradiction."""
+    import logging
+
+    from voice import phone
+
+    monkeypatch.delenv("NANO_CLAW_PHONE_VOICE", raising=False)
+    monkeypatch.setattr(phone, "_overrides", {"NANO_CLAW_PHONE_VOICE": "lux_isabella"})
+
+    with caplog.at_level(logging.WARNING, logger="nano-claw.phone"):
+        phone._warn_overridden_env()
+
+    assert "NANO_CLAW_PHONE_VOICE" not in caplog.text

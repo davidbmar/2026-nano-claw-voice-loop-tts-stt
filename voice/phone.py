@@ -333,6 +333,37 @@ def _load_persisted_overrides() -> None:
             path,
             ", ".join(sorted(k for k in _overrides if k in _SETTINGS_KEYS)),
         )
+    _warn_overridden_env()
+
+
+def _warn_overridden_env() -> None:
+    """Say which environment settings are inert, and what replaced them.
+
+    Persisted console settings win over the environment — deliberately, so a
+    restart keeps the operator's last choice. The trap is that nothing said so.
+    `.env` read NANO_CLAW_PHONE_STT_SIZE=medium while the node transcribed with
+    `small`, and the investigation went streaming-STT -> neural VAD ->
+    band-limiting before reaching model size, every wrong turn taken by reading a
+    configuration that was not in effect (riff B-424).
+
+    Only a CONTRADICTION is logged. An override the environment never mentioned
+    is not a surprise, and one that agrees with it is noise — a warning nobody
+    can act on is how real warnings stop being read.
+    """
+    for name in sorted(_SETTINGS_KEYS):
+        runtime = _overrides.get(name)
+        if runtime is None:
+            continue
+        from_env = os.environ.get(name)
+        if from_env is None or not from_env.strip():
+            continue
+        if from_env.strip() == str(runtime).strip():
+            continue
+        log.warning(
+            "phone setting %s: environment says %r, runtime override is %r "
+            "(the override wins)",
+            name, from_env.strip(), str(runtime).strip(),
+        )
 
 
 def _compose_greeting(base: str, notice: str | None = None) -> str:
