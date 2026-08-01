@@ -170,7 +170,13 @@ test("the scope summary distinguishes nothing-ticked from nothing-uploaded", () 
     assert.match(scopeSummary({ readyCount: 0, selectedCount: 0 }), /Nothing indexed/);
     assert.match(scopeSummary({ readyCount: 3, selectedCount: 3 }), /All 3/);
     assert.match(scopeSummary({ readyCount: 3, selectedCount: 2 }), /2 of 3/);
-    assert.match(scopeSummary(null), /No space selected/);
+});
+
+test("the first-run message says what to do, not just what is missing", () => {
+    // A brand-new customer sees this before anything else; "No space selected"
+    // reports a state and leaves them with nothing to act on.
+    assert.match(scopeSummary(null, false), /Create a space/);
+    assert.match(scopeSummary(null, true), /No space selected/);
 });
 
 test("sizes are readable rather than exact", () => {

@@ -2563,6 +2563,24 @@ input[type="range"]::-moz-range-thumb {
   color: var(--accent);
 }
 
+/* Before the first space exists, creating one is the only thing worth doing,
+   so it takes the prominent treatment and the upload control — which could
+   only refuse — gets out of the way. */
+.documents-panel-empty #space-new-button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #d5dbd9;
+  font-size: 7px;
+}
+
+.documents-panel-empty .documents-actions,
+.documents-panel-empty .documents-header {
+  display: none;
+}
+
 .space-list {
   display: flex;
   flex-direction: column;

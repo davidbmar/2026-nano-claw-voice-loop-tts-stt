@@ -49,8 +49,14 @@ export function formatSize(bytes) {
  * customer can land in, and "0 of 3" alone reads like a bug rather than a
  * choice they made.
  */
-export function scopeSummary(scope) {
-    if (!scope) return "No space selected.";
+export function scopeSummary(scope, hasSpaces) {
+    // The first-run message has to say what to do, not just report a state:
+    // "No space selected" leaves a new customer with nothing to act on.
+    if (!scope) {
+        return hasSpaces === false
+            ? "Create a space, then add the documents you want to talk about."
+            : "No space selected.";
+    }
     const ready = Number(scope.readyCount) || 0;
     const selected = Number(scope.selectedCount) || 0;
     if (ready === 0) return "Nothing indexed yet.";
@@ -258,10 +264,19 @@ export class DocumentsUI {
                 }),
             );
         });
+        // With no spaces yet, the only useful action is creating one — so it
+        // becomes the prominent control and "Add documents", which could
+        // otherwise only answer "create a space first", steps back.
+        const panel = this._element("documents-panel");
+        if (this.spaces.length) panel.classList.remove("documents-panel-empty");
+        else panel.classList.add("documents-panel-empty");
     }
 
     _renderScope(scope) {
-        this._element("documents-scope-summary").textContent = scopeSummary(scope);
+        this._element("documents-scope-summary").textContent = scopeSummary(
+            scope,
+            this.spaces.length > 0,
+        );
     }
 
     async refreshDocuments() {
