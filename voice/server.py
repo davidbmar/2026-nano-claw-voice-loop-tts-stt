@@ -23,7 +23,7 @@ import secrets
 import httpx
 from aiohttp import WSCloseCode, web
 
-from voice import call_log, cost_ledger, metrics_db
+from voice import call_log, cost_ledger, document_routes, metrics_db
 from voice import voice_catalog
 from voice.flow_session import (
     FLOW_MODES,
@@ -3292,7 +3292,13 @@ def create_app(
 ) -> web.Application:
     from voice import phone
 
-    app = web.Application(middlewares=[request_security_middleware])
+    # The default body cap is 1 MB, which no real document clears. Uploads
+    # stream and enforce their own per-file limit (document_routes), so this
+    # ceiling only has to be above that plus multipart framing.
+    app = web.Application(
+        middlewares=[request_security_middleware],
+        client_max_size=document_routes.MAX_UPLOAD_REQUEST_BYTES,
+    )
     adapter = auth_adapter or AiohttpAuthAdapter.from_environment()
     app[AUTH_ADAPTER_KEY] = adapter
     app[HISTORY_RUNTIME_KEY] = _HistoryRuntime()
@@ -3328,6 +3334,7 @@ def create_app(
     app.router.add_delete(
         "/api/conversations/{id}", conversation_delete_handler
     )
+    document_routes.register_document_routes(app)
     # Auth routes must precede the one-segment flat static route below or
     # aiohttp will let that catch public API names as filenames.
     adapter.register_routes(app)
