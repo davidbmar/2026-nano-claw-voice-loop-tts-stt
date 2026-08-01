@@ -1,0 +1,112 @@
+{
+  "version": 2,
+  "id": "pale",
+  "name": "C2-P2",
+  "seed": 11,
+  "rigid": true,
+  "backdrop": "#080808",
+  "body": {
+    "src": "characters/pale/base.webp",
+    "width": 852,
+    "height": 1280,
+    "sizes": "(max-width: 820px) 100vw, calc(100vw - 330px)"
+  },
+  "parts": [
+    {
+      "id": "lensL",
+      "type": "lens",
+      "side": "left",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        328,
+        458
+      ],
+      "radius": 38,
+      "bloomPx": 20,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fff4e0",
+        "mid": "#ffa42b",
+        "rim": "#4a2205"
+      },
+      "mesh": {
+        "bars": 5,
+        "meridians": 0,
+        "color": "#2a1a10",
+        "widthPx": 2
+      }
+    },
+    {
+      "id": "lensR",
+      "type": "lens",
+      "side": "right",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        534,
+        458
+      ],
+      "radius": 38,
+      "bloomPx": 20,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fff4e0",
+        "mid": "#ffa42b",
+        "rim": "#4a2205"
+      },
+      "mesh": {
+        "bars": 5,
+        "meridians": 0,
+        "color": "#2a1a10",
+        "widthPx": 2
+      }
+    },
+    {
+      "id": "head",
+      "type": "head",
+      "z": 2,
+      "follows": "body",
+      "threshold": 34,
+      "canvasScale": 1,
+      "cutY": 850,
+      "collarY": 752,
+      "pivot": [
+        417,
+        764
+      ],
+      "maxRollDeg": 10.0
+    },
+    {
+      "id": "chestLeds",
+      "type": "leds",
+      "z": 8,
+      "follows": "body",
+      "canvasScale": 2,
+      "bloomPx": 26,
+      "lamps": [
+        {
+          "center": [
+            216,
+            1058
+          ],
+          "radius": 11
+        },
+        {
+          "center": [
+            216,
+            1138
+          ],
+          "radius": 11
+        },
+        {
+          "center": [
+            216,
+            1218
+          ],
+          "radius": 11
+        }
+      ]
+    }
+  ]
+}

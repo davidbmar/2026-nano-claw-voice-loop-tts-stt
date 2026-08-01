@@ -1,0 +1,127 @@
+{
+  "version": 2,
+  "id": "rust",
+  "name": "C1-P7",
+  "seed": 23,
+  "rigid": true,
+  "backdrop": "#0a0908",
+  "body": {
+    "src": "characters/rust/base.webp",
+    "width": 1024,
+    "height": 1280,
+    "sizes": "(max-width: 820px) 100vw, calc(100vw - 330px)"
+  },
+  "parts": [
+    {
+      "id": "lensL",
+      "type": "lens",
+      "side": "left",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        400,
+        437
+      ],
+      "radius": 72,
+      "bloomPx": 24,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fff6e6",
+        "mid": "#ff981a",
+        "rim": "#4f2103"
+      },
+      "mesh": {
+        "bars": 9,
+        "meridians": 0,
+        "color": "#241408",
+        "widthPx": 3
+      }
+    },
+    {
+      "id": "lensR",
+      "type": "lens",
+      "side": "right",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        612,
+        437
+      ],
+      "radius": 72,
+      "bloomPx": 24,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fff6e6",
+        "mid": "#ff981a",
+        "rim": "#4f2103"
+      },
+      "mesh": {
+        "bars": 9,
+        "meridians": 0,
+        "color": "#241408",
+        "widthPx": 3
+      }
+    },
+    {
+      "id": "chestLeds",
+      "type": "leds",
+      "z": 8,
+      "follows": "body",
+      "canvasScale": 2,
+      "bloomPx": 26,
+      "lamps": [
+        {
+          "center": [
+            550,
+            1153
+          ],
+          "radius": 9
+        },
+        {
+          "center": [
+            550,
+            1196
+          ],
+          "radius": 9
+        }
+      ]
+    },
+    {
+      "id": "head",
+      "type": "head",
+      "z": 2,
+      "follows": "body",
+      "threshold": 34,
+      "canvasScale": 1,
+      "cutY": 880,
+      "collarY": 780,
+      "pivot": [
+        500,
+        792
+      ],
+      "maxRollDeg": 8.5
+    },
+    {
+      "id": "dish",
+      "type": "antenna",
+      "side": "left",
+      "z": 7,
+      "follows": "head",
+      "dish": true,
+      "bbox": [
+        392,
+        68,
+        248,
+        64
+      ],
+      "pivot": [
+        514,
+        130
+      ],
+      "sign": 1,
+      "maxDeg": 7,
+      "threshold": 30,
+      "canvasScale": 2
+    }
+  ]
+}

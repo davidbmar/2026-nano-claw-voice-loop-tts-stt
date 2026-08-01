@@ -234,8 +234,8 @@ const latencyTts = document.getElementById('latency-tts');
 const latencyOverall = document.getElementById('latency-overall');
 const talkingCubeCanvas = document.getElementById('talking-cube');
 const talkingCubeStatus = document.getElementById('talking-cube-status');
-// The stage wraps the canvas. The mascot mounts its own DOM subtree here rather
-// than drawing into the cube's canvas, so the swap needs the container too.
+// The stage wraps the canvas. Character renderers mount their own DOM subtree
+// here rather than drawing into the cube's canvas, so swaps need the container.
 const talkingCubeStage = document.getElementById('talking-cube-stage');
 const cubeScene = document.getElementById('cube-scene');
 const cubePattern = document.getElementById('cube-pattern');
@@ -496,13 +496,13 @@ var agentAudioSource = null;
 var agentAudioAnalyser = null;
 
 // `let`, not `const`: this binding is the ACTIVE renderer, and the console can
-// swap the cube for the mascot character at runtime. Every downstream call site
+// swap the cube for a character at runtime. Every downstream call site
 // (`talkingCube.pulse(...)` and ~30 others) resolves the binding when it runs,
 // so they all follow the swap without being rewritten.
 //
 // The cube stays the boot-time renderer because its constructor is synchronous.
-// Mounting the mascot requires fetching rig.json and awaiting the character art,
-// so it can only ever happen behind an awaited swap — see switchRenderer().
+// Mounting a character requires fetching its manifest and awaiting its art, so
+// it can only ever happen behind an awaited swap — see switchRenderer().
 let talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
 talkingCube.importProfile(loadedVisualization.profile);
 talkingCube.setPanelOpen(false);
@@ -520,7 +520,9 @@ var activeRendererId = 'cube';
  *  teardown (the mascot documents a measured leak of 14 writes plus a stray
  *  rAF loop per unmount if destroy() is skipped). */
 async function switchRenderer(id) {
-  const next = id === 'mascot' ? 'mascot' : 'cube';
+  const next = ['cube', 'mascot', 'robot-orange', 'robot-pale', 'robot-rust'].includes(id)
+    ? id
+    : 'cube';
   if (next === activeRendererId) return false;
 
   const hadAnalyser = !!agentAudioAnalyser;
@@ -537,6 +539,13 @@ async function switchRenderer(id) {
     // serving a stale mascot module after a deploy.
     const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.17');
     replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
+    talkingCubeCanvas.hidden = true;
+  } else if (next.startsWith('robot-')) {
+    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.17');
+    replacement = await createRobotRenderer(
+      talkingCubeStage || talkingCubeCanvas.parentElement,
+      next.slice('robot-'.length),
+    );
     talkingCubeCanvas.hidden = true;
   } else {
     talkingCubeCanvas.hidden = false;
@@ -589,18 +598,19 @@ if (rendererSelect) {
   });
 
   // Restore the previous choice. Deliberately after first paint and never
-  // awaited at module scope: the cube is already up, so a slow or broken mascot
-  // mount degrades to "console works, wrong renderer" instead of a blank stage.
+  // awaited at module scope: the cube is already up, so a slow or broken
+  // character mount degrades to "console works, wrong renderer" instead of a
+  // blank stage.
   let storedRenderer = null;
   try {
     storedRenderer = localStorage.getItem(RENDERER_STORAGE_KEY);
   } catch {
     /* storage disabled */
   }
-  if (storedRenderer === 'mascot') {
-    rendererSelect.value = 'mascot';
-    switchRenderer('mascot').catch((err) => {
-      console.error('[renderer] could not restore mascot, falling back to cube', err);
+  if (storedRenderer && storedRenderer !== 'cube') {
+    rendererSelect.value = storedRenderer;
+    switchRenderer(storedRenderer).catch((err) => {
+      console.error(`[renderer] could not restore ${storedRenderer}, falling back to cube`, err);
       rendererSelect.value = activeRendererId;
     });
   }
