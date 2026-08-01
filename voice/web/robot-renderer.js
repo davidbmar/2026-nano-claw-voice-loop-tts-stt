@@ -3,7 +3,7 @@
 // adapter supplies nano-claw's renderer contract and the live analyser bridge
 // the rig deliberately does not carry itself.
 
-import { createRobotRig } from './vendor/robot/robot-rig.js?v=0.4.23';
+import { createRobotRig } from './vendor/robot/robot-rig.js?v=0.4.24';
 
 const VENDOR_BASE = new URL('./vendor/robot/', import.meta.url);
 const CHARACTER_IDS = new Set(['orange', 'pale', 'rust']);

@@ -57,7 +57,7 @@ export function createBehavior({ seed = 1 } = {}) {
   function onPulse(strength = 1) {
     glowPop = Math.max(glowPop, 0.5 * clamp01(strength));
     tickSign = -tickSign;
-    tickTarget = 0.025 * tickSign;
+    tickTarget = 0.012 * tickSign;
     tickHold = 0.14;
   }
 
@@ -88,9 +88,9 @@ export function createBehavior({ seed = 1 } = {}) {
     refractory = Math.max(0, refractory - h);
     if (refractory === 0 && level > 0.28 && level > lastLevel + 0.06 && envelope > 0.2) {
       tickSign = -tickSign;
-      // Live-review trajectory: 0.16 -> 0.09 -> 0.05 -> 0.025. Barely-there
-      // punctuation; presence, not performance.
-      tickTarget = 0.025 * tickSign;
+      // Live-review trajectory: 0.16 -> 0.09 -> 0.05 -> 0.025 -> 0.012. At a
+      // 7-degree cap this is under a tenth of a degree — subliminal by design.
+      tickTarget = 0.012 * tickSign;
       tickHold = 0.14;
       refractory = 0.7;
     }
@@ -114,7 +114,7 @@ export function createBehavior({ seed = 1 } = {}) {
         // does, rather than anywhere in a continuous range.
         // Halved and narrowed: closer stops mean successive attitudes differ
         // less — the variance was the complaint, not only the size.
-        const DETENTS = [0, 0.05, 0.07];
+        const DETENTS = [0, 0.025, 0.035];
         const pick = DETENTS[Math.floor(rand() * DETENTS.length)];
         cockTarget = (rand() < 0.5 ? -1 : 1) * pick;
         cockTimer = 2.5 + rand() * 2.5;
