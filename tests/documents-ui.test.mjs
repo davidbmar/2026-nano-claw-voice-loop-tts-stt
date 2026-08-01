@@ -160,7 +160,7 @@ test("the active space is marked, because it is what the phone answers from", ()
     assert.equal(active.getAttribute("aria-pressed"), "true");
     assert.equal(idle.getAttribute("aria-pressed"), "false");
     assert.equal(idle.find("space-item-count").textContent, "1 doc");
-    assert.equal(active.find("space-item-count").textContent, "3 docs");
+    assert.match(active.find("space-item-count").textContent, /3 docs/);
 });
 
 test("the scope summary distinguishes nothing-ticked from nothing-uploaded", () => {
@@ -202,4 +202,21 @@ test("the upload input accepts the formats the server can actually read", async 
     for (const suffix of [".pdf", ".docx", ".txt", ".md"]) {
         assert.ok(accept[1].includes(suffix), `accept is missing ${suffix}`);
     }
+});
+
+test("the active space says so in words, not just in colour", () => {
+    // Colour alone left a tester unsure which space was in use, while the
+    // LOADED line still showed the previous one — so the row states it.
+    const active = createSpaceListItem(
+        fakeDocument,
+        { id: "spc_1", name: "Taxes", documentCount: 4, isActive: true },
+        noopActions,
+    );
+    const idle = createSpaceListItem(
+        fakeDocument,
+        { id: "spc_2", name: "Handbook", documentCount: 1, isActive: false },
+        noopActions,
+    );
+    assert.match(active.find("space-item-count").textContent, /answering from/);
+    assert.doesNotMatch(idle.find("space-item-count").textContent, /answering from/);
 });

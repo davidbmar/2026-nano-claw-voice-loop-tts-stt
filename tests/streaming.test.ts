@@ -5,6 +5,7 @@ import {
   parseAnthropicEvents,
   parseOpenAIEvents,
   OpenAIProvider,
+  OpenRouterProvider,
 } from '../src/providers/base';
 import type { Message, LLMResponse, ToolDefinition } from '../src/types';
 import { Readable } from 'node:stream';
@@ -172,6 +173,22 @@ describe('OpenAIProvider.formatModelName', () => {
     expect(f('gpt-4o-mini')).toBe('gpt-4o-mini');
     expect(f('meta-llama/Llama-3.1-8B-Instruct')).toBe('meta-llama/Llama-3.1-8B-Instruct'); // unknown prefix, untouched
     expect(f('dashscope/qwen-plus')).toBe('qwen-plus');
+  });
+});
+
+describe('OpenRouterProvider.formatModelName', () => {
+  it('strips only the openrouter/ segment, keeping the vendor-qualified slug', () => {
+    const p = new OpenRouterProvider('k');
+    const f = (m: string) => (p as any).formatModelName(m);
+    // Verified against the live API 2026-08-01: sending the catalog id
+    // verbatim returns 400 "not a valid model ID"; the stripped form succeeds.
+    expect(f('openrouter/meta-llama/llama-4-scout')).toBe('meta-llama/llama-4-scout');
+    // A gateway slug whose vendor segment is itself a registered provider name
+    // must keep that segment — "openai/gpt-oss-20b" is the real OpenRouter id.
+    expect(f('openrouter/openai/gpt-oss-20b')).toBe('openai/gpt-oss-20b');
+    // Bare gateway slugs and unknown prefixes pass through untouched.
+    expect(f('meta-llama/llama-4-scout')).toBe('meta-llama/llama-4-scout');
+    expect(f('anthropic/claude-haiku-4-5')).toBe('anthropic/claude-haiku-4-5');
   });
 });
 

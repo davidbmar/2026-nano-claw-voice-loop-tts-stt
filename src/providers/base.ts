@@ -270,6 +270,27 @@ export class OpenRouterProvider extends BaseProvider {
     return 'https://openrouter.ai/api/v1';
   }
 
+  /**
+   * Map a catalog id to an OpenRouter slug.
+   *
+   * OpenRouter is a gateway: its ids are already vendor-qualified
+   * ("meta-llama/llama-4-scout", "anthropic/claude-haiku-4-5",
+   * "openai/gpt-oss-20b"), so the vendor segment is part of the wire format
+   * and must survive. Only nano-claw's own routing prefix is surplus.
+   *
+   * NOTE: this is NOT the same rule as OpenAIProvider.formatModelName (line
+   * ~550), which strips any leading registered-provider name. Reusing that
+   * rule here would rewrite "anthropic/claude-haiku-4-5" to
+   * "claude-haiku-4-5" — not a valid OpenRouter id.
+   *
+   * Strip ONLY our own routing prefix. Anything else — including a bare
+   * gateway slug arriving via the fallthrough in ProviderManager.detectProvider
+   * — is already in OpenRouter's wire format and passes through untouched.
+   */
+  protected formatModelName(model: string): string {
+    return model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
+  }
+
   async complete(
     messages: Message[],
     model: string,

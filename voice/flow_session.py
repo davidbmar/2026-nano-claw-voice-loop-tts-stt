@@ -84,7 +84,8 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         "scheduler": False,
         "abstract": (
             "Answers from ingested documents with citations; deep strategy "
-            "analysis on request. Currently loaded: the Owning the Demand playbook."
+            "analysis on request. Answers come from whichever documents are "
+            "ticked in the Documents panel."
         ),
     },
     "riff": {

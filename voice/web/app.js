@@ -12,7 +12,7 @@ import {
   inferInboundEmotion,
 } from './emotion-layer.js';
 import { createAuthHistoryUI } from './auth.js';
-import { DocumentsUI } from './documents.js?v=0.4.28';
+import { DocumentsUI } from './documents.js?v=0.4.29';
 import { Pcm16AudioPlayer } from './ws-audio-player.js';
 
 ('use strict');
@@ -538,11 +538,11 @@ async function switchRenderer(id) {
     // Versioned like every other asset in index.html. A dynamic import is
     // cached by URL independently of app.js, so without this the browser keeps
     // serving a stale mascot module after a deploy.
-    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.28');
+    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.29');
     replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
     talkingCubeCanvas.hidden = true;
   } else if (next.startsWith('robot-')) {
-    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.28');
+    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.29');
     replacement = await createRobotRenderer(
       talkingCubeStage || talkingCubeCanvas.parentElement,
       next.slice('robot-'.length),
@@ -3140,6 +3140,10 @@ function reconnectForIdentityChange() {
 // showing it as an empty list would read as a bug instead.
 function renderLoadedScope(scope) {
   if (!contextCollections || !scope || typeof scope !== 'object') return;
+  // When a document space is driving scope, the panel already renders the
+  // document TITLES. Letting this overwrite them with raw collection ids after
+  // every turn would undo the readable version.
+  if (documentsPanel && documentsPanel.spaces && documentsPanel.spaces.length) return;
   if (scope.mode === 'none') {
     contextCollections.textContent = 'none';
     return;
@@ -4040,6 +4044,19 @@ try {
     operatorHeaders: function () {
       var secret = operatorSecret(false);
       return secret ? { 'X-NC-Auth': '1', 'X-NC-Operator': secret } : { 'X-NC-Auth': '1' };
+    },
+    // Keep LOADED honest the instant scope changes, naming the documents
+    // rather than echoing a collection id nobody can read.
+    onScopeChange: function (scope, docs) {
+      if (!contextCollections) return;
+      if (!scope || !scope.readyCount) {
+        contextCollections.textContent = 'none';
+        return;
+      }
+      var ticked = (docs || []).filter(function (d) { return d.selected && d.status === 'ready'; });
+      contextCollections.textContent = ticked.length
+        ? ticked.map(function (d) { return d.title; }).join(', ')
+        : 'none';
     },
   });
   documentsPanel.refresh().catch(function () {});

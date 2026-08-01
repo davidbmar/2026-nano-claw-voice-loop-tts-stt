@@ -77,3 +77,8 @@ nohup.out
 # days in the past (2026-07-27).
 scripts/lawyer_eval/availability.json
 scripts/lawyer_eval/ground_truth.json
+
+# Never commit env backups — a git add -A once swept one of these into a
+# commit and only GitHub push protection stopped it reaching the remote.
+.env.bak*
+.env.backup*

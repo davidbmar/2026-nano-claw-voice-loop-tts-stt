@@ -143,7 +143,10 @@ export function createSpaceListItem(documentRef, space, actions) {
     const count = documentRef.createElement("span");
     count.className = "space-item-count";
     const total = Number(space.documentCount) || 0;
-    count.textContent = total === 1 ? "1 doc" : total + " docs";
+    // Say "answering from" outright. Colour alone left people unsure which
+    // space the assistant was actually using.
+    count.textContent = (space.isActive ? "answering from · " : "")
+        + (total === 1 ? "1 doc" : total + " docs");
     item.appendChild(count);
 
     item.addEventListener("click", function () {
@@ -161,8 +164,12 @@ export class DocumentsUI {
         // retries, so this module never learns how that secret is stored.
         this.operatorHeaders = config.operatorHeaders;
         this.window = config.window || null;
+        // Told whenever the scope changes so the LOADED line can follow a
+        // space switch immediately rather than at the next turn.
+        this.onScopeChange = config.onScopeChange || null;
         this.elements = {};
         this.spaces = [];
+        this.documents = [];
         this.activeSpaceId = null;
         this.showTrashed = false;
         this.destroyed = false;
@@ -252,6 +259,8 @@ export class DocumentsUI {
         this._renderSpaces();
         this._renderScope(data.scope);
         await this.refreshDocuments();
+        // Documents are known only now, so re-render with their titles.
+        this._renderScope(data.scope);
     }
 
     _renderSpaces() {
@@ -277,6 +286,13 @@ export class DocumentsUI {
             scope,
             this.spaces.length > 0,
         );
+        // LOADED has to change the moment you switch spaces. It used to wait
+        // for the next agent reply, so after switching it kept showing the
+        // PREVIOUS space — the exact "LOADED is lying" problem this panel was
+        // built to end, in a new form.
+        if (this.onScopeChange) {
+            this.onScopeChange(scope, this.documents);
+        }
     }
 
     async refreshDocuments() {
@@ -295,6 +311,7 @@ export class DocumentsUI {
         const list = this._element("documents-list");
         list.replaceChildren();
         const documents = Array.isArray(data.documents) ? data.documents : [];
+        this.documents = documents;
         documents.forEach((doc) => {
             list.appendChild(
                 createDocumentListItem(this.document, doc, {

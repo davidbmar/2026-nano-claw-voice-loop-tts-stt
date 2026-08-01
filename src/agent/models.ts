@@ -10,7 +10,18 @@ export const MODEL_CATALOG: CatalogModel[] = [
   { id: 'gemini/gemini-flash-lite-latest', label: 'Gemini Flash-Lite (fast/cheap)', provider: 'gemini' },
   { id: 'gemini/gemini-flash-latest', label: 'Gemini Flash', provider: 'gemini' },
   { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', provider: 'deepseek' },
-  { id: 'groq/llama-3.3-70b-versatile', label: 'Groq Llama 3.3 70B', provider: 'groq' },
+  // Labels name the host only for open-weight models, which several providers
+  // serve — "(Groq)" / "(OpenRouter)" is the disambiguator, not decoration.
+  // Vendor-locked models (Claude, Gemini, GPT, DeepSeek) carry it in the name.
+  { id: 'groq/llama-3.3-70b-versatile', label: 'Llama 3.3 70B (Groq)', provider: 'groq' },
+  // Gateway slug is vendor-qualified ("meta-llama/llama-4-scout"), so this id
+  // carries two slashes — OpenRouterProvider.formatModelName must strip only
+  // the leading "openrouter/" segment and leave the vendor prefix intact.
+  {
+    id: 'openrouter/meta-llama/llama-4-scout',
+    label: 'Llama 4 Scout (OpenRouter)',
+    provider: 'openrouter',
+  },
   { id: 'dashscope/qwen-plus', label: 'Qwen Plus (Alibaba)', provider: 'dashscope' },
   { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini', provider: 'openai' },
   // Local Ollama on the Mac host (Metal), reached via host.docker.internal.
