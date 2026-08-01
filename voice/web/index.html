@@ -7,8 +7,8 @@
     <meta name="theme-color" content="#050606" />
     <meta name="description" content="HYPERRIFF realtime voice agent console" />
     <title>HYPERRIFF voice console</title>
-    <link rel="stylesheet" href="styles.css?v=0.4.25" />
-    <link rel="modulepreload" href="talking-cube.js?v=0.4.25" />
+    <link rel="stylesheet" href="styles.css?v=0.4.26" />
+    <link rel="modulepreload" href="talking-cube.js?v=0.4.26" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -22,7 +22,7 @@
                  runtime. Hardcoding it here rotted badly — the label read
                  "Version 0.4.7" while the text read "v0.4.16" — so keep both in
                  step with APP_VERSION when bumping, or trust the API value. -->
-            <small id="app-version" class="brand-version" aria-label="Version 0.4.25">v0.4.25</small>
+            <small id="app-version" class="brand-version" aria-label="Version 0.4.26">v0.4.26</small>
           </span>
           <small class="brand-subtitle">VOICE CONSOLE</small>
         </span>
@@ -164,10 +164,45 @@
               <span id="context-collections" class="metric-value">–</span>
             </div>
             <p id="context-hint" class="context-hint">
-              The agent answers from the loaded knowledge. Switching by voice —
-              “load the riff design”, “switch to the nano-claw code”, “what’s
-              loaded?” — arrives with session scoping (task 065).
+              The agent answers from what is loaded. Switch by voice at any
+              time — “what’s available”, “load the riff design”, “what’s
+              loaded?” — for the rest of this conversation.
             </p>
+          </section>
+
+          <section
+            id="documents-panel"
+            class="console-section"
+            aria-labelledby="documents-heading"
+          >
+            <h2 id="documents-heading" class="console-section-title">Documents</h2>
+            <div class="space-row">
+              <div id="space-list" class="space-list"></div>
+              <button id="space-new-button" type="button" class="tool-btn">
+                New space
+              </button>
+            </div>
+            <div class="documents-header">
+              <span id="documents-space-name" class="documents-space-name"></span>
+              <button id="documents-trash-toggle" type="button" class="documents-trash-toggle">
+                Show deleted
+              </button>
+            </div>
+            <div id="documents-list" class="documents-list"></div>
+            <p id="documents-status" class="documents-status" role="status"></p>
+            <div class="documents-actions">
+              <button id="documents-upload-button" type="button" class="tool-btn">
+                Add documents
+              </button>
+              <input
+                id="documents-file-input"
+                type="file"
+                multiple
+                accept=".pdf,.docx,.txt,.md"
+                hidden
+              />
+            </div>
+            <p id="documents-scope-summary" class="context-hint"></p>
           </section>
 
           <section
@@ -896,11 +931,11 @@
       </div>
     </div>
 
-    <script src="phone-banner.js?v=0.4.25"></script>
-    <script src="phone-vad.js?v=0.4.25"></script>
-    <script src="voice-ui.js?v=0.4.25"></script>
-    <script src="barge-in.js?v=0.4.25"></script>
-    <script src="pipeline.js?v=0.4.25"></script>
-    <script type="module" src="app.js?v=0.4.25"></script>
+    <script src="phone-banner.js?v=0.4.26"></script>
+    <script src="phone-vad.js?v=0.4.26"></script>
+    <script src="voice-ui.js?v=0.4.26"></script>
+    <script src="barge-in.js?v=0.4.26"></script>
+    <script src="pipeline.js?v=0.4.26"></script>
+    <script type="module" src="app.js?v=0.4.26"></script>
   </body>
 </html>
