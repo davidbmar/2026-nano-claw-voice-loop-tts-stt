@@ -34,6 +34,72 @@ function createLiveRegion(container) {
 }
 
 /**
+ * The stage treatment: meet the robot close, then the camera pulls back.
+ *
+ * The portrait at natural size fills the whole voice field — striking for a
+ * beat, oppressive as a resting state. So selection plays a camera move: the
+ * face arrives near-full-bleed, holds a moment, and pans/zooms out into a
+ * framed composition — a warm halo behind the head, the bust dissolving into
+ * the console's dark floor. The end state is the poster; the intro is why the
+ * poster makes sense.
+ *
+ * All of this is presentation, so it lives here in the adapter. The rig stays
+ * neutral and paints the same pixels regardless of how the camera holds them.
+ */
+function buildCinematicFrame(container) {
+  const frame = document.createElement('div');
+  frame.style.cssText =
+    'position:absolute;inset:0;overflow:hidden;display:flex;' +
+    'align-items:center;justify-content:center;pointer-events:none;';
+
+  const halo = document.createElement('div');
+  halo.style.cssText =
+    'position:absolute;left:50%;top:42%;width:74%;aspect-ratio:1;' +
+    'transform:translate(-50%,-50%);border-radius:50%;opacity:0;' +
+    'transition:opacity 1800ms ease 900ms;' +
+    'background:radial-gradient(circle, rgba(255,158,32,0.11) 0%, ' +
+    'rgba(255,158,32,0.05) 42%, rgba(0,0,0,0) 70%);';
+
+  const camera = document.createElement('div');
+  camera.style.cssText =
+    'position:relative;width:min(74%, 560px);will-change:transform;' +
+    '-webkit-mask-image:linear-gradient(to bottom, black 80%, transparent 99%);' +
+    'mask-image:linear-gradient(to bottom, black 80%, transparent 99%);';
+
+  frame.append(halo, camera);
+  container.appendChild(frame);
+  return { frame, halo, camera };
+}
+
+/** Close-up on the face, drifted slightly off-axis so the pull-back reads as a
+ *  pan rather than a plain zoom. */
+const CAMERA_FROM = 'translateX(-4%) translateY(16%) scale(1.85)';
+/** The resting composition: pulled back, a touch high in the frame. */
+const CAMERA_TO = 'translateX(0) translateY(-2%) scale(0.78)';
+
+function playIntro({ halo, camera }) {
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (reduced) {
+    // No camera move: land directly in the resting composition.
+    camera.style.transform = CAMERA_TO;
+    halo.style.transition = 'none';
+    halo.style.opacity = '1';
+    return;
+  }
+  camera.style.transform = CAMERA_FROM;
+  // Double rAF so the close-up actually paints before the transition arms —
+  // otherwise the browser coalesces both writes and the move never happens.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      camera.style.transition =
+        'transform 3400ms cubic-bezier(0.19, 0.6, 0.22, 1) 650ms';
+      camera.style.transform = CAMERA_TO;
+      halo.style.opacity = '1';
+    });
+  });
+}
+
+/**
  * Mount a robot and return an object answering nano-claw's renderer contract.
  *
  * @param {HTMLElement} container element the character is mounted into
@@ -47,8 +113,10 @@ export async function createRobotRenderer(container, characterId) {
   }
 
   const manifestUrl = VENDOR_BASE + `characters/${characterId}/character.json`;
-  const rig = await createRobotRig({ container, manifestUrl, resolveAsset });
+  const stage = buildCinematicFrame(container);
+  const rig = await createRobotRig({ container: stage.camera, manifestUrl, resolveAsset });
   rig.start();
+  playIntro(stage);
   // Presence is the host's business (nano-claw drives it from pipeline state),
   // but the character must not sit in its boot pose waiting for the first
   // event — the console can be idle for a long time before anyone speaks.
@@ -162,6 +230,7 @@ export async function createRobotRenderer(container, characterId) {
         shim.destroy();
       } finally {
         liveRegion.remove();
+        stage.frame.remove();
       }
       return true;
     },

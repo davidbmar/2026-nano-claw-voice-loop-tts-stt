@@ -73,6 +73,14 @@ function createMount() {
   // `inline` puts the image on a text baseline, adding descender space beneath
   // it and shifting every measurement taken from its box.
   bodyEl.style.display = 'block';
+  // Constrained to the CONTAINER, never the image's natural size. The harness
+  // happened to get this from its stylesheet, so the factory looked correct
+  // there and rendered the portrait at a full 1024px inside any host that
+  // vendors these modules — the first host mounted it into a 560px camera frame
+  // and got a robot the size of the viewport, cropped at both ends. Geometry
+  // the layout depends on has to live here, not in CSS a host never loads.
+  bodyEl.style.width = '100%';
+  bodyEl.style.height = 'auto';
 
   // Parts live in a flat sibling layer, NOT nested under the head element.
   // A transformed element establishes a stacking context, so a lens nested
