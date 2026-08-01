@@ -49,6 +49,23 @@ export function createBehavior({ seed = 1 } = {}) {
   let cock = 0;
   let cockTimer = 0;
 
+  // --- wandering gaze --------------------------------------------------------
+  // Every minute or two the lenses take a real look at something else — a
+  // substantial glance held under a second, then back. The autonomic layer's
+  // micro-saccades keep the eyes alive up close; this is the occasional visible
+  // movement that reads across the room. Mechanical accent throughout: quick
+  // constant-rate glance out, dead hold, return.
+  // Two moves in the repertoire: a quick GLANCE (out, hold, back) and a slow
+  // SCAN — the gaze sweeps from one side to the other at reading pace, the way
+  // a camera head surveys a room. Mostly horizontal, occasionally vertical.
+  let wanderTimer = 45 + rand() * 75;   // first move inside ~2 minutes
+  let wanderHold = 0;
+  let wanderPhase = null;               // null | 'glance' | 'toStart' | 'sweep' | 'home'
+  let wanderTX = 0;
+  let wanderTY = 0;
+  let wanderX = 0;
+  let wanderY = 0;
+
   // --- accents ---------------------------------------------------------------
   let glowPop = 0;       // brief lens flare, from pulse() or an emotion change
   let flick = 0;         // antenna impulse, decays fast
@@ -129,6 +146,48 @@ export function createBehavior({ seed = 1 } = {}) {
     const step = 0.6 * h;
     cock += Math.abs(dc) <= step ? dc : Math.sign(dc) * step;
 
+    // Wandering gaze.
+    wanderTimer -= h;
+    if (wanderTimer <= 0 && wanderPhase === null) {
+      wanderTimer = 60 + rand() * 60;   // the requested every-1-2-minutes
+      if (rand() < 0.5) {
+        wanderPhase = 'glance';
+        wanderTX = (rand() < 0.5 ? -1 : 1) * (0.3 + rand() * 0.35);
+        wanderTY = (rand() - 0.4) * 0.4;
+        wanderHold = 0.8 + rand() * 0.8;
+      } else {
+        // Scan: move quickly to one edge, then sweep slowly to the other.
+        wanderPhase = 'toStart';
+        const horizontal = rand() < 0.7;
+        const sign = rand() < 0.5 ? -1 : 1;
+        wanderTX = horizontal ? sign * 0.45 : 0;
+        wanderTY = horizontal ? 0 : sign * 0.3;
+      }
+    }
+    if (wanderPhase === 'glance' && wanderHold > 0) {
+      wanderHold -= h;
+      if (wanderHold <= 0) { wanderTX = 0; wanderTY = 0; wanderPhase = 'home'; }
+    }
+    // The sweep is the slow phase; every other move is a quick reposition.
+    const wStep = (wanderPhase === 'sweep' ? 0.3 : 2.5) * h;
+    const dwx = wanderTX - wanderX;
+    wanderX += Math.abs(dwx) <= wStep ? dwx : Math.sign(dwx) * wStep;
+    const dwy = wanderTY - wanderY;
+    wanderY += Math.abs(dwy) <= wStep ? dwy : Math.sign(dwy) * wStep;
+    if (wanderX === wanderTX && wanderY === wanderTY) {
+      if (wanderPhase === 'toStart') {
+        wanderPhase = 'sweep';
+        wanderTX = -wanderTX;
+        wanderTY = -wanderTY;
+      } else if (wanderPhase === 'sweep') {
+        wanderPhase = 'home';
+        wanderTX = 0;
+        wanderTY = 0;
+      } else if (wanderPhase === 'home') {
+        wanderPhase = null;
+      }
+    }
+
     glowPop = Math.max(0, glowPop - h / 0.5);    // ~500ms decay
     flick = Math.max(0, flick - h / 0.35);       // ~350ms decay
 
@@ -143,6 +202,9 @@ export function createBehavior({ seed = 1 } = {}) {
       // Antennas: the flick on a mood change, split so the pair scissors.
       browLY: flick * 0.45 * flickSign,
       browRY: flick * 0.45 * -flickSign,
+      // Gaze: the occasional real glance away, on top of the micro-saccades.
+      pupilX: wanderX,
+      pupilY: wanderY,
     };
   }
 
