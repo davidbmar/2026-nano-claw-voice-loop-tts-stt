@@ -17,6 +17,7 @@ import { bodyTransform } from './character-rig.js';
 import { createAutonomic, mulberry32 } from './autonomic.js';
 import { createSpringSet } from './springs.js';
 import { createServo } from './servo.js';
+import { createBehavior } from './robot-behavior.js';
 import { EMOTIONS, PRESENCES } from './expressions.js';
 import { CHANNELS, neutralChannels } from './face-channels.js';
 import { loadImage } from './load-image.js';
@@ -199,6 +200,11 @@ export async function createRobotRig({ container, manifestUrl, resolveAsset }) {
   // keeps its spring.
   const tiltServo = manifest.rigid ? createServo({ maxRate: 1.1, accel: 4 }) : null;
 
+  // Conversation liveliness: speech-envelope glow, emphasis head-ticks,
+  // listening head-cocks, emotion-change antenna flicks. Offsets only — the
+  // held expression stays authoritative, this rides on top of it.
+  const behavior = createBehavior({ seed: manifest.seed });
+
   function recompose() {
     const target = neutralChannels();
     const e = EMOTIONS[held.emotion] ?? {};
@@ -254,6 +260,11 @@ export async function createRobotRig({ container, manifestUrl, resolveAsset }) {
     }
     Object.assign(ch, overrides);
 
+    const liveliness = behavior.update(dt, {
+      presence: held.presence,
+      audioLevel,
+    });
+
     if (tiltServo) {
       // The servo chases the RAW target — the held expression's value, or the
       // slider's override — not the spring's smoothed output. Chasing the
@@ -262,6 +273,13 @@ export async function createRobotRig({ container, manifestUrl, resolveAsset }) {
       tiltServo.setTarget(overrides.headTilt ?? springs.targets.headTilt ?? 0);
       ch.headTilt = tiltServo.step(dt);
     }
+    // Behaviour offsets go on AFTER the servo: an emphasis tick or a listening
+    // cock is the mechanism's own micro-move, not a commanded repositioning,
+    // so it does not route through the trapezoid.
+    ch.headTilt = (ch.headTilt ?? 0) + liveliness.headTilt;
+    ch.eyeScaleY = (ch.eyeScaleY ?? 1) + liveliness.eyeScaleY;
+    ch.browLY = (ch.browLY ?? 0) + liveliness.browLY;
+    ch.browRY = (ch.browRY ?? 0) + liveliness.browRY;
 
     // With a head layer, the HEAD tilts and the shoulders stay put — which is
     // what a head tilt actually looks like. Without one, the whole portrait
@@ -373,6 +391,10 @@ export async function createRobotRig({ container, manifestUrl, resolveAsset }) {
     },
     setEmotion(name, { intensity } = {}) {
       if (!hasOwn(EMOTIONS, name)) return false;
+      // A CHANGE of mood gets a physical accent — antennas flick, lamps pop —
+      // so the shift is legible as an event rather than only a slow morph.
+      // Re-asserting the same emotion stays silent.
+      if (name !== held.emotion) behavior.onEmotionChange(held.intensity);
       held.emotion = name;
       if (intensity !== undefined) {
         const n = Number(intensity);
@@ -396,6 +418,7 @@ export async function createRobotRig({ container, manifestUrl, resolveAsset }) {
       const n = Number(strength);
       pulseAmount = PULSE_GLOW * clamp01(Number.isNaN(n) ? 0 : n);
       pulseAt = performance.now();
+      behavior.onPulse(clamp01(Number.isNaN(n) ? 0 : n));
     },
     setOverride(name, v) {
       if (v === null) delete overrides[name];
