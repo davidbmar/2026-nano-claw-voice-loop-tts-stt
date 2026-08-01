@@ -51,7 +51,7 @@ export function createBehavior({ seed = 1 } = {}) {
 
   function onPulse(strength = 1) {
     glowPop = Math.max(glowPop, 0.5 * clamp01(strength));
-    tick = Math.max(tick, 0.5 * clamp01(strength));
+    tick = Math.max(tick, 0.35 * clamp01(strength));
     tickSign = -tickSign;
   }
 
@@ -81,9 +81,9 @@ export function createBehavior({ seed = 1 } = {}) {
     // machine-gun.
     refractory = Math.max(0, refractory - h);
     if (refractory === 0 && level > 0.28 && level > lastLevel + 0.06 && envelope > 0.2) {
-      tick = Math.max(tick, 0.35 + 0.3 * level);
+      tick = Math.max(tick, 0.28 + 0.22 * level);
       tickSign = -tickSign;
-      refractory = 0.42;
+      refractory = 0.6;
     }
     lastLevel = level;
     tick = Math.max(0, tick - h / 0.3);         // ~300ms decay
@@ -113,7 +113,9 @@ export function createBehavior({ seed = 1 } = {}) {
 
     return {
       // Head: emphasis ticks while speaking, held cocks while listening.
-      headTilt: tick * 0.16 * tickSign + cock,
+      // 0.09, down from 0.16: at 0.16 the ticks read as jitter rather than
+      // punctuation — reported from live use, which is the review that counts.
+      headTilt: tick * 0.09 * tickSign + cock,
       // Lenses: the voice flares the lamps (eyeScaleY drives glow), listening
       // widens them slightly — attention, in hardware.
       eyeScaleY: envelope * 0.14 + glowPop * 0.10 + attentive * 0.05,
