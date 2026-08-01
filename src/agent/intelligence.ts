@@ -130,6 +130,13 @@ export async function retrieveTurnEvidence(
         scope: {
           tenant_id: intelligence.tenantId,
           collection_ids: intelligence.collectionIds,
+          // Omitted entirely when empty rather than sent as []: an empty
+          // document filter and an absent one mean the same thing to the
+          // platform, and sending the key only when it narrows something
+          // keeps the request identical to what it was before this existed.
+          ...(intelligence.documentIds?.length
+            ? { document_ids: intelligence.documentIds }
+            : {}),
         },
         limit: intelligence.limit,
         candidate_pool: intelligence.candidatePool,

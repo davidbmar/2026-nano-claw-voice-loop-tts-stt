@@ -57,7 +57,7 @@ import httpx
 import numpy as np
 from aiohttp import web
 
-from voice import call_log, metrics_db, silero_vad, voice_catalog
+from voice import call_log, document_routes, metrics_db, silero_vad, voice_catalog
 from voice.turn_delegate import call_delegate, start_conversation
 from voice.flow_session import (
     FLOW_MODES,
@@ -1757,6 +1757,12 @@ class PhoneCall:
                 # agent falls back to the default persona (Space Channel).
                 "profile": get_flow_profile(),
             }
+            # The same document space the console shows. A caller on the phone
+            # and an operator watching the browser have to be answered from the
+            # same documents, or "I ticked that one" means nothing.
+            document_scope = document_routes.active_document_scope()
+            if document_scope:
+                payload["documentScope"] = document_scope
             model = _cfg("NANO_CLAW_PHONE_MODEL")
             if model:
                 payload["model"] = model  # else: server's configured default

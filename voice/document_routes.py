@@ -25,7 +25,12 @@ from typing import Any
 from aiohttp import web
 
 from voice import documents as documents_module
-from voice.document_store import DocumentNotFound, DocumentStore, SpaceNotFound
+from voice.document_store import (
+    DEFAULT_DOCUMENT_DB_PATH,
+    DocumentNotFound,
+    DocumentStore,
+    SpaceNotFound,
+)
 
 log = logging.getLogger("nano-claw.documents")
 
@@ -377,6 +382,55 @@ async def document_download_handler(request: web.Request) -> web.Response:
             "Cache-Control": "no-store",
         },
     )
+
+
+# ---- scope for a turn ----------------------------------------------------
+
+_TURN_STORES: dict[str, DocumentStore] = {}
+
+
+def _turn_store() -> DocumentStore:
+    """A store for the hot turn path, cached per configured database path.
+
+    Constructing one runs the migration check, which is too much to repeat on
+    every turn — but caching a single instance forever would ignore a changed
+    ``NANO_CLAW_DOCUMENT_DB``, so the path is the key.
+    """
+
+    path = os.environ.get("NANO_CLAW_DOCUMENT_DB") or DEFAULT_DOCUMENT_DB_PATH
+    store = _TURN_STORES.get(path)
+    if store is None:
+        store = DocumentStore(path)
+        _TURN_STORES[path] = store
+    return store
+
+
+def active_document_scope() -> dict[str, Any] | None:
+    """The active space's scope, in the shape ``/api/chat`` accepts.
+
+    Both the browser and the phone line call this, and both get the same
+    answer: a document space is a property of the deployment, not of a browser
+    tab, because a caller on the phone has to be answered from the same
+    documents the console shows.
+
+    Returns ``None`` — meaning "use the configured default" — when there is no
+    active space or the registry cannot be read. A document feature that is
+    switched off or broken must not be able to silence the assistant.
+    """
+
+    try:
+        scope = _turn_store().active_scope()
+    except Exception as exc:  # noqa: BLE001 - storage problems must not end turns
+        log.warning("document scope unavailable, using configured default: %s", exc)
+        return None
+    if scope is None:
+        return None
+    return {
+        "collectionId": scope["collection_id"],
+        "selected": scope["selected_document_ids"],
+        "ready": scope["ready_count"],
+        "allSelected": scope["all_selected"],
+    }
 
 
 # ---- purge ---------------------------------------------------------------
