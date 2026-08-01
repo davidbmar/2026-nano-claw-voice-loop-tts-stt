@@ -2544,6 +2544,25 @@ input[type="range"]::-moz-range-thumb {
   gap: 5px;
 }
 
+/* Quiet, and deliberately so: creating a space is rare next to picking one,
+   and a full-width button here out-shouted the list it belongs to. */
+#space-new-button {
+  align-self: flex-start;
+  min-height: 0;
+  padding: 3px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.06em;
+}
+
+#space-new-button:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
 .space-list {
   display: flex;
   flex-direction: column;
@@ -2597,16 +2616,8 @@ input[type="range"]::-moz-range-thumb {
 .documents-header {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
-}
-
-.documents-space-name {
-  color: var(--faint);
-  font-family: var(--mono);
-  font-size: 6px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .documents-trash-toggle {

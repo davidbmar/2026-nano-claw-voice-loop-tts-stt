@@ -19,7 +19,6 @@ export const DOCUMENTS_DOM_IDS = Object.freeze([
     "documents-heading",
     "space-list",
     "space-new-button",
-    "documents-space-name",
     "documents-list",
     "documents-status",
     "documents-file-input",
@@ -259,8 +258,6 @@ export class DocumentsUI {
                 }),
             );
         });
-        const current = this.spaces.find((space) => space.id === this.activeSpaceId);
-        this._element("documents-space-name").textContent = current ? current.name : "";
     }
 
     _renderScope(scope) {
