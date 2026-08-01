@@ -57,7 +57,7 @@ export function createBehavior({ seed = 1 } = {}) {
   function onPulse(strength = 1) {
     glowPop = Math.max(glowPop, 0.5 * clamp01(strength));
     tickSign = -tickSign;
-    tickTarget = 0.05 * tickSign;
+    tickTarget = 0.025 * tickSign;
     tickHold = 0.14;
   }
 
@@ -88,9 +88,9 @@ export function createBehavior({ seed = 1 } = {}) {
     refractory = Math.max(0, refractory - h);
     if (refractory === 0 && level > 0.28 && level > lastLevel + 0.06 && envelope > 0.2) {
       tickSign = -tickSign;
-      // Toned down twice now from live review: 0.16 -> 0.09 -> 0.05, and the
-      // motion profile changed with it. Punctuation, in a machine's accent.
-      tickTarget = 0.05 * tickSign;
+      // Live-review trajectory: 0.16 -> 0.09 -> 0.05 -> 0.025. Barely-there
+      // punctuation; presence, not performance.
+      tickTarget = 0.025 * tickSign;
       tickHold = 0.14;
       refractory = 0.7;
     }
@@ -112,7 +112,9 @@ export function createBehavior({ seed = 1 } = {}) {
         // level, so the cock reads as consideration rather than a stuck pose.
         // Detented: attitudes land on fixed stops, the way indexed hardware
         // does, rather than anywhere in a continuous range.
-        const DETENTS = [0, 0.08, 0.14, 0.2];
+        // Halved and narrowed: closer stops mean successive attitudes differ
+        // less — the variance was the complaint, not only the size.
+        const DETENTS = [0, 0.05, 0.07];
         const pick = DETENTS[Math.floor(rand() * DETENTS.length)];
         cockTarget = (rand() < 0.5 ? -1 : 1) * pick;
         cockTimer = 2.5 + rand() * 2.5;
