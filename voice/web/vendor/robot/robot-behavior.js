@@ -33,7 +33,12 @@ export function createBehavior({ seed = 1 } = {}) {
   // beat. The head answers with a small tick — alternating direction, so a run
   // of beats reads as animated talk rather than repeated nodding at one side.
   let refractory = 0;
-  let tick = 0;          // decaying impulse magnitude
+  // A tick is a SNAP to a small offset, a dead hold, and a snap back — three
+  // mechanical phases, not a decaying impulse. The first version decayed
+  // smoothly and read as organic wobble; a machine repositions and is still.
+  let tickTarget = 0;    // where the tick offset is commanded to be
+  let tickPos = 0;       // where it is
+  let tickHold = 0;      // seconds left before the return is commanded
   let tickSign = 1;
 
   // --- listening head-cock ---------------------------------------------------
@@ -51,8 +56,9 @@ export function createBehavior({ seed = 1 } = {}) {
 
   function onPulse(strength = 1) {
     glowPop = Math.max(glowPop, 0.5 * clamp01(strength));
-    tick = Math.max(tick, 0.35 * clamp01(strength));
     tickSign = -tickSign;
+    tickTarget = 0.05 * tickSign;
+    tickHold = 0.14;
   }
 
   function onEmotionChange(intensity = 1) {
@@ -81,12 +87,22 @@ export function createBehavior({ seed = 1 } = {}) {
     // machine-gun.
     refractory = Math.max(0, refractory - h);
     if (refractory === 0 && level > 0.28 && level > lastLevel + 0.06 && envelope > 0.2) {
-      tick = Math.max(tick, 0.28 + 0.22 * level);
       tickSign = -tickSign;
-      refractory = 0.6;
+      // Toned down twice now from live review: 0.16 -> 0.09 -> 0.05, and the
+      // motion profile changed with it. Punctuation, in a machine's accent.
+      tickTarget = 0.05 * tickSign;
+      tickHold = 0.14;
+      refractory = 0.7;
     }
     lastLevel = level;
-    tick = Math.max(0, tick - h / 0.3);         // ~300ms decay
+    // Snap toward the commanded offset at mechanical rate, exact arrival.
+    if (tickHold > 0) {
+      tickHold -= h;
+      if (tickHold <= 0) tickTarget = 0;
+    }
+    const dtick = tickTarget - tickPos;
+    const tickStep = 2.0 * h;
+    tickPos += Math.abs(dtick) <= tickStep ? dtick : Math.sign(dtick) * tickStep;
 
     // Listening head-cock: only while the presence is actually `listening`.
     if (presence === 'listening') {
@@ -94,16 +110,21 @@ export function createBehavior({ seed = 1 } = {}) {
       if (cockTimer <= 0) {
         // Hold roughly 2.5-5s per attitude; a third of the time return to
         // level, so the cock reads as consideration rather than a stuck pose.
-        cockTarget = rand() < 0.34 ? 0 : (rand() < 0.5 ? -1 : 1) * (0.10 + rand() * 0.14);
+        // Detented: attitudes land on fixed stops, the way indexed hardware
+        // does, rather than anywhere in a continuous range.
+        const DETENTS = [0, 0.08, 0.14, 0.2];
+        const pick = DETENTS[Math.floor(rand() * DETENTS.length)];
+        cockTarget = (rand() < 0.5 ? -1 : 1) * pick;
         cockTimer = 2.5 + rand() * 2.5;
       }
     } else {
       cockTarget = 0;
       cockTimer = 0;
     }
-    // Constant-rate approach — a mechanism repositioning, not a sway.
+    // Constant-rate approach, quick then DEAD still — a mechanism indexing to
+    // a stop. The earlier 1s glide read as soft; 0.4s reads as intent.
     const dc = cockTarget - cock;
-    const step = 0.25 * h;                       // full swing in ~1s
+    const step = 0.6 * h;
     cock += Math.abs(dc) <= step ? dc : Math.sign(dc) * step;
 
     glowPop = Math.max(0, glowPop - h / 0.5);    // ~500ms decay
@@ -113,9 +134,7 @@ export function createBehavior({ seed = 1 } = {}) {
 
     return {
       // Head: emphasis ticks while speaking, held cocks while listening.
-      // 0.09, down from 0.16: at 0.16 the ticks read as jitter rather than
-      // punctuation — reported from live use, which is the review that counts.
-      headTilt: tick * 0.09 * tickSign + cock,
+      headTilt: tickPos + cock,
       // Lenses: the voice flares the lamps (eyeScaleY drives glow), listening
       // widens them slightly — attention, in hardware.
       eyeScaleY: envelope * 0.14 + glowPop * 0.10 + attentive * 0.05,
