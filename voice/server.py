@@ -23,7 +23,7 @@ import secrets
 import httpx
 from aiohttp import WSCloseCode, web
 
-from voice import call_log, cost_ledger, metrics_db
+from voice import call_log, cost_ledger, document_routes, metrics_db
 from voice import voice_catalog
 from voice.flow_session import (
     FLOW_MODES,
@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("voice-server")
 client_log = logging.getLogger("client")
-APP_VERSION = "0.4.25"
+APP_VERSION = "0.4.26"
 DEEP_PROCESSING_CUE_INTERVAL_S = 2.6
 
 
@@ -1592,6 +1592,10 @@ async def _handle_agent_request(
                 "analysisStyle": getattr(session, "analysis_style", "topic_map"),
                 "responseMode": "voice",
                 "runtimeSettings": _runtime_settings(session),
+                # The active document space, resolved server-side per turn so a
+                # tick in the console takes effect on the next thing said —
+                # and so the browser cannot name documents it was not given.
+                **_document_scope_payload(),
                 **({"model": session.model} if session.model else {}),
             },
             headers={"Accept": "text/event-stream"},
@@ -3012,10 +3016,49 @@ async def _run_auth_sweep_once(
         log.exception("Periodic expired-socket sweep failed")
 
 
-async def _auth_sweep_loop(adapter: AiohttpAuthAdapter) -> None:
+async def _run_document_purge_once(app: web.Application) -> None:
+    """Purge trashed documents past their retention horizon.
+
+    Runs on the existing maintenance tick rather than a scheduler of its own,
+    and swallows its own failures: a purge that cannot reach the evidence
+    platform must leave the sweep loop — which also expires auth sessions —
+    running.
+    """
+
+    days = _document_retention_days()
+    if days is None:
+        return
+    runtime = app.get(document_routes.DOCUMENT_RUNTIME_KEY)
+    if runtime is None:
+        return
+    try:
+        purged = await document_routes.purge_expired_documents(
+            runtime.store, runtime.platform, retention_days=days
+        )
+    except Exception:
+        log.exception("document purge failed")
+        return
+    if purged:
+        log.info("purged %d document(s) past the retention horizon", purged)
+
+
+def _document_retention_days() -> float | None:
+    raw = os.environ.get("NANO_CLAW_DOCUMENT_RETENTION_DAYS", "30").strip()
+    try:
+        days = float(raw)
+    except ValueError:
+        log.warning("NANO_CLAW_DOCUMENT_RETENTION_DAYS=%r is not a number", raw)
+        return None
+    # Zero or negative disables the purge rather than deleting everything
+    # immediately, which is the safer reading of a misconfiguration.
+    return days if days > 0 else None
+
+
+async def _auth_sweep_loop(adapter: AiohttpAuthAdapter, app: web.Application) -> None:
     try:
         while True:
             await _run_auth_sweep_once(adapter)
+            await _run_document_purge_once(app)
             await asyncio.sleep(AUTH_SWEEP_INTERVAL_SECONDS)
     except asyncio.CancelledError:
         return  # health-ok: sweep loop cancellation is orderly shutdown
@@ -3023,7 +3066,7 @@ async def _auth_sweep_loop(adapter: AiohttpAuthAdapter) -> None:
 
 async def _auth_sweep_context(app: web.Application):
     adapter = app[AUTH_ADAPTER_KEY]
-    task = asyncio.create_task(_auth_sweep_loop(adapter))
+    task = asyncio.create_task(_auth_sweep_loop(adapter, app))
     try:
         yield
     finally:
@@ -3287,12 +3330,25 @@ async def preview_handler(request: web.Request) -> web.Response:
     return web.Response(body=wav, content_type="audio/wav")
 
 
+def _document_scope_payload() -> dict[str, Any]:
+    """The active space as a chat-request field, or nothing at all."""
+
+    scope = document_routes.active_document_scope()
+    return {"documentScope": scope} if scope else {}
+
+
 def create_app(
     auth_adapter: AiohttpAuthAdapter | None = None,
 ) -> web.Application:
     from voice import phone
 
-    app = web.Application(middlewares=[request_security_middleware])
+    # The default body cap is 1 MB, which no real document clears. Uploads
+    # stream and enforce their own per-file limit (document_routes), so this
+    # ceiling only has to be above that plus multipart framing.
+    app = web.Application(
+        middlewares=[request_security_middleware],
+        client_max_size=document_routes.MAX_UPLOAD_REQUEST_BYTES,
+    )
     adapter = auth_adapter or AiohttpAuthAdapter.from_environment()
     app[AUTH_ADAPTER_KEY] = adapter
     app[HISTORY_RUNTIME_KEY] = _HistoryRuntime()
@@ -3328,6 +3384,7 @@ def create_app(
     app.router.add_delete(
         "/api/conversations/{id}", conversation_delete_handler
     )
+    document_routes.register_document_routes(app)
     # Auth routes must precede the one-segment flat static route below or
     # aiohttp will let that catch public API names as filenames.
     adapter.register_routes(app)

@@ -49,6 +49,14 @@ export const IntelligenceConfigSchema = z
     tenantId: z.string().min(1).default('personal'),
     principalId: z.string().min(1).default('nano-claw'),
     collectionIds: z.array(z.string().min(1)).default([]),
+    // Narrows retrieval to specific documents inside those collections. Empty
+    // means "the whole collection"; the platform ANDs the two filters, so this
+    // is what lets a customer tick two of five uploaded files.
+    documentIds: z.array(z.string().min(1)).default([]),
+    // Set when the active document space has documents but the customer has
+    // ticked none of them. Distinct from an empty collectionIds, which the
+    // platform reads as "search the whole tenant".
+    documentScopeEmpty: z.boolean().optional(),
     limit: z.number().int().min(1).max(20).default(5),
     candidatePool: z.number().int().min(1).max(200).default(40),
     maxChars: z.number().int().min(1000).max(100000).default(16000),

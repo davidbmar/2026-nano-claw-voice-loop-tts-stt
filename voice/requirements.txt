@@ -11,4 +11,6 @@ python-dotenv>=1.0
 anthropic>=0.117
 google-auth>=2.56,<3
 requests>=2.34,<3
+pypdf>=5.1,<7            # document upload: PDF text layer (voice/documents.py)
+python-docx>=1.2,<2      # document upload: .docx paragraphs and tables
 cryptography>=41.0.5,<50

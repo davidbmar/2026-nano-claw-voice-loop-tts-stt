@@ -278,11 +278,16 @@ export async function prepareCollectionScopeTurn(
   const intent = matchCollectionScopeIntent(latestUserText(messages) || '');
 
   if (!intent) {
+    // The deployment's document space can be empty in the same way a session
+    // can: documents exist but the customer has ticked none. That only speaks
+    // for the turn while the session has not chosen its own scope by voice —
+    // an explicit "load X" still wins for as long as the session lasts.
+    const emptyByDeployment = !!configured.documentScopeEmpty && scope.mode === 'default';
     return {
       scopeKey,
       scope,
       intelligence: { ...configured, collectionIds: [...scope.collectionIds] },
-      ...(scope.mode === 'none' && {
+      ...((scope.mode === 'none' || emptyByDeployment) && {
         reply: 'Nothing is loaded. Say “what’s available” or “load” followed by a collection name.',
         action: 'none_loaded' as const,
       }),

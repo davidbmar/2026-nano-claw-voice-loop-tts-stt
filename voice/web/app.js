@@ -12,6 +12,7 @@ import {
   inferInboundEmotion,
 } from './emotion-layer.js';
 import { createAuthHistoryUI } from './auth.js';
+import { DocumentsUI } from './documents.js?v=0.4.26';
 import { Pcm16AudioPlayer } from './ws-audio-player.js';
 
 ('use strict');
@@ -537,11 +538,11 @@ async function switchRenderer(id) {
     // Versioned like every other asset in index.html. A dynamic import is
     // cached by URL independently of app.js, so without this the browser keeps
     // serving a stale mascot module after a deploy.
-    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.25');
+    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.26');
     replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
     talkingCubeCanvas.hidden = true;
   } else if (next.startsWith('robot-')) {
-    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.25');
+    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.26');
     replacement = await createRobotRenderer(
       talkingCubeStage || talkingCubeCanvas.parentElement,
       next.slice('robot-'.length),
@@ -1691,6 +1692,7 @@ let activeTurnStartedAt = null;
 let sttRequestStartedAt = null;
 let firstAgentTextAt = null;
 let authHistory = null;
+let documentsPanel = null;
 let connectionGeneration = 0;
 
 // Readiness contract: an OPEN /ws link owns text input + Send. Audio readiness
@@ -3133,6 +3135,19 @@ function reconnectForIdentityChange() {
   connect();
 }
 
+// Render the collections the last turn was actually scoped to. `mode` matters
+// as much as the list: an explicit "none" is a choice the customer made, and
+// showing it as an empty list would read as a bug instead.
+function renderLoadedScope(scope) {
+  if (!contextCollections || !scope || typeof scope !== 'object') return;
+  if (scope.mode === 'none') {
+    contextCollections.textContent = 'none';
+    return;
+  }
+  var ids = Array.isArray(scope.collectionIds) ? scope.collectionIds : [];
+  contextCollections.textContent = ids.length ? ids.join(', ') : 'all';
+}
+
 function handleMessage(msg, generation) {
   switch (msg.type) {
     case 'hello_ack':
@@ -3357,6 +3372,11 @@ function handleMessage(msg, generation) {
 
     case 'debug':
       addDebugEntry(msg);
+      // The agent reports the scope it actually retrieved under, so LOADED
+      // follows the last turn rather than the value the connection opened
+      // with. Before this it showed a static env var and went stale the
+      // moment anything changed it.
+      renderLoadedScope(msg.knowledgeScope);
       break;
 
     case 'flow_state':
@@ -3991,6 +4011,7 @@ window.addEventListener('beforeunload', function () {
   if (bargeInFlashTimer) clearTimeout(bargeInFlashTimer);
   if (phonePollTimer) clearInterval(phonePollTimer);
   if (authHistory) authHistory.destroy();
+  if (documentsPanel) documentsPanel.destroy();
   teardownAgentAudioAnalyser();
   talkingCube.destroy();
 });
@@ -4008,6 +4029,22 @@ try {
   authHistory.initialize().catch(function () {});
 } catch (_error) {
   // Optional auth must never prevent the voice console from starting.
+}
+try {
+  documentsPanel = new DocumentsUI({
+    document: document,
+    fetch: window.fetch.bind(window),
+    window: window,
+    // The panel never learns where the operator password lives; it asks for
+    // headers each time, and app.js re-prompts on a 403 as it does elsewhere.
+    operatorHeaders: function () {
+      var secret = operatorSecret(false);
+      return secret ? { 'X-NC-Auth': '1', 'X-NC-Operator': secret } : { 'X-NC-Auth': '1' };
+    },
+  });
+  documentsPanel.refresh().catch(function () {});
+} catch (_error) {
+  // Same rule as auth: a panel that cannot mount must not stop the console.
 }
 // Populate the pipeline dropdowns on page load, independent of the WebSocket,
 // so the LLM and voice selectors always show a valid selection immediately and

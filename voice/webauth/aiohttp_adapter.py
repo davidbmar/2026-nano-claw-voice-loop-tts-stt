@@ -74,6 +74,12 @@ SENSITIVE_PATH_PREFIXES = (
     "/api/phone/vad",
     "/api/voice/flow",
     "/api/voice/region-model",
+    # Document spaces.  Uploading, re-scoping or deleting a document changes
+    # what EVERY caller on this deployment is answered from — the same blast
+    # radius as the operator controls above — and the payloads are customer
+    # documents, so they also want the no-store treatment.
+    "/api/spaces",
+    "/api/documents",
 )
 
 # Unsafe requests to these paths additionally require the operator secret.
@@ -91,6 +97,16 @@ OPERATOR_PATHS = frozenset(
         "/api/voice/flow",
         "/api/voice/region-model",
     }
+)
+
+# Operator-gated route families whose paths carry an id segment, so they cannot
+# be matched exactly like the set above.  Kept as a separate tuple rather than
+# loosening OPERATOR_PATHS into prefix matching, because that set's exactness
+# is what keeps "/api/phone/config" from also capturing the Telnyx webhook at
+# "/api/phone/incoming".
+OPERATOR_PATH_PREFIXES = (
+    "/api/spaces",
+    "/api/documents",
 )
 OPERATOR_HEADER = "X-NC-Operator"
 
@@ -225,8 +241,10 @@ def _operator_secret() -> str:
 
 
 def _needs_operator_auth(request: web.Request) -> bool:
-    return (
-        request.method.upper() not in SAFE_METHODS and request.path in OPERATOR_PATHS
+    if request.method.upper() in SAFE_METHODS:
+        return False
+    return request.path in OPERATOR_PATHS or any(
+        request.path.startswith(prefix) for prefix in OPERATOR_PATH_PREFIXES
     )
 
 

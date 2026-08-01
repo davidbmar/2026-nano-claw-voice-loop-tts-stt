@@ -2531,3 +2531,196 @@ input[type="range"]::-moz-range-thumb {
   pointer-events: none;
   overflow: visible;
 }
+
+/* Documents panel.
+   The visual language is the history list's — same row rhythm, same muted
+   title/meta pairing, same small delete affordance — because they are the same
+   kind of thing: a list of items you scan, open, and remove. */
+
+.space-row {
+  display: flex;
+  margin-bottom: 8px;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Quiet, and deliberately so: creating a space is rare next to picking one,
+   and a full-width button here out-shouted the list it belongs to. */
+#space-new-button {
+  align-self: flex-start;
+  min-height: 0;
+  padding: 3px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.06em;
+}
+
+#space-new-button:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+.space-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.space-item {
+  display: flex;
+  min-height: 24px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  color: #b9bfbd;
+  cursor: pointer;
+  text-align: left;
+}
+
+.space-item:hover {
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--accent);
+}
+
+/* The active space is what the phone line answers from, so it is marked with
+   the accent rather than a subtle weight change — getting this wrong means
+   uploading into a space nobody is listening to. */
+.space-item-active {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--accent);
+}
+
+.space-item-name {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-item-count {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.04em;
+}
+
+.documents-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.documents-trash-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.04em;
+}
+
+.documents-trash-toggle:hover {
+  color: var(--accent);
+}
+
+.documents-list {
+  display: flex;
+  max-height: 190px;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  scrollbar-width: thin;
+}
+
+.document-item {
+  display: grid;
+  min-width: 0;
+  padding: 5px 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* Deleted rows stay legible rather than disappearing, so Undo has something
+   to point at while the customer decides. */
+.document-item-trashed {
+  opacity: 0.45;
+}
+
+.document-item-check {
+  width: 11px;
+  height: 11px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.document-item-check:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.document-item-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.document-item-title {
+  overflow: hidden;
+  color: #b9bfbd;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-item-meta {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.04em;
+}
+
+.document-item-error {
+  color: var(--accent-2);
+}
+
+.document-item-delete {
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 7px;
+  font-size: 6px;
+  letter-spacing: 0.04em;
+}
+
+.documents-actions {
+  display: flex;
+  margin-top: 7px;
+  gap: 6px;
+}
+
+.documents-status {
+  margin: 6px 0 0;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6px;
+  letter-spacing: 0.04em;
+}
+
+.documents-status-error {
+  color: var(--accent-2);
+}

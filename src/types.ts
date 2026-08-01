@@ -106,6 +106,18 @@ export interface IntelligenceConfig {
   tenantId: string;
   principalId: string;
   collectionIds: string[];
+  /**
+   * Narrows retrieval to specific documents inside those collections. Empty
+   * means "the whole collection"; the platform ANDs the two filters, which is
+   * what lets a customer tick two of five uploaded files.
+   */
+  documentIds?: string[];
+  /**
+   * The active document space holds documents but the customer has ticked
+   * none. Distinct from an empty `collectionIds`, which the platform reads as
+   * "search the whole tenant" — so this cannot be encoded as an empty list.
+   */
+  documentScopeEmpty?: boolean;
   limit: number;
   candidatePool: number;
   maxChars: number;

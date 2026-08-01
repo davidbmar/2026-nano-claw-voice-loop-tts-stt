@@ -308,6 +308,91 @@ export function resolveAgentProfile(
 }
 
 /**
+ * What the voice server says this deployment's active document space holds.
+ *
+ * The voice server owns the registry, so it resolves the scope and pushes it
+ * per turn rather than the agent reaching back for it. `selected: []` with
+ * `ready > 0` is the meaningful case: the customer unticked everything, which
+ * must NOT reach the platform as an empty filter — an empty collection filter
+ * there means tenant-wide.
+ */
+export interface DocumentScope {
+  collectionId: string;
+  selected: string[];
+  ready: number;
+  allSelected?: boolean;
+}
+
+// The evidence platform's Identifier grammar. Ids that fail it are rejected by
+// its contracts as a 422, so filtering here turns a would-be failed turn into a
+// scope we simply do not trust.
+const SAFE_IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,239}$/;
+
+/**
+ * Accept a document scope only in the exact shape the voice server sends.
+ *
+ * Anything malformed is dropped rather than partially honoured: a half-read
+ * scope would silently widen retrieval, and widening is the direction that
+ * leaks. Ids are checked against the platform's identifier grammar for the
+ * same reason `sanitizeRuntimeSettings` checks its values — this is a value
+ * that ends up inside a request to another service.
+ */
+export function parseDocumentScope(raw: unknown): DocumentScope | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const collectionId = value.collectionId;
+  const selected = value.selected;
+  const ready = value.ready;
+  if (typeof collectionId !== 'string' || !SAFE_IDENTIFIER_RE.test(collectionId)) {
+    return undefined;
+  }
+  if (!Array.isArray(selected) || typeof ready !== 'number' || !Number.isFinite(ready)) {
+    return undefined;
+  }
+  const ids = selected.filter(
+    (item): item is string => typeof item === 'string' && SAFE_IDENTIFIER_RE.test(item)
+  );
+  if (ids.length !== selected.length) return undefined;
+  return {
+    collectionId,
+    selected: ids,
+    ready: Math.max(0, Math.trunc(ready)),
+    allSelected: value.allSelected === true,
+  };
+}
+
+/**
+ * Narrow a profile's retrieval scope to the active space's ticked documents.
+ *
+ * When the customer has unticked everything, this marks the scope empty rather
+ * than sending an empty filter: an empty `collection_ids` means *tenant-wide*
+ * to the platform, so the naive encoding of "nothing" is in fact "everything".
+ * The marker routes the turn into the same "nothing is loaded" refusal an
+ * explicit voice unload already produces.
+ *
+ * A space with no ready documents yet (nothing uploaded, or still indexing)
+ * leaves the configured scope alone — a customer who has not finished setting
+ * up should not have the assistant silently narrowed.
+ */
+export function applyDocumentScope(
+  intelligence: AgentConfig['intelligence'],
+  scope?: DocumentScope
+): AgentConfig['intelligence'] {
+  if (!intelligence || !scope) return intelligence;
+  if (scope.ready === 0) return intelligence;
+  if (scope.selected.length === 0) {
+    return { ...intelligence, collectionIds: [], documentIds: [], documentScopeEmpty: true };
+  }
+  return {
+    ...intelligence,
+    collectionIds: [scope.collectionId],
+    // Every ready document ticked means the collection filter alone is exact,
+    // so the document list is redundant and left off the wire.
+    documentIds: scope.allSelected ? [] : scope.selected,
+  };
+}
+
+/**
  * Build the agent config for a turn. If `modelOverride` names a model in the
  * catalog, it wins; otherwise falls back to the configured default. A known
  * `profileId` selects that profile's prompt and isolated knowledge files.
@@ -317,14 +402,15 @@ export function getAgentConfig(
   profileId?: string,
   analysisStyleOverride?: AnalysisStyle,
   responseMode?: 'text' | 'voice',
-  runtimeSettings?: RuntimeSettings
+  runtimeSettings?: RuntimeSettings,
+  documentScope?: DocumentScope
 ): AgentConfig {
   initShared();
   const valid =
     !!modelOverride &&
     modelsWithAvailability(config).some((m) => m.id === modelOverride && m.available);
   const profile = resolveAgentProfile(config, profileId);
-  const intelligence =
+  const styled =
     profile.intelligence && profile.intelligence.deepReasoning && analysisStyleOverride
       ? {
           ...profile.intelligence,
@@ -334,6 +420,7 @@ export function getAgentConfig(
           },
         }
       : profile.intelligence;
+  const intelligence = applyDocumentScope(styled, documentScope);
   const knownProfile =
     profileId !== undefined &&
     profileId !== 'none' &&
@@ -1244,6 +1331,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     responseMode?: unknown;
     evalTrace?: unknown;
     runtimeSettings?: unknown;
+    documentScope?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -1291,7 +1379,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     profile,
     body.analysisStyle as AnalysisStyle | undefined,
     body.responseMode as 'text' | 'voice' | undefined,
-    sanitizeRuntimeSettings(body.runtimeSettings)
+    sanitizeRuntimeSettings(body.runtimeSettings),
+    parseDocumentScope(body.documentScope)
   );
   if (wantsStream(req)) {
     const controller = new AbortController();
