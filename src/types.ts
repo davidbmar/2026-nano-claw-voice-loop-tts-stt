@@ -65,6 +65,38 @@ export interface AgentConfig {
   systemPrompt?: string;
   knowledgeFiles?: string[];
   intelligence?: IntelligenceConfig;
+  /** Tenant/profile key used to isolate persisted collection and analysis state. */
+  intelligenceScopeKey?: string;
+  /** Render the answer for a screen or for immediate spoken delivery. */
+  responseMode?: 'text' | 'voice';
+  /** Live pipeline configuration for this session, rendered into the base layer. */
+  runtimeSettings?: RuntimeSettings;
+}
+
+/**
+ * The caller-visible pipeline configuration, as a fixed allowlist.
+ *
+ * Deliberately not an open record: these values are rendered into the system
+ * prompt and may be spoken aloud, so every field is one we are willing to
+ * disclose. No caller identity, conversation IDs, internal URLs, or
+ * credentials. Values arrive sanitized from the voice server and are
+ * re-sanitized here — `set_model` and `set_voice` accept arbitrary strings, so
+ * an unsanitized value would be a prompt-injection channel.
+ */
+export interface RuntimeSettings {
+  surface: string;
+  mode: string;
+  chatModel: string;
+  voice: string;
+  speed: number;
+  sttModel: string;
+  speechMode: string;
+  analysisStyle: string;
+  schedulerModel: string;
+  /** Phone-call speech-detection profile ("energy" | "silero"). */
+  vad: string;
+  /** Whether speaking over the agent interrupts it ("on" | "off"). */
+  bargeIn: string;
 }
 
 /** Local evidence retrieval performed before the conversational model call. */
@@ -162,6 +194,9 @@ export interface LLMResponse {
   content: string;
   toolCalls?: ToolCall[];
   finishReason?: string;
+  /** Model that actually served this response (differs from the requested
+   * model when the fallback chain answered). */
+  model?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -184,7 +219,14 @@ export const SYSTEM_CACHE_MARKER = '\n[[cache-breakpoint]]\n';
  * One event in a streamed LLM completion.
  */
 export type StreamEvent =
-  | { type: 'text'; delta: string }
+  | {
+      type: 'text';
+      delta: string;
+      /** This delta is a held-response synthetic (whole guard-rewritten
+       * reply emitted at once) — consumers must not treat it as a live
+       * stream of stable prose. */
+      held?: boolean;
+    }
   | {
       type: 'deep_started';
       acknowledgement: string;
@@ -199,12 +241,30 @@ export type StreamEvent =
       completedSteps: number;
       maxSteps: number;
       retrievalQueries: number;
+      currentPass: number;
+      completedPasses: number;
+      maxPasses: number;
+      retrievalPlanned: number;
+      retrievalCompleted: number;
+      evidenceItems: number;
+      model?: {
+        provider: string;
+        name: string;
+        thinking: string;
+        effort: string;
+      };
+      artifactStatus: string;
+      artifactId?: string;
+      phaseStartedAt?: string;
+      heartbeatAt?: string;
     }
   | { type: 'tool_calls'; toolCalls: ToolCall[] }
   | {
       type: 'done';
       finishReason?: string;
       usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+      /** Model that actually streamed this reply (fallback-aware). */
+      model?: string;
     };
 
 /**

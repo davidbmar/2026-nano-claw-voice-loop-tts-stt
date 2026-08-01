@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -29,21 +30,49 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from voice.phone_audio import FRAME_SAMPLES, resample_48k_to_8k, ulaw_encode  # noqa: E402
+from voice.phone_audio import (  # noqa: E402
+    FRAME_SAMPLES,
+    resample_48k_to_8k,
+    resample_48k_to_16k,
+    ulaw_encode,
+)
 
 TTS_URL = "http://localhost:8300/synthesize"
-WS_BASE = "ws://localhost:9090"
+# Overridable so this can exercise a second node without disturbing the one
+# serving the live line. Default unchanged.
+WS_BASE = os.environ.get("LOOPBACK_WS_BASE", "ws://localhost:9090")
+
+
+def _env(name: str, default: str = "") -> str:
+    for line in (ROOT / ".env").read_text().splitlines():
+        if line.startswith(f"{name}="):
+            return line.split("=", 1)[1].strip()
+    return default
 
 
 def env_token() -> str:
-    for line in (ROOT / ".env").read_text().splitlines():
-        if line.startswith("NANO_CLAW_PHONE_TOKEN="):
-            return line.split("=", 1)[1].strip()
-    raise SystemExit("NANO_CLAW_PHONE_TOKEN not found in .env")
+    token = _env("NANO_CLAW_PHONE_TOKEN")
+    if not token:
+        raise SystemExit("NANO_CLAW_PHONE_TOKEN not found in .env")
+    return token
 
 
-def synthesize_caller_audio(text: str) -> bytes:
-    """Question audio as μ-law 8k — the local TTS service plays the caller.
+def env_codec() -> str:
+    """Match the node's transport codec — a μ-law question fed to an L16
+    node decodes as garbage and the endpointer (rightly) rejects it."""
+    return "l16" if _env("NANO_CLAW_PHONE_CODEC", "pcmu").lower() == "l16" else "pcmu"
+
+
+def _encode(pcm_at_rate: np.ndarray, codec: str) -> bytes:
+    return (
+        pcm_at_rate.astype("<i2").tobytes()
+        if codec == "l16"
+        else ulaw_encode(pcm_at_rate)
+    )
+
+
+def synthesize_caller_audio(text: str, codec: str) -> bytes:
+    """Question audio in the node's transport codec — local TTS plays the caller.
 
     NOTE: synthetic TTS scores LOW on neural VAD (Silero correctly doubts
     it's a human). When the node runs NANO_CLAW_PHONE_VAD=silero, pass a
@@ -54,22 +83,31 @@ def synthesize_caller_audio(text: str) -> bytes:
 
         w = wave.open(text)
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-        if w.getframerate() == 16000:
+        rate = w.getframerate()
+        if rate not in (8000, 16000):
+            raise SystemExit(f"unsupported rate {rate} (need 8k/16k mono)")
+        if codec == "l16":
+            if rate == 8000:
+                pcm = np.repeat(pcm, 2)
+        elif rate == 16000:
             pcm = pcm[::2]
-        elif w.getframerate() != 8000:
-            raise SystemExit(f"unsupported rate {w.getframerate()} (need 8k/16k mono)")
-        return ulaw_encode(pcm)
+        return _encode(pcm, codec)
     body = json.dumps({"text": text, "voice": "af_heart", "speed": 1.0}).encode()
     req = urllib.request.Request(TTS_URL, data=body, headers={"Content-Type": "application/json"})
-    pcm48 = urllib.request.urlopen(req, timeout=60).read()
-    return ulaw_encode(resample_48k_to_8k(np.frombuffer(pcm48, dtype=np.int16)))
+    pcm48 = np.frombuffer(urllib.request.urlopen(req, timeout=60).read(), dtype=np.int16)
+    resample = resample_48k_to_16k if codec == "l16" else resample_48k_to_8k
+    return _encode(resample(pcm48), codec)
 
 
 async def run(question: str) -> None:
     token = env_token()
-    caller_ulaw = synthesize_caller_audio(question)
-    frames = [caller_ulaw[i : i + FRAME_SAMPLES] for i in range(0, len(caller_ulaw), FRAME_SAMPLES)]
-    silence = ulaw_encode(np.zeros(FRAME_SAMPLES, dtype=np.int16))
+    codec = env_codec()
+    # 20 ms per frame: 160 μ-law bytes at 8 k, or 320 samples × 2 bytes at 16 k.
+    frame_bytes = FRAME_SAMPLES if codec == "pcmu" else FRAME_SAMPLES * 2 * 2
+    caller_audio = synthesize_caller_audio(question, codec)
+    frames = [caller_audio[i : i + frame_bytes] for i in range(0, len(caller_audio), frame_bytes)]
+    silence_samples = FRAME_SAMPLES if codec == "pcmu" else FRAME_SAMPLES * 2
+    silence = _encode(np.zeros(silence_samples, dtype=np.int16), codec)
 
     first_reply_at: float | None = None
     last_reply_at: float | None = None
@@ -81,7 +119,11 @@ async def run(question: str) -> None:
             await ws.send_json({
                 "event": "start",
                 "stream_id": "loopback",
-                "start": {"call_control_id": f"loopback-{int(time.time())}"},
+                # Overridable so a caller can be correlated to a routing entry
+                # minted by a call.initiated webhook — otherwise a delegated
+                # line cannot be exercised without a carrier.
+                "start": {"call_control_id": os.environ.get(
+                    "LOOPBACK_CALL_ID", f"loopback-{int(time.time())}")},
             })
 
             async def sender():

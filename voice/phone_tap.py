@@ -7,10 +7,11 @@ timing events supplied by the caller.  The phone gateway uses these points for
 endpoint, STT, agent, synthesis, pacing, and barge-in measurements; a future
 web voice path can use the same API without phone-specific behavior here.
 
-The tap has a strict never-crash contract.  Creation and every public method
-catch all tap failures internally.  The first failure logs one warning,
-closes any usable files, and permanently disables that tap so capture can
-never interrupt a live call.
+The tap isolates recording failures from the live call. Creation and every
+public method catch ordinary tap failures internally. The first failure logs
+one warning, closes any usable files, and permanently disables that tap so
+capture can never interrupt a live call. Unsafe call identifiers are the one
+exception: they are rejected loudly before any files are opened.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import wave
 from pathlib import Path
@@ -27,7 +29,73 @@ from voice.phone_audio import ulaw_decode
 
 log = logging.getLogger("nano-claw.phone_tap")
 
-DEFAULT_TAP_ROOT = "/tmp/nano-claw-phone-taps"
+DEFAULT_TAP_ROOT = "/app/data/phone-taps"
+
+_SAFE_CALL_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+_TELNYX_CALL_ID_RE = re.compile(r"[A-Za-z0-9_:-]+")
+
+
+class UnsafeTapDirectoryError(ValueError):
+    """A call id could not name exactly one contained tap directory."""
+
+
+def tap_directory_for(
+    root: str | Path,
+    call_id: str,
+    *,
+    allow_existing_legacy: bool = False,
+) -> Path:
+    """Return the sanitized, single-level tap directory for ``call_id``.
+
+    New writes always use the restricted call-id alphabet. Read paths may opt
+    into an existing, contained legacy directory for pre-migration Telnyx ids
+    whose colons were used verbatim. Both forms are resolved and required to
+    be direct children of the resolved tap root.
+    """
+
+    raw_call_id = str(call_id)
+    safe_call_id = _SAFE_CALL_ID_RE.sub("", raw_call_id)
+
+    def reject() -> None:
+        message = f"unsafe tap directory for call_id={raw_call_id!r}"
+        log.error(message)
+        raise UnsafeTapDirectoryError(message)
+
+    # A normal Telnyx id is already in the safe alphabet except for its
+    # version separator (for example ``v3:...``). Reject every other raw
+    # punctuation mark so encoded traversal, path separators, URL delimiters,
+    # and control characters cannot be normalized into an apparently safe id.
+    if not safe_call_id or _TELNYX_CALL_ID_RE.fullmatch(raw_call_id) is None:
+        reject()
+
+    root_path = Path(root)
+    try:
+        root_resolved = root_path.resolve()
+        raw_candidate = (root_path / raw_call_id).resolve()
+        candidate = (root_path / safe_call_id).resolve()
+    except (OSError, RuntimeError, ValueError):
+        reject()
+
+    if (
+        not raw_candidate.is_relative_to(root_resolved)
+        or raw_candidate.parent != root_resolved
+    ):
+        reject()
+
+    if (
+        not candidate.is_relative_to(root_resolved)
+        or candidate.parent != root_resolved
+    ):
+        reject()
+
+    if (
+        allow_existing_legacy
+        and raw_candidate != candidate
+        and not candidate.is_dir()
+        and raw_candidate.is_dir()
+    ):
+        return raw_candidate
+    return candidate
 
 
 class CallTap:
@@ -64,16 +132,24 @@ class CallTap:
 
         ``call_id`` names the output subdirectory. ``codec`` is ``pcmu`` for
         G.711 mu-law bytes or a linear PCM16 codec name. Rates are integer Hz
-        for the inbound and outbound WAV files. Only the exact environment
-        value ``NANO_CLAW_PHONE_TAP=1`` enables capture.
+        for the inbound and outbound WAV files. Capture is on by default —
+        recordings feed the call review panel; only the exact environment
+        value ``NANO_CLAW_PHONE_TAP=0`` disables it.
+
+        Raises ``ValueError`` when ``call_id`` cannot name one contained,
+        sanitized child of the tap root.
         """
+        root = Path(os.environ.get("NANO_CLAW_PHONE_TAP_DIR", DEFAULT_TAP_ROOT))
+        safe_call_id = tap_directory_for(root, call_id).name
         tap: CallTap | None = None
         try:
-            if os.environ.get("NANO_CLAW_PHONE_TAP") != "1":
+            if os.environ.get("NANO_CLAW_PHONE_TAP", "1") == "0":
                 return None
-            tap = cls(call_id, codec, inbound_rate, outbound_rate)
+            tap = cls(safe_call_id, codec, inbound_rate, outbound_rate)
             tap._open()
             return tap
+        except UnsafeTapDirectoryError:
+            raise
         except BaseException as exc:
             if tap is not None:
                 tap._disable(exc)
@@ -160,12 +236,27 @@ class CallTap:
         if self.inbound_rate <= 0 or self.outbound_rate <= 0:
             raise ValueError("tap sample rates must be positive")
         root = Path(os.environ.get("NANO_CLAW_PHONE_TAP_DIR", DEFAULT_TAP_ROOT))
-        self.directory = root / self.call_id
+        self.directory = tap_directory_for(root, self.call_id)
+        self.call_id = self.directory.name
         self.directory.mkdir(parents=True, exist_ok=True)
         self._inbound = self._open_wav(self.directory / "inbound.wav", self.inbound_rate)
         self._tts = self._open_wav(self.directory / "tts_48k.wav", 48_000)
         self._outbound = self._open_wav(self.directory / "outbound.wav", self.outbound_rate)
         self._timings = (self.directory / "timings.jsonl").open("w", encoding="utf-8")
+        # Wall/monotonic anchor pair: projects the monotonic ``t`` values in
+        # timings.jsonl onto wall-clock time for the call review timeline.
+        (self.directory / "meta.json").write_text(
+            json.dumps(
+                {
+                    "call_id": self.call_id,
+                    "codec": self.codec,
+                    "wall_t0": time.time(),
+                    "mono_t0": time.monotonic(),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _open_wav(path: Path, rate: int) -> wave.Wave_write:

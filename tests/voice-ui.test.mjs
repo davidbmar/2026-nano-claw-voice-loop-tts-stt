@@ -34,26 +34,68 @@ const appSource = await readFile(new URL('../voice/web/app.js', import.meta.url)
 assert.match(voiceHtml, /talking-cube\.js/, 'voice UI must reference the Talking Cube module');
 assert.match(voiceHtml, /id="configuration-sidebar"/, 'configuration must live in the left rail');
 assert.match(voiceHtml, /id="transcription-panel"/, 'transcription must live in the right rail');
-assert.match(voiceHtml, /id="benchmark-p50"/, 'sidebar must expose scheduler benchmarks');
+assert.match(voiceHtml, /id="context-panel"/, 'sidebar must expose the context panel');
+assert.match(
+  voiceHtml,
+  /id="context-collections"/,
+  'context panel must show the loaded knowledge collections'
+);
 assert.match(voiceHtml, /id="latency-overall"/, 'sidebar must expose pipeline latency');
 assert.doesNotMatch(voiceHtml, /id="settings-btn"/, 'the settings popover trigger must be removed');
+assert.match(voiceHtml, /<strong>HYPERRIFF<\/strong>/, 'the masthead must use HYPERRIFF');
+assert.match(
+  voiceHtml,
+  /id="app-version"[^>]*>v\d+\.\d+\.\d+<\/small>/,
+  'the current release must remain visibly versioned in the masthead'
+);
+assert.match(
+  appSource,
+  /appVersionBadge\.textContent = 'v' \+ appVersion/,
+  'the visible release must reconcile with the running server version'
+);
+assert.doesNotMatch(
+  appSource,
+  /-pass ceiling/,
+  'the deep UI must not present a conditional pass budget as scheduled work'
+);
+assert.match(
+  appSource,
+  /waiting for model response · up to [\s\S]*passes if needed/,
+  'a long reasoning call must explain why its pass counter has not advanced'
+);
+assert.match(
+  appSource,
+  /backend heartbeat current/,
+  'heartbeats must be labeled as connectivity rather than reasoning progress'
+);
 
 const flowSelect = voiceHtml.match(/<select id="flow-select"[\s\S]*?<\/select>/)?.[0] || '';
 const flowOptions = [
   ...flowSelect.matchAll(/<option value="([^"]+)"(?: selected)?>([^<]+)<\/option>/g),
 ].map((match) => [match[1], match[2]]);
 assert.deepEqual(flowOptions, [
+  ['base', 'Base'],
   ['none', 'None'],
-  ['spacechannel', 'Space Channel'],
+  ['spacechannel', 'Spacechannel'],
   ['intelligence', 'Document Intelligence'],
+  ['riff', 'Riff'],
+  ['nanoclaw', 'nano-claw'],
+  ['intelligence-platform', 'intelligence-platform'],
   ['replicantpm', 'Replicant PM'],
   ['scheduler', 'Plumber Scheduler'],
+  ['lawyer', 'Lawyer Scheduler'],
+  // Added when the delegate mode landed. This assertion had been failing since
+  // then and nobody knew: `npm test` runs vitest, which reports "No test suite
+  // found" for these plain node:assert files and moves on. A red test nobody
+  // runs is a red test nobody has.
+  ['delegate', 'Turn Delegate'],
 ]);
 assert.match(
   flowSelect,
-  /<option value="spacechannel" selected>Space Channel<\/option>/,
-  'assistant mode must render Space Channel instead of a blank value before fetch resolves'
+  /<option value="spacechannel" selected>Spacechannel<\/option>/,
+  'assistant mode must render a non-blank default before fetch resolves'
 );
+assert.match(voiceHtml, /id="mode-abstract"/, 'context panel must describe the active mode');
 assert.match(
   appSource,
   /Pipeline\.applyModelOptions\(\s*flowSelect,/,
@@ -61,18 +103,18 @@ assert.match(
 );
 assert.match(
   appSource,
-  /localStorage\.getItem\(LS_BARGE_IN_ENABLED\) === 'true'/,
-  'experimental browser barge-in must require an explicit listener opt-in'
+  /localStorage\.getItem\(LS_BARGE_IN_ENABLED\) !== 'false'/,
+  'browser barge-in defaults ON for new browsers; an explicit user off is respected (policy change 2026-07-25)'
 );
 assert.match(
   appSource,
-  /nanoclaw\.bargeIn\.v2\.enabled/,
-  'old inherited barge-in preferences must be reset to the safe v2 default'
+  /nanoclaw\.bargeIn\.v3\.enabled/,
+  'old inherited barge-in preferences must be reset to the safe v3 default'
 );
 assert.match(
   voiceHtml,
-  /id="barge-in-hint"[\s\S]*?Off by default/,
-  'the browser control must explain its safe default and manual fallback'
+  /id="barge-in-hint"[\s\S]*?On by default/,
+  'the browser control must explain the default-on policy and manual fallback (2026-07-25)'
 );
 assert.match(
   appSource,
@@ -83,6 +125,26 @@ assert.match(
   voiceHtml,
   /id="analysis-style-toggle"[\s\S]*?experimental principle-graph analysis/i,
   'the configuration rail must expose the principle-graph experiment'
+);
+assert.match(
+  voiceHtml,
+  /id="speech-preparation-toggle"[\s\S]*?checked/,
+  'prepared natural delivery must be visible and enabled by default'
+);
+assert.match(
+  appSource,
+  /nanoclaw\.speechPreparation\.v1\.enabled/,
+  'the prepared/raw comparison must persist independently of the voice model'
+);
+assert.match(
+  appSource,
+  /set_speech_mode[\s\S]*?prepared[\s\S]*?raw/,
+  'the browser must send its prepared/raw selection to the voice session'
+);
+assert.match(
+  appSource,
+  /case 'speech_plan':[\s\S]*?compilerVersion/,
+  'the browser must display the compiler version confirmed by each speech plan'
 );
 assert.match(
   appSource,
@@ -96,3 +158,81 @@ assert.ok(
 );
 
 console.log('voice-ui tests passed');
+
+// ── the thinking counter must stop on every path that ends a turn ───────────
+//
+// A delegated turn is answered by another app and cannot stream (contract v0 is
+// atomic), so the browser shows nothing between question and reply — measured at
+// 7 and 11 seconds in real use, which reads as a hang. The counter makes the
+// wait legible; a counter that keeps running when nothing is happening is worse
+// than the static line it replaced.
+{
+  const appJs = await readFile(new URL('../voice/web/app.js', import.meta.url), 'utf8');
+
+  assert.ok(
+    /function clearThinking\(\)[\s\S]{0,200}clearInterval\(thinkingTimer\)/.test(appJs),
+    'clearThinking must stop the interval, or every turn leaks a timer',
+  );
+
+  const endsATurn = [
+    ["case 'agent_reply':", 'a completed reply'],
+    ["case 'agent_reply_delta':", 'the first streamed token'],
+    ["case 'error':", 'a server error'],
+    ['socket.onclose', 'a closed socket'],
+  ];
+  for (const [marker, why] of endsATurn) {
+    const at = appJs.indexOf(marker);
+    assert.ok(at > -1, `${marker} not found — has the handler been restructured?`);
+    const window_ = appJs.slice(at, at + 600);
+    assert.ok(
+      window_.includes('clearThinking()'),
+      `${why} does not clear the thinking counter — it would tick upward ` +
+        `forever while nothing is happening`,
+    );
+  }
+}
+
+// ── a control that looks live and is not ────────────────────────────────────
+//
+// In delegate mode nano-claw runs no model: `_handle_delegate_request` never
+// reads `session.model`, because the app answering each turn already chose one.
+// The MODEL control still accepted a choice and logged "Model set: …" — the
+// same trap as a delegate URL field with nowhere to send.
+{
+  const appJs = await readFile(new URL('../voice/web/app.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../voice/web/index.html', import.meta.url), 'utf8');
+
+  assert.ok(
+    appJs.includes('reflectModelRelevance'),
+    'nothing reflects that the model control does not apply in delegate mode',
+  );
+  assert.match(
+    appJs,
+    /reflectModelRelevance[\s\S]{0,400}modeId === 'delegate'/,
+    'the model control must be marked inert for the delegate mode specifically',
+  );
+  assert.ok(
+    html.includes('model-inert-note'),
+    'the console must SAY why the control is disabled, not just grey it out',
+  );
+
+  // It must be called when the mode changes, not only at load — switching modes
+  // is exactly when the answer changes.
+  assert.match(
+    appJs,
+    /function updateModeAbstract\([\s\S]{0,300}reflectModelRelevance\(modeId\)/,
+    'the model control is not re-evaluated when the mode changes',
+  );
+
+  // And it must not fight the catalog, which disables the same control when no
+  // model is available. Re-enabling unconditionally would undo that.
+  // The BRANCH, not just the two strings near each other: a first version of
+  // this matched the `if (inert)` block above and passed while the else-branch
+  // re-enabled unconditionally.
+  assert.match(
+    appJs,
+    /\} else if \(select\.dataset\.inertForDelegate\) \{/,
+    'leaving delegate mode must only re-enable what delegate mode disabled — ' +
+      'the catalog disables the same control when no model is available',
+  );
+}

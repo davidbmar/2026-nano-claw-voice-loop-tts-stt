@@ -10,7 +10,14 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { AgentConfig, AnalysisStyle, ToolCall, StreamEvent, LLMResponse } from '../types';
+import {
+  AgentConfig,
+  AnalysisStyle,
+  ToolCall,
+  StreamEvent,
+  LLMResponse,
+  RuntimeSettings,
+} from '../types';
 import { ProviderManager } from '../providers/index';
 import {
   Memory,
@@ -20,7 +27,7 @@ import {
   isValidSessionId,
   sweepEphemeralMemory,
 } from '../agent/memory';
-import { ContextBuilder } from '../agent/context';
+import { ContextBuilder, guardCoverageDisclaimer, isCoverageQuestion } from '../agent/context';
 import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
 import { ToolRegistry } from '../agent/tools/registry';
@@ -29,19 +36,34 @@ import { ReadFileTool, WriteFileTool } from '../agent/tools/file';
 import { Config } from '../config/schema';
 import { getConfig, createDefaultConfig, mergeEnvConfig } from '../config/index';
 import { logger } from '../utils/logger';
-import { modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
+import { MODEL_CATALOG, modelsWithAvailability, DEFAULT_MODEL } from '../agent/models';
 import { retrieveTurnEvidence } from '../agent/intelligence';
+import {
+  collectionScopeKey,
+  prepareCollectionScopeTurn,
+  type PreparedCollectionScope,
+} from '../agent/knowledge-scope';
+import {
+  buildCrossSourceEvalTrace,
+  type BuildEvalTraceInput,
+  type CrossSourceEvalTrace,
+} from '../agent/eval-trace';
 import {
   analysisStateFromResult,
   deepAcknowledgement,
+  deepConfirmPolicy,
   DeepReasoningResult,
   DeepRouteDecision,
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
   analysisVoiceWordLimit,
+  resolveDeepGate,
   resolveExistingAnalysisTurn,
+  resolveRegistryAnalysisTurn,
   runDeepReasoning,
   streamDeepReasoning,
+  type DeepGateDebug,
+  type HydrationComplete,
 } from '../agent/deep-reasoning';
 import type { AnalysisNavigationDecision } from '../agent/analysis-navigation';
 
@@ -50,7 +72,10 @@ import type { AnalysisNavigationDecision } from '../agent/analysis-navigation';
 interface DebugInfo {
   iteration: number;
   messageCount: number;
+  /** Model that actually served the turn (fallback-aware). */
   model: string;
+  /** Present only when a fallback answered: the model originally asked for. */
+  requestedModel?: string;
   tokenUsage?: {
     prompt: number;
     completion: number;
@@ -85,11 +110,21 @@ interface DebugInfo {
     action: AnalysisNavigationDecision['action'];
     reason: string;
     selectedTopicIds: string[];
+    artifactId?: string;
   };
   analysisVoiceGuard?: {
     limit: number;
     replaced: boolean;
   };
+  coverageDisclaimer?: {
+    inserted: boolean;
+  };
+  deepGoalGate?: DeepGateDebug;
+  knowledgeScope?: {
+    mode: 'default' | 'selected' | 'none';
+    collectionIds: string[];
+  };
+  evalTrace?: CrossSourceEvalTrace;
 }
 
 interface PendingToolState {
@@ -99,6 +134,7 @@ interface PendingToolState {
   assistantContent: string;
   iteration: number;
   agentConfig: AgentConfig;
+  evalTrace: boolean;
 }
 
 type ApiResponse =
@@ -179,6 +215,23 @@ export function __setProviderManagerForTest(pm: unknown): void {
   providerManager = pm as ProviderManager;
 }
 
+/** Fast-model completion used by the reflect-hydrate-affirm gate (task 063). */
+function hydrationCompleter(agentConfig: AgentConfig): HydrationComplete {
+  return async (systemPrompt, userPrompt) => {
+    const response = await providerManager.complete(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      agentConfig.model,
+      0,
+      400,
+      []
+    );
+    return response.content;
+  };
+}
+
 function createToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   const toolsConfig = config.tools;
@@ -201,6 +254,11 @@ function createToolRegistry(): ToolRegistry {
  * Resolve the prompt and knowledge for one optional assistant profile.
  *
  * Known profiles are deliberately isolated from the global knowledge glob.
+ * When a `base` profile is registered, every other known profile composes on
+ * top of it: persona prompt first, then the base voice-identity layer, and
+ * the base self-knowledge digest beneath the persona's own knowledge. This
+ * keeps the pipeline self-awareness (STT errors, TTS delivery, capability
+ * limits) in exactly one place instead of copied into each persona.
  * `none` keeps the configured fallback prompt but has no site knowledge. An
  * absent or unknown profile preserves the pre-profile behavior, including
  * environment/config knowledge, for backward compatibility.
@@ -219,9 +277,22 @@ export function resolveAgentProfile(
       : undefined;
 
   if (knownProfile) {
+    const baseLayer =
+      profileId !== 'base' &&
+      profiles !== undefined &&
+      Object.prototype.hasOwnProperty.call(profiles, 'base')
+        ? profiles['base']
+        : undefined;
     return {
-      systemPrompt: knownProfile.systemPrompt,
-      knowledgeFiles: [...knownProfile.knowledgeFiles],
+      systemPrompt: baseLayer
+        ? `${knownProfile.systemPrompt}\n\n${baseLayer.systemPrompt}`
+        : knownProfile.systemPrompt,
+      knowledgeFiles: [
+        ...new Set([
+          ...(baseLayer?.knowledgeFiles ?? []),
+          ...knownProfile.knowledgeFiles,
+        ]),
+      ],
       ...(knownProfile.intelligence && { intelligence: knownProfile.intelligence }),
     };
   }
@@ -244,7 +315,9 @@ export function resolveAgentProfile(
 export function getAgentConfig(
   modelOverride?: string,
   profileId?: string,
-  analysisStyleOverride?: AnalysisStyle
+  analysisStyleOverride?: AnalysisStyle,
+  responseMode?: 'text' | 'voice',
+  runtimeSettings?: RuntimeSettings
 ): AgentConfig {
   initShared();
   const valid =
@@ -261,13 +334,99 @@ export function getAgentConfig(
           },
         }
       : profile.intelligence;
+  const knownProfile =
+    profileId !== undefined &&
+    profileId !== 'none' &&
+    config.agents?.profiles !== undefined &&
+    Object.prototype.hasOwnProperty.call(config.agents.profiles, profileId)
+      ? profileId
+      : 'default';
   return {
     model: valid ? modelOverride : config.agents?.defaults?.model || DEFAULT_MODEL,
     temperature: config.agents?.defaults?.temperature || 0.7,
     maxTokens: config.agents?.defaults?.maxTokens || 4096,
     ...profile,
     ...(intelligence && { intelligence }),
+    ...(intelligence && {
+      intelligenceScopeKey: collectionScopeKey(intelligence, knownProfile),
+    }),
+    ...(responseMode && { responseMode }),
+    ...(runtimeSettings && { runtimeSettings }),
   };
+}
+
+/**
+ * Accept a runtime-settings payload only in the exact shape we render.
+ *
+ * Re-sanitized here rather than trusted from the voice server: these strings
+ * reach the system prompt. The WebSocket boundary validates catalog-backed
+ * fields by membership and passes canonical values; this remains an
+ * independent defense if that boundary regresses. Unknown fields are dropped,
+ * not passed through — the render set is closed by construction.
+ */
+// Identifiers plus what a catalog display name legitimately contains
+// ("Isabella (48k)"). Deliberately excludes newlines, '#', and '*' — the
+// characters that would let a value forge a heading or a new prompt section.
+const SAFE_SETTING_RE = /^[A-Za-z0-9._:/+() -]{1,64}$/;
+const RUNTIME_MODEL_SENTINELS = new Set(['default', 'unknown', 'unrecognized']);
+
+export function sanitizeRuntimeSettings(value: unknown): RuntimeSettings | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const text = (key: string): string => {
+    const candidate = raw[key];
+    if (typeof candidate !== 'string') return 'unknown';
+    const trimmed = candidate.trim();
+    if (!trimmed) return 'default';
+    return SAFE_SETTING_RE.test(trimmed) ? trimmed : 'unrecognized';
+  };
+  const speed = typeof raw.speed === 'number' && Number.isFinite(raw.speed) ? raw.speed : 1;
+  const chatModel = text('chatModel');
+  const canonicalModel = RUNTIME_MODEL_SENTINELS.has(chatModel)
+    ? chatModel
+    : MODEL_CATALOG.find((model) => model.id === chatModel)?.id || 'unrecognized';
+  return {
+    surface: text('surface'),
+    mode: text('mode'),
+    chatModel: canonicalModel,
+    voice: text('voice'),
+    speed: Math.min(4, Math.max(0.1, Math.round(speed * 100) / 100)),
+    sttModel: text('sttModel'),
+    speechMode: text('speechMode'),
+    analysisStyle: text('analysisStyle'),
+    schedulerModel: text('schedulerModel'),
+    vad: text('vad'),
+    bargeIn: text('bargeIn'),
+  };
+}
+
+function knowledgeScopeDebug(
+  prepared: PreparedCollectionScope | undefined
+): DebugInfo['knowledgeScope'] {
+  return prepared
+    ? {
+        mode: prepared.scope.mode,
+        collectionIds: [...prepared.scope.collectionIds],
+      }
+    : undefined;
+}
+
+export function isEvalTraceEnabled(): boolean {
+  return ['1', 'true', 'yes'].includes(
+    (process.env.NANO_CLAW_EVAL_TRACE || '').trim().toLowerCase()
+  );
+}
+
+function evalTraceDebug(
+  enabled: boolean,
+  input: Omit<BuildEvalTraceInput, 'affirmationPolicy'>
+): DebugInfo['evalTrace'] {
+  return enabled
+    ? buildCrossSourceEvalTrace({
+        ...input,
+        affirmationPolicy: deepConfirmPolicy(),
+      })
+    : undefined;
 }
 
 // ── Stepped agent loop ───────────────────────────────────────
@@ -307,7 +466,8 @@ function deepDebug(
 async function stepLoop(
   memory: Memory,
   agentConfig: AgentConfig,
-  iteration: number
+  iteration: number,
+  evalTrace = false
 ): Promise<ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -320,27 +480,91 @@ async function stepLoop(
     const skills = skillsLoader.getSkills();
     const tools = toolRegistry.getDefinitions();
     const messages = memory.getMessages();
-    const analysisState = iteration === 1 ? memory.getAnalysisState() : undefined;
+    const preparedScope = await prepareCollectionScopeTurn(messages, memory, agentConfig);
+    const turnConfig = preparedScope
+      ? { ...agentConfig, intelligence: preparedScope.intelligence }
+      : agentConfig;
+    const scopeKey = preparedScope?.scopeKey || agentConfig.intelligenceScopeKey || 'default';
+    if (iteration === 1 && preparedScope?.reply) {
+      memory.addMessage({ role: 'assistant', content: preparedScope.reply });
+      return {
+        type: 'final',
+        response: preparedScope.reply,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: `knowledge_scope_${preparedScope.action}`,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'scope',
+            outcome: 'scope_reply',
+            response: preparedScope.reply,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+    }
+    const analysisState = iteration === 1 ? memory.getAnalysisState(scopeKey) : undefined;
     const analysisTurn =
-      analysisState && agentConfig.intelligence
-        ? await resolveExistingAnalysisTurn(messages, analysisState, agentConfig.intelligence)
-        : undefined;
-    if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
-    const deepRoute =
+      analysisState && turnConfig.intelligence
+        ? await resolveExistingAnalysisTurn(messages, analysisState, turnConfig.intelligence)
+        : iteration === 1 && turnConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, turnConfig.intelligence)
+          : undefined;
+    if (analysisTurn) memory.setAnalysisState(analysisTurn.state, scopeKey);
+    const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
-        ? detectDeepQuestion(messages, agentConfig.intelligence)
+        ? detectDeepQuestion(messages, turnConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
-    const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
+    const gate =
+      iteration === 1 && turnConfig.intelligence && !analysisTurn?.result
+        ? await resolveDeepGate(
+            memory.pendingDeepStore(scopeKey),
+            messages,
+            routed,
+            turnConfig.intelligence,
+            hydrationCompleter(turnConfig)
+          )
+        : routed.deep && !analysisTurn?.result
+          ? { kind: 'run' as const, route: routed }
+          : { kind: 'pass' as const };
+    if (gate.kind === 'affirm') {
+      memory.addMessage({ role: 'assistant', content: gate.utterance });
+      return {
+        type: 'final',
+        response: gate.utterance,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: 'deep_affirmation_requested',
+          deepGoalGate: gate.gateDebug,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'deep',
+            outcome: 'affirmation_required',
+            response: gate.utterance,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+    }
+    const deepRoute = gate.kind === 'run' ? gate.route : routed;
+    const ranDeepTask = gate.kind === 'run';
     const deepResult =
       analysisTurn?.result ||
-      (ranDeepTask && agentConfig.intelligence
+      (ranDeepTask && turnConfig.intelligence
         ? await runDeepReasoning(
             messages,
-            agentConfig.intelligence,
+            turnConfig.intelligence,
             undefined,
             undefined,
-            deepRoute
+            deepRoute,
+            gate.kind === 'run' ? gate.goalOverride : undefined
           )
         : undefined);
     if (deepResult && deepResult.status !== 'succeeded') {
@@ -351,15 +575,25 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
-          model: agentConfig.model,
+          model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: deepResult.errorCode || deepResult.status,
           ...(ranDeepTask && { deepReasoning: deepDebug(deepRoute, deepResult) }),
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: ranDeepTask ? 'deep' : 'registry',
+            outcome: 'fallback',
+            response: DEEP_FAILURE_RESPONSE,
+            intelligence: turnConfig.intelligence,
+            deepResult,
+            errorCode: deepResult.errorCode || deepResult.status,
+          }),
           ...(analysisTurn && {
             analysisNavigation: {
               action: analysisTurn.decision.action,
               reason: analysisTurn.decision.reason,
               selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+              artifactId: analysisTurn.decision.artifactId,
             },
           }),
         },
@@ -367,17 +601,14 @@ async function stepLoop(
     }
     const completedAnalysisState =
       ranDeepTask && deepResult
-        ? analysisStateFromResult(
-            deepResult,
-            agentConfig.intelligence?.deepReasoning?.analysisStyle
-          )
+        ? analysisStateFromResult(deepResult, turnConfig.intelligence?.deepReasoning?.analysisStyle)
         : undefined;
-    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState);
+    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState, scopeKey);
     const turnEvidence = deepResult
       ? undefined
-      : await retrieveTurnEvidence(messages, agentConfig.intelligence);
+      : await retrieveTurnEvidence(messages, turnConfig.intelligence);
     const modelTools = deepResult ? [] : tools;
-    const contextBuilder = new ContextBuilder(agentConfig);
+    const contextBuilder = new ContextBuilder(turnConfig);
     const contextMessages = contextBuilder.buildContextMessages(
       messages,
       skills,
@@ -388,19 +619,24 @@ async function stepLoop(
 
     const response = await providerManager.complete(
       contextMessages,
-      agentConfig.model,
-      agentConfig.temperature,
-      agentConfig.maxTokens,
+      turnConfig.model,
+      turnConfig.temperature,
+      turnConfig.maxTokens,
       modelTools
     );
     const voiceGuard = guardAnalysisVoiceResponse(response.content, deepResult);
+    const coverageGuard = turnConfig.intelligence?.enabled
+      ? guardCoverageDisclaimer(messages, voiceGuard.text)
+      : { text: voiceGuard.text, inserted: false };
 
     const durationMs = Date.now() - startTime;
 
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: agentConfig.model,
+      model: response.model ?? turnConfig.model,
+      ...(response.model &&
+        response.model !== turnConfig.model && { requestedModel: turnConfig.model }),
       tokenUsage: response.usage
         ? {
             prompt: response.usage.promptTokens,
@@ -425,6 +661,7 @@ async function stepLoop(
           action: analysisTurn.decision.action,
           reason: analysisTurn.decision.reason,
           selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+          artifactId: analysisTurn.decision.artifactId,
         },
       }),
       ...(voiceGuard.limit !== undefined && {
@@ -433,13 +670,28 @@ async function stepLoop(
           replaced: voiceGuard.replaced,
         },
       }),
+      ...(turnConfig.intelligence?.enabled &&
+        isCoverageQuestion(messages) && {
+          coverageDisclaimer: {
+            inserted: coverageGuard.inserted,
+          },
+        }),
+      knowledgeScope: knowledgeScopeDebug(preparedScope),
+      evalTrace: evalTraceDebug(evalTrace, {
+        route: ranDeepTask ? 'deep' : analysisTurn?.result ? 'registry' : 'fast',
+        outcome: 'answered',
+        response: coverageGuard.text,
+        intelligence: turnConfig.intelligence,
+        turnEvidence,
+        deepResult,
+      }),
     };
 
     logger.info(
       {
         iteration,
         messageCount,
-        model: agentConfig.model,
+        model: turnConfig.model,
         tokenUsage: debug.tokenUsage,
         durationMs,
         finishReason: response.finishReason,
@@ -464,7 +716,8 @@ async function stepLoop(
         toolCalls: response.toolCalls,
         assistantContent: response.content || '',
         iteration,
-        agentConfig,
+        agentConfig: turnConfig,
+        evalTrace,
       });
       pendingTimestamps.set(requestId, Date.now());
 
@@ -482,10 +735,10 @@ async function stepLoop(
     // No tool calls — final response
     memory.addMessage({
       role: 'assistant',
-      content: voiceGuard.text,
+      content: coverageGuard.text,
     });
 
-    return { type: 'final', response: voiceGuard.text, debug };
+    return { type: 'final', response: coverageGuard.text, debug };
   }
 
   return {
@@ -509,7 +762,8 @@ export async function* stepLoopStream(
   memory: Memory,
   agentConfig: AgentConfig,
   iteration: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  evalTrace = false
 ): AsyncGenerator<StreamEvent | ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -521,37 +775,105 @@ export async function* stepLoopStream(
     const skills = skillsLoader.getSkills();
     const tools = toolRegistry.getDefinitions();
     const messages = memory.getMessages();
-    const analysisState = iteration === 1 ? memory.getAnalysisState() : undefined;
+    const preparedScope = await prepareCollectionScopeTurn(messages, memory, agentConfig, signal);
+    const turnConfig = preparedScope
+      ? { ...agentConfig, intelligence: preparedScope.intelligence }
+      : agentConfig;
+    const scopeKey = preparedScope?.scopeKey || agentConfig.intelligenceScopeKey || 'default';
+    if (iteration === 1 && preparedScope?.reply) {
+      memory.addMessage({ role: 'assistant', content: preparedScope.reply });
+      yield { type: 'text', delta: preparedScope.reply };
+      yield {
+        type: 'final',
+        response: preparedScope.reply,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: `knowledge_scope_${preparedScope.action}`,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'scope',
+            outcome: 'scope_reply',
+            response: preparedScope.reply,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+      return;
+    }
+    const analysisState = iteration === 1 ? memory.getAnalysisState(scopeKey) : undefined;
     const analysisTurn =
-      analysisState && agentConfig.intelligence
+      analysisState && turnConfig.intelligence
         ? await resolveExistingAnalysisTurn(
             messages,
             analysisState,
-            agentConfig.intelligence,
+            turnConfig.intelligence,
             signal
           )
-        : undefined;
-    if (analysisTurn) memory.setAnalysisState(analysisTurn.state);
-    const deepRoute =
+        : iteration === 1 && turnConfig.intelligence
+          ? await resolveRegistryAnalysisTurn(messages, turnConfig.intelligence, signal)
+          : undefined;
+    if (analysisTurn) memory.setAnalysisState(analysisTurn.state, scopeKey);
+    const routed =
       analysisTurn?.deepRoute ||
       (iteration === 1
-        ? detectDeepQuestion(messages, agentConfig.intelligence)
+        ? detectDeepQuestion(messages, turnConfig.intelligence)
         : { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' as const });
-    const ranDeepTask = deepRoute.deep && !analysisTurn?.result;
+    const gate =
+      iteration === 1 && turnConfig.intelligence && !analysisTurn?.result
+        ? await resolveDeepGate(
+            memory.pendingDeepStore(scopeKey),
+            messages,
+            routed,
+            turnConfig.intelligence,
+            hydrationCompleter(turnConfig)
+          )
+        : routed.deep && !analysisTurn?.result
+          ? { kind: 'run' as const, route: routed }
+          : { kind: 'pass' as const };
+    if (gate.kind === 'affirm') {
+      memory.addMessage({ role: 'assistant', content: gate.utterance });
+      yield { type: 'text', delta: gate.utterance };
+      yield {
+        type: 'final',
+        response: gate.utterance,
+        debug: {
+          iteration,
+          messageCount,
+          model: turnConfig.model,
+          durationMs: Date.now() - startTime,
+          finishReason: 'deep_affirmation_requested',
+          deepGoalGate: gate.gateDebug,
+          knowledgeScope: knowledgeScopeDebug(preparedScope),
+          evalTrace: evalTraceDebug(evalTrace, {
+            route: 'deep',
+            outcome: 'affirmation_required',
+            response: gate.utterance,
+            intelligence: turnConfig.intelligence,
+          }),
+        },
+      };
+      return;
+    }
+    const deepRoute = gate.kind === 'run' ? gate.route : routed;
+    const ranDeepTask = gate.kind === 'run';
     let deepResult: DeepReasoningResult | undefined = analysisTurn?.result;
-    if (ranDeepTask && agentConfig.intelligence) {
+    if (ranDeepTask && turnConfig.intelligence) {
       yield {
         type: 'deep_started',
-        acknowledgement: deepAcknowledgement(agentConfig.intelligence),
+        acknowledgement: deepAcknowledgement(turnConfig.intelligence),
         score: deepRoute.score,
         reasons: deepRoute.reasons,
       };
       for await (const event of streamDeepReasoning(
         messages,
-        agentConfig.intelligence,
+        turnConfig.intelligence,
         signal,
         undefined,
-        deepRoute
+        deepRoute,
+        gate.kind === 'run' ? gate.goalOverride : undefined
       )) {
         if (event.type === 'progress') {
           yield {
@@ -562,6 +884,17 @@ export async function* stepLoopStream(
             completedSteps: event.progress.completedSteps,
             maxSteps: event.progress.maxSteps,
             retrievalQueries: event.progress.retrievalQueries,
+            currentPass: event.progress.currentPass,
+            completedPasses: event.progress.completedPasses,
+            maxPasses: event.progress.maxPasses,
+            retrievalPlanned: event.progress.retrievalPlanned,
+            retrievalCompleted: event.progress.retrievalCompleted,
+            evidenceItems: event.progress.evidenceItems,
+            model: event.progress.model,
+            artifactStatus: event.progress.artifactStatus,
+            artifactId: event.progress.artifactId,
+            phaseStartedAt: event.progress.phaseStartedAt,
+            heartbeatAt: event.progress.heartbeatAt,
           };
         } else {
           deepResult = event.result;
@@ -588,10 +921,19 @@ export async function* stepLoopStream(
           debug: {
             iteration,
             messageCount,
-            model: agentConfig.model,
+            model: turnConfig.model,
             durationMs: Date.now() - startTime,
             finishReason: failed.errorCode || failed.status,
             deepReasoning: deepDebug(deepRoute, failed),
+            knowledgeScope: knowledgeScopeDebug(preparedScope),
+            evalTrace: evalTraceDebug(evalTrace, {
+              route: 'deep',
+              outcome: 'fallback',
+              response: DEEP_FAILURE_RESPONSE,
+              intelligence: turnConfig.intelligence,
+              deepResult: failed,
+              errorCode: failed.errorCode || failed.status,
+            }),
           },
         };
         return;
@@ -599,17 +941,14 @@ export async function* stepLoopStream(
     }
     const completedAnalysisState =
       ranDeepTask && deepResult
-        ? analysisStateFromResult(
-            deepResult,
-            agentConfig.intelligence?.deepReasoning?.analysisStyle
-          )
+        ? analysisStateFromResult(deepResult, turnConfig.intelligence?.deepReasoning?.analysisStyle)
         : undefined;
-    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState);
+    if (completedAnalysisState) memory.setAnalysisState(completedAnalysisState, scopeKey);
     const turnEvidence = deepResult
       ? undefined
-      : await retrieveTurnEvidence(messages, agentConfig.intelligence);
+      : await retrieveTurnEvidence(messages, turnConfig.intelligence);
     const modelTools = deepResult ? [] : tools;
-    const contextBuilder = new ContextBuilder(agentConfig);
+    const contextBuilder = new ContextBuilder(turnConfig);
     const contextMessages = contextBuilder.buildContextMessages(
       messages,
       skills,
@@ -622,19 +961,22 @@ export async function* stepLoopStream(
     let toolCalls: ToolCall[] | undefined;
     let finishReason: string | undefined;
     let usage: LLMResponse['usage'];
+    let servedModel: string | undefined;
     let firstTokenAt: number | undefined;
-    const holdBoundedVoice = analysisVoiceWordLimit(deepResult) !== undefined;
+    const holdResponse =
+      analysisVoiceWordLimit(deepResult) !== undefined ||
+      (!!turnConfig.intelligence?.enabled && isCoverageQuestion(messages));
 
     for await (const ev of providerManager.completeStream(
       contextMessages,
-      agentConfig.model,
-      agentConfig.temperature,
-      agentConfig.maxTokens,
+      turnConfig.model,
+      turnConfig.temperature,
+      turnConfig.maxTokens,
       modelTools
     )) {
       if (ev.type === 'text') {
         text += ev.delta;
-        if (!holdBoundedVoice) {
+        if (!holdResponse) {
           if (firstTokenAt === undefined) firstTokenAt = Date.now();
           yield ev; // forward unbounded projections as they arrive
         }
@@ -643,20 +985,26 @@ export async function* stepLoopStream(
       } else if (ev.type === 'done') {
         finishReason = ev.finishReason;
         usage = ev.usage;
+        servedModel = ev.model;
       }
     }
     const voiceGuard = guardAnalysisVoiceResponse(text, deepResult);
-    text = voiceGuard.text;
-    if (holdBoundedVoice && text) {
+    const coverageGuard = turnConfig.intelligence?.enabled
+      ? guardCoverageDisclaimer(messages, voiceGuard.text)
+      : { text: voiceGuard.text, inserted: false };
+    text = coverageGuard.text;
+    if (holdResponse && text) {
       firstTokenAt = Date.now();
-      yield { type: 'text', delta: text };
+      yield { type: 'text', delta: text, held: true };
     }
     if (voiceGuard.replaced) finishReason = 'analysis_voice_limit_fallback';
 
     const debug: DebugInfo = {
       iteration,
       messageCount,
-      model: agentConfig.model,
+      model: servedModel ?? turnConfig.model,
+      ...(servedModel &&
+        servedModel !== turnConfig.model && { requestedModel: turnConfig.model }),
       tokenUsage: usage
         ? {
             prompt: usage.promptTokens,
@@ -682,6 +1030,7 @@ export async function* stepLoopStream(
           action: analysisTurn.decision.action,
           reason: analysisTurn.decision.reason,
           selectedTopicIds: analysisTurn.decision.selectedTopicIds,
+          artifactId: analysisTurn.decision.artifactId,
         },
       }),
       ...(voiceGuard.limit !== undefined && {
@@ -689,6 +1038,21 @@ export async function* stepLoopStream(
           limit: voiceGuard.limit,
           replaced: voiceGuard.replaced,
         },
+      }),
+      ...(turnConfig.intelligence?.enabled &&
+        isCoverageQuestion(messages) && {
+          coverageDisclaimer: {
+            inserted: coverageGuard.inserted,
+          },
+        }),
+      knowledgeScope: knowledgeScopeDebug(preparedScope),
+      evalTrace: evalTraceDebug(evalTrace, {
+        route: ranDeepTask ? 'deep' : analysisTurn?.result ? 'registry' : 'fast',
+        outcome: 'answered',
+        response: text,
+        intelligence: turnConfig.intelligence,
+        turnEvidence,
+        deepResult,
       }),
     };
 
@@ -701,7 +1065,8 @@ export async function* stepLoopStream(
         toolCalls,
         assistantContent: text,
         iteration,
-        agentConfig,
+        agentConfig: turnConfig,
+        evalTrace,
       });
       pendingTimestamps.set(requestId, Date.now());
       yield {
@@ -802,8 +1167,13 @@ async function streamLoopToSSE(
   });
   try {
     for await (const ev of gen) {
-      if ((ev as StreamEvent).type === 'text')
-        sseWrite(res, 'delta', { text: (ev as { delta: string }).delta });
+      if ((ev as StreamEvent).type === 'text') {
+        const textEvent = ev as { delta: string; held?: boolean };
+        sseWrite(res, 'delta', {
+          text: textEvent.delta,
+          ...(textEvent.held && { held: true }),
+        });
+      }
       else if ((ev as StreamEvent).type === 'deep_started') sseWrite(res, 'deep_started', ev);
       else if ((ev as StreamEvent).type === 'deep_progress') sseWrite(res, 'deep_progress', ev);
       else if ((ev as ApiResponse).type === 'tool_pending') sseWrite(res, 'tool_pending', ev);
@@ -871,6 +1241,9 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     model?: string;
     profile?: unknown;
     analysisStyle?: unknown;
+    responseMode?: unknown;
+    evalTrace?: unknown;
+    runtimeSettings?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -888,6 +1261,25 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sendJson(res, 400, { error: 'Invalid "analysisStyle" field' });
     return;
   }
+  if (
+    body.responseMode !== undefined &&
+    body.responseMode !== 'text' &&
+    body.responseMode !== 'voice'
+  ) {
+    sendJson(res, 400, { error: 'Invalid "responseMode" field' });
+    return;
+  }
+  if (body.evalTrace !== undefined && typeof body.evalTrace !== 'boolean') {
+    sendJson(res, 400, { error: 'Invalid "evalTrace" field' });
+    return;
+  }
+  if (body.evalTrace === true && !isEvalTraceEnabled()) {
+    sendJson(res, 403, {
+      error: 'Evaluation trace is disabled',
+      code: 'eval_trace_disabled',
+    });
+    return;
+  }
   const sessionId = body.sessionId ?? 'default';
   const memory = getMemory(sessionId);
 
@@ -897,15 +1289,20 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
   const agentConfig = getAgentConfig(
     body.model,
     profile,
-    body.analysisStyle as AnalysisStyle | undefined
+    body.analysisStyle as AnalysisStyle | undefined,
+    body.responseMode as 'text' | 'voice' | undefined,
+    sanitizeRuntimeSettings(body.runtimeSettings)
   );
   if (wantsStream(req)) {
     const controller = new AbortController();
     res.once('close', () => controller.abort());
-    await streamLoopToSSE(res, stepLoopStream(memory, agentConfig, 0, controller.signal));
+    await streamLoopToSSE(
+      res,
+      stepLoopStream(memory, agentConfig, 0, controller.signal, body.evalTrace === true)
+    );
     return;
   }
-  const result = await stepLoop(memory, agentConfig, 0);
+  const result = await stepLoop(memory, agentConfig, 0, body.evalTrace === true);
   sendJson(res, 200, result);
 }
 
@@ -963,11 +1360,22 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
   if (wantsStream(req)) {
     await streamLoopToSSE(
       res,
-      stepLoopStream(pending.memory, pending.agentConfig, pending.iteration)
+      stepLoopStream(
+        pending.memory,
+        pending.agentConfig,
+        pending.iteration,
+        undefined,
+        pending.evalTrace
+      )
     );
     return;
   }
-  const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
+  const result = await stepLoop(
+    pending.memory,
+    pending.agentConfig,
+    pending.iteration,
+    pending.evalTrace
+  );
   sendJson(res, 200, result);
 }
 
@@ -1007,11 +1415,22 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
   if (wantsStream(req)) {
     await streamLoopToSSE(
       res,
-      stepLoopStream(pending.memory, pending.agentConfig, pending.iteration)
+      stepLoopStream(
+        pending.memory,
+        pending.agentConfig,
+        pending.iteration,
+        undefined,
+        pending.evalTrace
+      )
     );
     return;
   }
-  const result = await stepLoop(pending.memory, pending.agentConfig, pending.iteration);
+  const result = await stepLoop(
+    pending.memory,
+    pending.agentConfig,
+    pending.iteration,
+    pending.evalTrace
+  );
   sendJson(res, 200, result);
 }
 

@@ -48,10 +48,12 @@ class WebRTCAudioSource(MediaStreamTrack):
 
         self._frame_count += 1
 
-        if self._generator:
-            chunk = self._generator.next_chunk()
+        generator = self._generator
+        if generator:
+            chunk = generator.next_chunk()
             samples = np.frombuffer(chunk.samples, dtype=np.int16)
         else:
+            chunk = None
             samples = np.zeros(FRAME_SAMPLES, dtype=np.int16)
 
         frame = AudioFrame.from_ndarray(
@@ -62,5 +64,11 @@ class WebRTCAudioSource(MediaStreamTrack):
         frame.sample_rate = SAMPLE_RATE
         frame.pts = (self._frame_count - 1) * FRAME_SAMPLES
         frame.time_base = Fraction(1, SAMPLE_RATE)
+
+        # This is the WebRTC transport boundary available to NanoClaw: the
+        # frame has been produced for aiortc. A stale generator's confirm is
+        # rejected by Session's generation fence.
+        if generator is not None and chunk is not None:
+            generator.confirm(chunk.payload_bytes)
 
         return frame

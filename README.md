@@ -373,6 +373,15 @@ How it works:
 | **Piper TTS**     | Docker                       | Text-to-speech — runs locally, streams audio via WebRTC              |
 | **Browser UI**    | Your browser                 | Hands-free phone VAD, chat bubbles, tool approval cards, debug panel |
 
+### Natural speech delivery
+
+Browser and phone answers use deterministic prepared speech by default (`nanoclaw-speech-v1`).
+The compiler removes visual markup, normalizes common spoken values, expands curated acronyms,
+creates short semantic chunks, adds purpose-aware pauses, and protects the final word with a small
+transport tail. The console's **Natural delivery** switch provides a live Prepared/Raw comparison,
+and `GET /api/voice/version` reports the deployed compiler version. See
+[`docs/design/2026-07-22-speech-preparation-phase2.md`](docs/design/2026-07-22-speech-preparation-phase2.md).
+
 ## Docker Details
 
 ### What `run.sh` does
@@ -396,6 +405,7 @@ docker run -it --rm \
   -e STT_SERVICE_URL="http://host.docker.internal:8200" \
   -e NANO_CLAW_KNOWLEDGE="/app/sites/spacechannel/knowledge.md" \
   -v nano-claw-models:/app/voice/models \
+  -e NANO_CLAW_MEMORY_DIR=/app/data/memory \
   -v nano-claw-data:/app/data \
   -v "$(pwd)/data":/app/sites:ro \
   nano-claw-voice

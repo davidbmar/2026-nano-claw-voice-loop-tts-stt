@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ContextBuilder } from '../src/agent/context';
+import {
+  ContextBuilder,
+  guardCoverageDisclaimer,
+  isCoverageQuestion,
+} from '../src/agent/context';
 import { retrieveTurnEvidence } from '../src/agent/intelligence';
 import { createDefaultConfig, mergeEnvConfig } from '../src/config/index';
 import type { IntelligenceConfig, Message } from '../src/types';
@@ -27,6 +31,7 @@ afterEach(() => {
   delete process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS;
   delete process.env.NANO_CLAW_INTELLIGENCE_PROFILE;
   delete process.env.NANO_CLAW_INTELLIGENCE_GROUNDING;
+  delete process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS;
   delete process.env.NANO_CLAW_DEEP_REASONING;
   delete process.env.NANO_CLAW_DEEP_ROUTING;
   delete process.env.NANO_CLAW_DEEP_THRESHOLD;
@@ -44,8 +49,17 @@ describe('retrieveTurnEvidence', () => {
             text: 'Exclusive leads improve the buyer close rate.',
             citation: {
               citation_id: 'cite_1',
+              source_id: 'src_1',
+              document_id: 'doc_1',
+              source_ref: 'file:///repo/src/router.ts',
               title: 'Owning the Demand',
-              locator: { section_path: ['Part I', 'A lead is a fish'] },
+              locator: {
+                section_path: ['Part I', 'A lead is a fish'],
+                char_start: 40,
+                char_end: 88,
+                line_start: 12,
+                line_end: 14,
+              },
             },
             score: { rank: 1 },
           },
@@ -60,6 +74,10 @@ describe('retrieveTurnEvidence', () => {
       citationId: 'cite_1',
       title: 'Owning the Demand',
       sectionPath: ['Part I', 'A lead is a fish'],
+      sourceRef: 'file:///repo/src/router.ts',
+      documentId: 'doc_1',
+      charStart: 40,
+      lineStart: 12,
     });
     expect(post).toHaveBeenCalledWith(
       'http://127.0.0.1:8000/v1/retrieve',
@@ -136,6 +154,8 @@ describe('ContextBuilder turn evidence', () => {
       prompt.indexOf(SYSTEM_CACHE_MARKER)
     );
     expect(prompt).toContain('do not read internal citation IDs aloud');
+    expect(prompt).toContain('lack of evidence in these retrieved passages is not proof');
+    expect(prompt).toContain("I didn't find evidence about that in what's loaded");
   });
 
   it('instructs strict profiles to abstain on no match', () => {
@@ -146,7 +166,42 @@ describe('ContextBuilder turn evidence', () => {
       items: [],
     });
 
-    expect(prompt).toContain('document does not appear to cover it');
+    expect(prompt).toContain("I didn't find evidence about that in what's loaded");
+    expect(prompt).toContain('retrieval miss is not proof');
+    expect(prompt).not.toContain('document does not appear to cover it');
+  });
+});
+
+describe('coverage disclaimer guard', () => {
+  const coverageQuestion: Message[] = [
+    { role: 'user', content: 'What evidence is missing or ambiguous?' },
+  ];
+
+  it('adds the loaded-corpus hedge when a provider states bare gaps', () => {
+    const guarded = guardCoverageDisclaimer(
+      coverageQuestion,
+      'The analysis flagged three implementation gaps.'
+    );
+
+    expect(isCoverageQuestion(coverageQuestion)).toBe(true);
+    expect(guarded.inserted).toBe(true);
+    expect(guarded.text).toContain("didn't find complete evidence");
+    expect(guarded.text).toContain("what's loaded");
+    expect(guarded.text).toContain('not proof');
+  });
+
+  it('does not duplicate an existing hedge or touch an ordinary lookup', () => {
+    const hedged = "I didn't find evidence about that in what's loaded.";
+    expect(guardCoverageDisclaimer(coverageQuestion, hedged)).toEqual({
+      text: hedged,
+      inserted: false,
+    });
+    expect(
+      guardCoverageDisclaimer(
+        [{ role: 'user', content: 'Where is request routing implemented?' }],
+        'It is in server.ts.'
+      )
+    ).toEqual({ text: 'It is in server.ts.', inserted: false });
   });
 });
 
@@ -156,6 +211,9 @@ describe('intelligence environment configuration', () => {
     process.env.NANO_CLAW_INTELLIGENCE_TENANT = 'personal';
     process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS = 'owning-the-demand, notes';
     process.env.NANO_CLAW_INTELLIGENCE_GROUNDING = 'strict';
+    // Retrieval timeout override: the 750ms schema default drops evidence
+    // under GPU contention with a local LLM (timeouts observed at 1.4-1.6s).
+    process.env.NANO_CLAW_INTELLIGENCE_TIMEOUT_MS = '2500';
 
     const merged = mergeEnvConfig(createDefaultConfig());
 
@@ -164,6 +222,7 @@ describe('intelligence environment configuration', () => {
       tenantId: 'personal',
       collectionIds: ['owning-the-demand', 'notes'],
       groundingMode: 'strict',
+      timeoutMs: 2500,
     });
   });
 

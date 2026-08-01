@@ -1,0 +1,83 @@
+{
+  "schema_version": "rb_subgoal_v0",
+  "kind": "goal_region",
+  "id": "emergency",
+  "greeting": "Tell me what's going on \u2014 what's the problem, and how urgent is it?",
+  "goal": "Understand the caller's problem in their own words. Capture each required fact, asking one concise question at a time only for what is missing. Do not promise a booking, dispatch, or that anything was filed; a later step saves the request for the office.",
+  "persona": "You are a brief, practical phone assistant for Rivera Plumbing. One question at a time. Preserve the caller's wording in descriptions. Never quote prices.",
+  "slots": {
+    "emergency_details": {
+      "type": "text",
+      "required": true
+    }
+  },
+  "appointment_types": null,
+  "escape_phrases": [
+    "operator",
+    "human",
+    "never mind",
+    "cancel"
+  ],
+  "max_turns": 10,
+  "deadline_s": 300,
+  "uses_live_calendar": false,
+  "copy": {
+    "confirm_template": "Should I save this request for the office?",
+    "booked_template": "",
+    "escape_text": "No problem \u2014 I'll stop there. You can reach the office directly during business hours. Goodbye.",
+    "budget_text": "I couldn't finish the request on this call \u2014 please try again or call the office directly. Goodbye.",
+    "apology_unavailable": "",
+    "slot_taken_text": ""
+  },
+  "riff": {
+    "grounding": "none",
+    "exit_names": [
+      "classified"
+    ],
+    "sealed_slots": [],
+    "write_once_slots": [],
+    "model": "deepseek/deepseek-v4-flash",
+    "business_tz": "America/Chicago"
+  },
+  "tail": {
+    "confirm": {
+      "style": "locked_choice",
+      "choice_module": "confirm_yesno_numbered",
+      "must_include": [
+        "emergency_details"
+      ],
+      "on_denied": "reenter_region"
+    },
+    "collect": [
+      {
+        "id": "caller_name",
+        "label": "Name",
+        "kind": "name",
+        "phase": "identity",
+        "prompt": "What's your name?"
+      },
+      {
+        "id": "callback_number",
+        "label": "Callback number",
+        "kind": "phone",
+        "phase": "identity",
+        "prompt": "What's the best callback number?"
+      },
+      {
+        "id": "service_address",
+        "label": "Service address",
+        "kind": "address",
+        "phase": "identity",
+        "prompt": "What's the service address?"
+      }
+    ],
+    "submit": {
+      "tool": "record_issue",
+      "success_line": "Got it \u2014 your request is saved and the shop will call you back to schedule. Goodbye.",
+      "on_failure": "needs_callback"
+    },
+    "on_escape": "needs_callback",
+    "on_budget": "needs_callback"
+  },
+  "next_subgoal_id": null
+}

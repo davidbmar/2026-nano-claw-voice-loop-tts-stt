@@ -157,7 +157,7 @@ assert.deepEqual(
 assert.equal(player.context.createdWorkletNodes.length, 1, "one continuous player node is created");
 assert.equal(player.context.createdSources.length, 0, "the worklet path creates no buffer sources");
 assert.equal(player.context.createdBuffers.length, 0, "the worklet path creates no per-frame buffers");
-assert.match(player.context.addedModules[0], /pcm-player-worklet\.js$/);
+assert.match(player.context.addedModules[0], /pcm-player-worklet\.js\?v=/);
 assert.equal(player.analyser.destination, player.context.destination);
 
 const node = player.context.createdWorkletNodes[0];
@@ -192,13 +192,27 @@ assert.ok(
 );
 
 player.enqueue(frame);
+// The very first block after start ramps in from zero (a clean onset, no
+// startup tick), then plays at full level.
+const firstBlock = node.render(128)[0];
+assert.ok(firstBlock[0] < 0.5, "playback onset ramps up from zero");
 assert.ok(
-    node.render(128)[0].every((sample) => sample === 0.5),
-    "crossing the prebuffer threshold starts PCM playback",
+    firstBlock.subarray(48).every((sample) => sample === 0.5),
+    "playback reaches full level after the onset fade-in",
 );
 
 const drained = node.render(8000)[0];
-assert.ok(drained.subarray(0, 7552).every((sample) => sample === 0.5));
+// The steady body plays at full amplitude; only the last ~1ms before the
+// underrun ramps down so the drop into the zero-filled remainder is not a
+// step (a click). The remainder stays clean zero — no repeated garbage.
+assert.ok(
+    drained.subarray(0, 7552 - 48).every((sample) => sample === 0.5),
+    "the body before an underrun plays unaltered",
+);
+assert.ok(
+    drained[7552 - 1] < 0.5 && drained[7552 - 1] >= 0,
+    "the underrun edge ramps down instead of stepping to silence",
+);
 assert.ok(
     drained.subarray(7552).every((sample) => sample === 0),
     "an underrun zero-fills the rest of the output instead of repeating samples",
@@ -209,9 +223,13 @@ assert.ok(
 );
 
 player.enqueue(frame);
+// The first block after an underrun ramps its head up from zero (declicking
+// the resume tick heard right before the next word), then plays at full level.
+const resumed = node.render(128)[0];
+assert.ok(resumed[0] < 0.5, "the resume edge ramps up instead of stepping from silence");
 assert.ok(
-    node.render(128)[0].every((sample) => sample === 0.5),
-    "an already-started stream resumes as soon as the next frame arrives",
+    resumed.subarray(48).every((sample) => sample === 0.5),
+    "an already-started stream resumes at full level after the short fade-in",
 );
 player.enqueue(frame);
 player.stop();
@@ -234,6 +252,14 @@ assert.equal(node.messages.length, messagesAtPause, "paused playback drops in-fl
 player.unpause();
 player.enqueue(frame);
 assert.equal(node.messages.at(-1).type, "samples");
+const messagesBeforeEnd = node.messages.length;
+player.end();
+player.enqueue(frame);
+assert.equal(
+    node.messages.length,
+    messagesBeforeEnd,
+    "normal completion rejects late network frames without flushing buffered audio",
+);
 
 const boundedLeadPlayer = new Pcm16AudioPlayer({
     AudioContextClass: FakeAudioContext,

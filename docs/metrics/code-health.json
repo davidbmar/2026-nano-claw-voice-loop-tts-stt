@@ -1,0 +1,1340 @@
+{
+  "generated_at": "2026-07-25T23:17:49+00:00",
+  "python": [
+    {
+      "file": "voice/__init__.py",
+      "lines": 1,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/__main__.py",
+      "lines": 4,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/audio/__init__.py",
+      "lines": 1,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/audio/audio_queue.py",
+      "lines": 83,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/audio/webrtc_audio_source.py",
+      "lines": 75,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/backoff.py",
+      "lines": 35,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/booking.py",
+      "lines": 277,
+      "long_functions": [],
+      "broad_excepts": 1,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/calendar_client.py",
+      "lines": 388,
+      "long_functions": [
+        {
+          "name": "availability_snapshot",
+          "line": 275,
+          "length": 86
+        }
+      ],
+      "broad_excepts": 7,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/cost_ledger.py",
+      "lines": 988,
+      "long_functions": [
+        {
+          "name": "write_call",
+          "line": 86,
+          "length": 77
+        },
+        {
+          "name": "load_pricing",
+          "line": 192,
+          "length": 66
+        },
+        {
+          "name": "build_report",
+          "line": 284,
+          "length": 222
+        },
+        {
+          "name": "install_phone_tracking",
+          "line": 750,
+          "length": 94
+        }
+      ],
+      "broad_excepts": 7,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/flow_session.py",
+      "lines": 633,
+      "long_functions": [
+        {
+          "name": "create",
+          "line": 423,
+          "length": 64
+        }
+      ],
+      "broad_excepts": 4,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/goal_region.py",
+      "lines": 771,
+      "long_functions": [
+        {
+          "name": "turn",
+          "line": 241,
+          "length": 114
+        },
+        {
+          "name": "_validate_candidates",
+          "line": 401,
+          "length": 259
+        }
+      ],
+      "broad_excepts": 1,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/kokoro_client.py",
+      "lines": 49,
+      "long_functions": [],
+      "broad_excepts": 2,
+      "silent_excepts": [
+        {
+          "line": 47
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/lux_client.py",
+      "lines": 51,
+      "long_functions": [],
+      "broad_excepts": 2,
+      "silent_excepts": [
+        {
+          "line": 49
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/metrics_db.py",
+      "lines": 201,
+      "long_functions": [],
+      "broad_excepts": 9,
+      "silent_excepts": [
+        {
+          "line": 108
+        },
+        {
+          "line": 178
+        },
+        {
+          "line": 186
+        },
+        {
+          "line": 199
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/phone.py",
+      "lines": 1452,
+      "long_functions": [
+        {
+          "name": "__init__",
+          "line": 349,
+          "length": 85
+        },
+        {
+          "name": "_run_turn",
+          "line": 732,
+          "length": 68
+        },
+        {
+          "name": "_stream_reply",
+          "line": 801,
+          "length": 148
+        },
+        {
+          "name": "_play_synthesized",
+          "line": 1073,
+          "length": 89
+        },
+        {
+          "name": "stream_sentences",
+          "line": 852,
+          "length": 82
+        }
+      ],
+      "broad_excepts": 6,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/phone_audio.py",
+      "lines": 591,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [
+        {
+          "line": 271
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/phone_tap.py",
+      "lines": 209,
+      "long_functions": [],
+      "broad_excepts": 9,
+      "silent_excepts": [
+        {
+          "line": 98
+        },
+        {
+          "line": 109
+        },
+        {
+          "line": 126
+        },
+        {
+          "line": 146
+        },
+        {
+          "line": 156
+        },
+        {
+          "line": 185
+        },
+        {
+          "line": 207
+        },
+        {
+          "line": 197
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/processing_audio.py",
+      "lines": 33,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/region_providers.py",
+      "lines": 441,
+      "long_functions": [
+        {
+          "name": "_chat_completion",
+          "line": 179,
+          "length": 95
+        }
+      ],
+      "broad_excepts": 0,
+      "silent_excepts": [
+        {
+          "line": 357
+        },
+        {
+          "line": 233
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/scheduling_domains.py",
+      "lines": 217,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/sentence_pipeline.py",
+      "lines": 170,
+      "long_functions": [],
+      "broad_excepts": 2,
+      "silent_excepts": [
+        {
+          "line": 168
+        },
+        {
+          "line": 162
+        },
+        {
+          "line": 129
+        },
+        {
+          "line": 131
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/server.py",
+      "lines": 2717,
+      "long_functions": [
+        {
+          "name": "client_log_handler",
+          "line": 308,
+          "length": 72
+        },
+        {
+          "name": "websocket_handler",
+          "line": 382,
+          "length": 456
+        },
+        {
+          "name": "_capture_user_utterance",
+          "line": 963,
+          "length": 70
+        },
+        {
+          "name": "_handle_scheduler_request",
+          "line": 1263,
+          "length": 101
+        },
+        {
+          "name": "_consume_sse",
+          "line": 1612,
+          "length": 265
+        },
+        {
+          "name": "conversation_detail_handler",
+          "line": 2296,
+          "length": 61
+        }
+      ],
+      "broad_excepts": 25,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/silero_vad.py",
+      "lines": 128,
+      "long_functions": [],
+      "broad_excepts": 1,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/speech_preparer.py",
+      "lines": 782,
+      "long_functions": [
+        {
+          "name": "_structured_segments",
+          "line": 356,
+          "length": 78
+        },
+        {
+          "name": "normalize_spoken_forms",
+          "line": 436,
+          "length": 107
+        },
+        {
+          "name": "compile_speech",
+          "line": 717,
+          "length": 65
+        }
+      ],
+      "broad_excepts": 0,
+      "silent_excepts": [
+        {
+          "line": 46
+        },
+        {
+          "line": 57
+        },
+        {
+          "line": 85
+        },
+        {
+          "line": 549
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/stt.py",
+      "lines": 86,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/text_chunker.py",
+      "lines": 87,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/tts.py",
+      "lines": 304,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [
+        {
+          "line": 27
+        },
+        {
+          "line": 199
+        },
+        {
+          "line": 41
+        },
+        {
+          "line": 270
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/types.py",
+      "lines": 25,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/voice_catalog.py",
+      "lines": 88,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/wav.py",
+      "lines": 16,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/__init__.py",
+      "lines": 7,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/aiohttp_adapter.py",
+      "lines": 812,
+      "long_functions": [
+        {
+          "name": "__init__",
+          "line": 257,
+          "length": 66
+        },
+        {
+          "name": "google_handler",
+          "line": 430,
+          "length": 118
+        },
+        {
+          "name": "bind_websocket",
+          "line": 611,
+          "length": 65
+        }
+      ],
+      "broad_excepts": 8,
+      "silent_excepts": [
+        {
+          "line": 204
+        },
+        {
+          "line": 437
+        },
+        {
+          "line": 445
+        },
+        {
+          "line": 466
+        },
+        {
+          "line": 478
+        },
+        {
+          "line": 492
+        },
+        {
+          "line": 494
+        },
+        {
+          "line": 720
+        },
+        {
+          "line": 390
+        },
+        {
+          "line": 793
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/google_verifier.py",
+      "lines": 890,
+      "long_functions": [
+        {
+          "name": "__init__",
+          "line": 328,
+          "length": 69
+        },
+        {
+          "name": "verify_id_token",
+          "line": 636,
+          "length": 94
+        }
+      ],
+      "broad_excepts": 2,
+      "silent_excepts": [
+        {
+          "line": 212
+        },
+        {
+          "line": 314
+        },
+        {
+          "line": 304
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/policy.py",
+      "lines": 430,
+      "long_functions": [
+        {
+          "name": "issue",
+          "line": 305,
+          "length": 65
+        }
+      ],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/sqlite_store.py",
+      "lines": 924,
+      "long_functions": [
+        {
+          "name": "backup_database",
+          "line": 253,
+          "length": 68
+        },
+        {
+          "name": "issue_hashed_session",
+          "line": 482,
+          "length": 68
+        },
+        {
+          "name": "get_conversation_page",
+          "line": 811,
+          "length": 69
+        }
+      ],
+      "broad_excepts": 4,
+      "silent_excepts": [
+        {
+          "line": 370
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/webauth/store.py",
+      "lines": 68,
+      "long_functions": [],
+      "broad_excepts": 0,
+      "silent_excepts": [],
+      "debt": 0
+    },
+    {
+      "file": "voice/webrtc.py",
+      "lines": 799,
+      "long_functions": [
+        {
+          "name": "__init__",
+          "line": 69,
+          "length": 74
+        }
+      ],
+      "broad_excepts": 3,
+      "silent_excepts": [
+        {
+          "line": 460
+        },
+        {
+          "line": 482
+        },
+        {
+          "line": 488
+        }
+      ],
+      "debt": 0
+    },
+    {
+      "file": "voice/ws_audio.py",
+      "lines": 205,
+      "long_functions": [],
+      "broad_excepts": 1,
+      "silent_excepts": [
+        {
+          "line": 142
+        },
+        {
+          "line": 203
+        }
+      ],
+      "debt": 0
+    }
+  ],
+  "typescript": [
+    {
+      "file": "src/agent/analysis-navigation.ts",
+      "lines": 741,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/context.ts",
+      "lines": 473,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/deep-reasoning.ts",
+      "lines": 1485,
+      "catches": 6,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/eval-trace.ts",
+      "lines": 240,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/intelligence.ts",
+      "lines": 173,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/knowledge-scope.ts",
+      "lines": 375,
+      "catches": 1,
+      "swallowed_catches": [
+        {
+          "line": 127
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/knowledge.ts",
+      "lines": 57,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/loop.ts",
+      "lines": 304,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/memory.ts",
+      "lines": 532,
+      "catches": 10,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/models.ts",
+      "lines": 30,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/skills.ts",
+      "lines": 119,
+      "catches": 2,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/subagent.ts",
+      "lines": 219,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/tools/file.ts",
+      "lines": 110,
+      "catches": 2,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/tools/registry.ts",
+      "lines": 104,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/agent/tools/shell.ts",
+      "lines": 86,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/api/server.ts",
+      "lines": 1459,
+      "catches": 5,
+      "swallowed_catches": [
+        {
+          "line": 1144
+        },
+        {
+          "line": 1152
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/bus/index.ts",
+      "lines": 135,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/base.ts",
+      "lines": 101,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 1,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/dingtalk.ts",
+      "lines": 238,
+      "catches": 5,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/discord.ts",
+      "lines": 208,
+      "catches": 4,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/index.ts",
+      "lines": 10,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/manager.ts",
+      "lines": 167,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/channels/telegram.ts",
+      "lines": 179,
+      "catches": 4,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/agent.ts",
+      "lines": 88,
+      "catches": 2,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/cron.ts",
+      "lines": 152,
+      "catches": 5,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/gateway.ts",
+      "lines": 70,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/onboard.ts",
+      "lines": 70,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/serve.ts",
+      "lines": 41,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/commands/status.ts",
+      "lines": 118,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cli/index.ts",
+      "lines": 185,
+      "catches": 10,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/config/index.ts",
+      "lines": 236,
+      "catches": 2,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/config/schema.ts",
+      "lines": 253,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cron/index.ts",
+      "lines": 228,
+      "catches": 3,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/cron/scheduler.ts",
+      "lines": 125,
+      "catches": 3,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/gateway/index.ts",
+      "lines": 6,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/gateway/server.ts",
+      "lines": 222,
+      "catches": 2,
+      "swallowed_catches": [],
+      "any_types": 1,
+      "debt": 0
+    },
+    {
+      "file": "src/heartbeat/index.ts",
+      "lines": 179,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/index.ts",
+      "lines": 34,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/providers/base.ts",
+      "lines": 671,
+      "catches": 8,
+      "swallowed_catches": [],
+      "any_types": 2,
+      "debt": 0
+    },
+    {
+      "file": "src/providers/fallback.ts",
+      "lines": 146,
+      "catches": 3,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/providers/index.ts",
+      "lines": 262,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/providers/registry.ts",
+      "lines": 160,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/session/index.ts",
+      "lines": 6,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/session/manager.ts",
+      "lines": 188,
+      "catches": 4,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/types.ts",
+      "lines": 242,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/utils/errors.ts",
+      "lines": 46,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/utils/helpers.ts",
+      "lines": 92,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "src/utils/logger.ts",
+      "lines": 28,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    }
+  ],
+  "console_js": [
+    {
+      "file": "voice/web/app.js",
+      "lines": 3648,
+      "catches": 47,
+      "swallowed_catches": [
+        {
+          "line": 83
+        },
+        {
+          "line": 124
+        },
+        {
+          "line": 130
+        },
+        {
+          "line": 427
+        },
+        {
+          "line": 560
+        },
+        {
+          "line": 877
+        },
+        {
+          "line": 893
+        },
+        {
+          "line": 900
+        },
+        {
+          "line": 905
+        },
+        {
+          "line": 925
+        },
+        {
+          "line": 927
+        },
+        {
+          "line": 981
+        },
+        {
+          "line": 1211
+        },
+        {
+          "line": 1235
+        },
+        {
+          "line": 1666
+        },
+        {
+          "line": 2010
+        },
+        {
+          "line": 2324
+        },
+        {
+          "line": 2350
+        },
+        {
+          "line": 2473
+        },
+        {
+          "line": 2503
+        },
+        {
+          "line": 2646
+        },
+        {
+          "line": 2737
+        },
+        {
+          "line": 2837
+        },
+        {
+          "line": 2865
+        },
+        {
+          "line": 2876
+        },
+        {
+          "line": 3063
+        },
+        {
+          "line": 3064
+        },
+        {
+          "line": 3097
+        },
+        {
+          "line": 3155
+        },
+        {
+          "line": 3197
+        },
+        {
+          "line": 3198
+        },
+        {
+          "line": 3221
+        },
+        {
+          "line": 3228
+        },
+        {
+          "line": 3235
+        },
+        {
+          "line": 3240
+        },
+        {
+          "line": 3321
+        },
+        {
+          "line": 3333
+        },
+        {
+          "line": 3593
+        },
+        {
+          "line": 3638
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/auth.js",
+      "lines": 1007,
+      "catches": 15,
+      "swallowed_catches": [
+        {
+          "line": 110
+        },
+        {
+          "line": 125
+        },
+        {
+          "line": 360
+        },
+        {
+          "line": 379
+        },
+        {
+          "line": 434
+        },
+        {
+          "line": 567
+        },
+        {
+          "line": 604
+        },
+        {
+          "line": 617
+        },
+        {
+          "line": 640
+        },
+        {
+          "line": 648
+        },
+        {
+          "line": 709
+        },
+        {
+          "line": 766
+        },
+        {
+          "line": 878
+        },
+        {
+          "line": 913
+        },
+        {
+          "line": 960
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/barge-in.js",
+      "lines": 291,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/emotion-layer.js",
+      "lines": 195,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/mic-worklet.js",
+      "lines": 65,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/pcm-player-worklet.js",
+      "lines": 203,
+      "catches": 1,
+      "swallowed_catches": [
+        {
+          "line": 110
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/phone-vad.js",
+      "lines": 94,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/pipeline.js",
+      "lines": 57,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/talking-cube.js",
+      "lines": 1159,
+      "catches": 1,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/voice-ui.js",
+      "lines": 37,
+      "catches": 0,
+      "swallowed_catches": [],
+      "any_types": 0,
+      "debt": 0
+    },
+    {
+      "file": "voice/web/ws-audio-player.js",
+      "lines": 286,
+      "catches": 10,
+      "swallowed_catches": [
+        {
+          "line": 84
+        },
+        {
+          "line": 167
+        },
+        {
+          "line": 187
+        },
+        {
+          "line": 240
+        },
+        {
+          "line": 241
+        },
+        {
+          "line": 268
+        },
+        {
+          "line": 276
+        },
+        {
+          "line": 279
+        },
+        {
+          "line": 282
+        }
+      ],
+      "any_types": 0,
+      "debt": 0
+    }
+  ],
+  "totals": {
+    "py_files": 38,
+    "py_lines": 15038,
+    "py_long_functions": 33,
+    "py_broad_excepts": 94,
+    "py_silent_excepts": 48,
+    "ts_files": 59,
+    "ts_lines": 18435,
+    "ts_swallowed_catches": 67,
+    "ts_any_types": 4,
+    "debt_markers": 0
+  }
+}

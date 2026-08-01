@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: Streaming Prepared Speech (Sentence-Level Compilation)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, "Segoe UI", sans-serif; max-width: 860px;
+         margin: 2rem auto; padding: 0 1.25rem; color: #1f2933; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e4e7eb; background: #16211f; } }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #2f855a; padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; color: #2f855a; }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: rgba(47,133,90,.12); padding: .1em .35em; border-radius: 4px; }
+  .meta { color: #6b7a76; font-size: .9em; }
+  .invariant { border-left: 4px solid #2f855a; padding: .3em .9em; margin: .8em 0;
+               background: rgba(47,133,90,.07); }
+  li { margin: .25em 0; }
+</style>
+</head>
+<body>
+<h1>Streaming Prepared Speech: Sentence-Level Compilation on the Phone Line</h1>
+<p class="meta">2026-07-27 · branch <code>call-review-panel</code> · proposed by David;
+architecture refined to recompute-with-frontier · markdown source:
+<a href="design.md">design.md</a></p>
+
+<h2>Problem</h2>
+<p>The phone's "prepared" speech mode buffered the entire LLM reply before compiling
+it into SpeechChunks (pauses, comma/dash clause expansion, spoken-form
+normalization) — the caller waited for full generation (~2.3s) + prep + first
+synthesis after STT before hearing anything.</p>
+
+<div class="invariant"><strong>Invariant:</strong> for ANY partitioning of a reply
+into deltas, streaming output is IDENTICAL to batch
+<code>compile_speech(whole)</code> (jitter=0) — texts, kinds, pauses, sequences,
+list numbering, label merges, normalizations. Enforced by the partition-fuzz golden
+suite in <code>tests/python/test_streaming_speech_compiler.py</code>.</div>
+
+<h2>Architecture: recompute-with-frontier</h2>
+<p><code>StreamingSpeechCompiler</code> keeps only the raw buffer + emitted-unit
+texts. Every <code>feed(delta)</code> re-runs the exact batch pipeline over the
+whole buffer (pure regex, microseconds) and emits units up to a conservative
+<strong>stability frontier</strong> — document-level state (list counters, label
+merges, paragraph joins) is recomputed from scratch, so equivalence holds by
+construction. The frontier holds back:</p>
+<ol>
+  <li>The open tail region (trailing paragraph — even newline-terminated, the next
+      line would join it; a heading/list line missing its newline; a bare trailing
+      <code>\r</code>).</li>
+  <li>The last sentence of an open paragraph (no normalization pattern spans two
+      sentence terminals; the held sentence absorbs single-boundary patterns like
+      <code>No. 5</code>, <code>e.g.</code>, dotted acronyms).</li>
+  <li>A closed label-like segment ≤10 words with no follower yet (batch label-merge
+      may claim it).</li>
+  <li>An open tail with unclosed markup (odd backtick/fence/asterisk counts,
+      unbalanced brackets).</li>
+</ol>
+<p>Streamed chunks always get punctuation-table pauses; only <code>finish()</code>'s
+last chunk carries the 140&nbsp;ms transport tail. Emission is strictly in order
+with one jitter draw per non-final chunk — the batch draw sequence, seeded-testable.
+<code>finish(final_text)</code> has a longest-common-prefix guard: on divergence it
+emits only beyond the emitted count and logs — never re-speaks, never crashes.</p>
+
+<h2>Phone integration</h2>
+<p>Three-way mode via <code>NANO_CLAW_PHONE_SPEECH_PREPARATION</code>
+(console-settable, persisted): <code>1</code> = streaming prepared (default),
+<code>batch</code> = old buffer-all escape hatch, <code>raw</code> = no compiler.
+Server-rewrite safety: a giant first delta (&gt;350 chars — the held-response
+synthetic delta) or a <code>deep_started</code> event makes the turn compile at
+final only; at <code>final</code>, a diverging response after chunks were spoken
+raises the <code>prepared_stream_mismatch</code> tap event, sets
+<code>preparedStreamMismatch: true</code> on the turn payload, and withholds the
+rewritten tail (never double-speak). Extensions flow through
+<code>finish(response)</code> naturally. The thinking cue stops at first speech —
+its window shortens automatically.</p>
+
+<h2>Bundled fix: reload flake family</h2>
+<p>Pause/clause/jitter knobs are now read per call instead of frozen at import;
+every <code>importlib.reload</code> was deleted from
+<code>test_speech_preparer.py</code> (reloading rebound the SpeechChunk class and
+order-poisoned other test files). <code>SPEECH_COMPILER_VERSION</code> stays
+<code>nanoclaw-speech-v1</code>. The remaining
+<code>test_history_api</code> failure is a deterministic pre-existing breakage,
+unrelated and out of scope.</p>
+
+<h2>Docs shipped with this feature</h2>
+<ul>
+  <li>User explainer: <a href="../../html/speech-pipeline.html">docs/html/speech-pipeline.html</a></li>
+  <li>Agent self-knowledge: <code>data/base/knowledge.md</code> (chime/tick meanings,
+      sentence-by-sentence speaking) — the live AI can explain itself.</li>
+  <li><code>docs/CALL-REVIEW.md</code>, <code>docs/PHONE-QUALITY.md</code>,
+      <code>.env.example</code>.</li>
+</ul>
+
+<h2>Verification</h2>
+<p>Full pytest suite green (modulo the documented pre-existing history-api failure);
+loopback shows first <code>synth_start</code> before <code>agent_done</code> and a
+lower FIRST ANSWER AUDIO; live A/B <code>prepared</code> vs <code>batch</code>;
+ask the line "what's that ticking?" to verify the self-knowledge digest.</p>
+</body>
+</html>

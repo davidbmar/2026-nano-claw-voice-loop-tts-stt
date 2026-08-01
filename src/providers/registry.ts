@@ -121,6 +121,14 @@ export const PROVIDERS: ProviderSpec[] = [
     litellmPrefix: 'openai',
     skipPrefixes: ['openai/', 'vllm/'],
   },
+  {
+    name: 'ollama',
+    keywords: ['ollama'],
+    envKey: 'OLLAMA_API_KEY',
+    displayName: 'Ollama (Local)',
+    litellmPrefix: 'openai',
+    skipPrefixes: ['ollama/'],
+  },
 ];
 
 /**

@@ -7,6 +7,15 @@ export interface TurnEvidenceItem {
   citationId: string;
   title: string;
   sectionPath: string[];
+  sourceId?: string;
+  documentId?: string;
+  sourceRef?: string;
+  charStart?: number;
+  charEnd?: number;
+  pageStart?: number;
+  pageEnd?: number;
+  lineStart?: number;
+  lineEnd?: number;
   text: string;
   rank: number;
 }
@@ -59,7 +68,25 @@ function parseEvidence(data: EvidenceResponse, maxChars: number): TurnEvidenceIt
       text.length <= remaining ? text : `${text.slice(0, Math.max(0, remaining - 1))}…`;
     remaining -= selectedText.length;
     if (!selectedText) break;
-    items.push({ evidenceId, citationId, title, sectionPath, text: selectedText, rank });
+    items.push({
+      evidenceId,
+      citationId,
+      title,
+      sectionPath,
+      sourceId: stringValue(raw.citation.source_id),
+      documentId: stringValue(raw.citation.document_id),
+      sourceRef: stringValue(raw.citation.source_ref),
+      charStart: numberValue(locator.char_start),
+      charEnd: numberValue(locator.char_end),
+      pageStart: numberValue(locator.page_start),
+      pageEnd: numberValue(locator.page_end),
+      // Forward-compatible with the code-locator contract: older platform
+      // deployments simply omit these fields.
+      lineStart: numberValue(locator.line_start),
+      lineEnd: numberValue(locator.line_end),
+      text: selectedText,
+      rank,
+    });
   }
   return items;
 }
@@ -121,6 +148,7 @@ export async function retrieveTurnEvidence(
         status: result.status,
         evidenceCount: items.length,
         durationMs: result.durationMs,
+        collectionIds: intelligence.collectionIds,
       },
       'Turn evidence retrieval complete'
     );

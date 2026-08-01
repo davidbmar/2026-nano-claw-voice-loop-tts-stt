@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +17,68 @@ from voice.text_chunker import normalize_for_speech
 log = logging.getLogger("tts")
 
 TARGET_RATE = 48000  # WebRTC Opus expects 48kHz
-SENTENCE_GAP_MS = 160
+# Lux and Kokoro already shape sentence-final prosody, but streamed sentences
+# otherwise meet with almost no breathing room. A quarter-second boundary is
+# long enough to sound deliberate without making a voice turn feel sluggish.
+# Raw-mode sentence pause. The raw chunker only breaks on . ! ?, so every raw
+# chunk is sentence-final; this matches the cadence table's period value (450ms)
+# for a natural, unhurried sentence boundary. Prepared mode uses the full
+# per-punctuation table in speech_preparer instead.
+try:
+    SENTENCE_GAP_MS = max(0, min(1000, int(os.environ.get("NANO_CLAW_SENTENCE_GAP_MS", "450"))))
+except ValueError:
+    SENTENCE_GAP_MS = 450
 _SENTENCE_GAP = bytes(TARGET_RATE * SENTENCE_GAP_MS // 1000 * 2)
+
+# Speech chunks are butted directly against inserted silence gaps (and, on a
+# stalled playback buffer, against zero-fill). Lux ends most chunks at full
+# energy with no natural decay (measured ~2000-6000 RMS on the last sample), so
+# a chunk boundary is both a step discontinuity (a click) and an audibly chopped
+# word. A short fade-in preserves the consonant attack at the onset; a longer
+# fade-out ramps the truncated ending down so the cut is heard as a natural
+# release rather than a hard chop. Both are env-tunable for live A/B.
+def _declick_ms(name: str, default: int) -> int:
+    try:
+        return max(0, min(60, int(os.environ.get(name, str(default)))))
+    except ValueError:
+        return default
+
+
+# Lux (voice cloning) starts every chunk at full amplitude — measured first
+# sample ~850-1000 — a hard step from silence heard as a tick at the start of
+# each sentence. Piper/Kokoro start at zero, so a longer fade-in is a no-op for
+# them and only smooths Lux's hard onset. 15ms makes the attack gradual enough
+# to stop reading as a click.
+_DECLICK_IN_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_IN_MS", 15) // 1000
+# Trailing fade of 20ms: prepared mode splits replies into clause chunks, and
+# Lux ends each on a moderate-energy clip, so butting that straight against the
+# pause silence is a hard step — an audible abrupt halt. A short fade ramps each
+# chunk end to zero so it settles into the pause. Kept to 20ms (not longer) so it
+# smooths the seam without swallowing a short boundary word's tail. Set
+# NANO_CLAW_DECLICK_OUT_MS=0 to disable.
+_DECLICK_OUT_SAMPLES = TARGET_RATE * _declick_ms("NANO_CLAW_DECLICK_OUT_MS", 20) // 1000
+
+
+def _declick_edges(pcm: bytes) -> bytes:
+    """Fade a speech chunk's onset in and its truncated ending out.
+
+    Chunks arrive as whole sentences (the text chunker only flushes on sentence
+    punctuation), so both edges sit at a natural pause; attenuating them cannot
+    dip mid-word. The fade-out is longer than the fade-in to mask Lux's abrupt
+    high-energy truncation. Returns the PCM unchanged when it is too short.
+    """
+    if not pcm:
+        return pcm
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    fade_in = _DECLICK_IN_SAMPLES
+    fade_out = _DECLICK_OUT_SAMPLES
+    if samples.shape[0] < fade_in + fade_out:
+        return pcm
+    if fade_in:
+        samples[:fade_in] *= np.linspace(0.0, 1.0, fade_in, endpoint=False, dtype=np.float32)
+    if fade_out:
+        samples[-fade_out:] *= np.linspace(1.0, 0.0, fade_out, endpoint=False, dtype=np.float32)
+    return np.clip(np.rint(samples), -32768, 32767).astype(np.int16).tobytes()
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 
@@ -106,64 +169,190 @@ def _synthesize_piper(text: str, voice_id: str) -> bytes:
     return _resample_to_48k(b"".join(raw_parts), native_rate)
 
 
-def _synthesize_kokoro(text: str, voice_id: str, speed: float) -> bytes:
-    """Kokoro path: fetch from the native service, resample to 48kHz.
-
-    Falls back to the Piper default voice if the service is unavailable so the
-    voice loop is never silent (degraded-mode convention).
-    """
+def _synthesize_kokoro_engine(text: str, voice_id: str, speed: float) -> bytes:
+    """Kokoro engine render (raises when the service is unavailable —
+    synthesize() owns the piper fallback so fallbacks are never cached)."""
     from voice import kokoro_client
 
-    try:
-        pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
-        return _resample_to_48k(pcm, rate)
-    except (kokoro_client.KokoroUnavailable, ValueError) as exc:
-        log.warning("Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
-                    voice_id, exc, DEFAULT_VOICE)
-        return _synthesize_piper(text, DEFAULT_VOICE)
+    pcm, rate = kokoro_client.synthesize(text, voice_id, speed)
+    return _resample_to_48k(pcm, rate)
 
 
-def _synthesize_lux(text: str, voice_id: str, speed: float) -> bytes:
-    """LuxTTS path: fetch from the native cloning service, resample if needed.
+# Lux (voice cloning) prepends a voiced onset burst — plus dead air — to every
+# synthesis, heard as a stray syllable ("ow"/"now"/"how") before each sentence.
+# Its length varies per sentence (measured 70-260ms of junk before real speech),
+# so a fixed trim can't track it and fading only quiets it. Detect where real
+# speech actually begins and trim the leading junk up to it. Whisper is not a
+# detector here: its language model corrects the stray syllable away even when
+# it is audible, so this works on the energy envelope instead.
+#
+# NANO_CLAW_LUX_TRIM_MS is the MAX leading trim (a safety cap so a mis-detection
+# can never swallow a real word); 0 disables the trim entirely.
+try:
+    _LUX_TRIM_CAP_MS = max(0, min(600, int(os.environ.get("NANO_CLAW_LUX_TRIM_MS", "320"))))
+except ValueError:
+    _LUX_TRIM_CAP_MS = 320
 
-    Falls back to the Piper default voice if the service is unavailable so the
-    voice loop is never silent (degraded-mode convention).
+
+def _trim_lux_onset(pcm: bytes) -> bytes:
+    """Trim Lux's leading onset burst up to where real speech begins.
+
+    Finds the first window that starts a sustained (30 ms) run of speech-level
+    energy and cuts everything before it, keeping a short lead-in. Bounded by
+    NANO_CLAW_LUX_TRIM_MS so a mis-detection cannot eat a word; a no-op when the
+    cap is 0 or no clear onset is found.
     """
+    if _LUX_TRIM_CAP_MS <= 0 or not pcm:
+        return pcm
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    win = TARGET_RATE * 10 // 1000  # 10 ms windows
+    count = samples.shape[0] // win
+    if count < 5:
+        return pcm
+    rms = np.sqrt((samples[: count * win].reshape(count, win) ** 2).mean(axis=1))
+    peak = float(rms.max())
+    if peak <= 0:
+        return pcm
+    threshold = max(300.0, peak * 0.15)
+    onset = None
+    for k in range(count - 2):
+        if rms[k] >= threshold and rms[k + 1] >= threshold and rms[k + 2] >= threshold:
+            onset = k
+            break
+    if not onset:  # None or 0 → nothing to trim
+        return pcm
+    lead_windows = 2  # keep ~20 ms of natural lead-in before the onset
+    cap_windows = _LUX_TRIM_CAP_MS // 10
+    cut_windows = max(0, min(onset - lead_windows, cap_windows))
+    return pcm[cut_windows * win * 2:] if cut_windows > 0 else pcm
+
+
+def _synthesize_lux_engine(text: str, voice_id: str, speed: float) -> bytes:
+    """LuxTTS engine render (raises when the service is unavailable —
+    synthesize() owns the piper fallback so fallbacks are never cached)."""
     from voice import lux_client
 
-    try:
-        pcm, rate = lux_client.synthesize(text, voice_id, speed)
-        return _resample_to_48k(pcm, rate)
-    except (lux_client.LuxUnavailable, ValueError) as exc:
-        log.warning("LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
-                    voice_id, exc, DEFAULT_VOICE)
-        return _synthesize_piper(text, DEFAULT_VOICE)
+    pcm, rate = lux_client.synthesize(text, voice_id, speed)
+    return _trim_lux_onset(_resample_to_48k(pcm, rate))
 
 
-def _with_sentence_gap(text: str, pcm: bytes) -> bytes:
-    """Pad sentence-final PCM so separately queued chunks do not run together."""
-    if pcm and text.rstrip().endswith((".", "!", "?")):
+def _with_sentence_gap(
+    text: str, pcm: bytes, pause_after_ms: int | None = None
+) -> bytes:
+    """Apply either a plan-owned gap or the legacy sentence default.
+
+    ``pause_after_ms`` is the complete compiler target for this chunk.  When it
+    is absent, retain the original raw-path behavior for backwards-compatible
+    A/B testing.  Lux currently returns no measurable trailing silence, so the
+    Phase 2 implementation can represent the target as explicit PCM padding;
+    adapter-level silence calibration remains a later concern.
+    """
+    if not pcm:
+        return pcm
+    pcm = _declick_edges(pcm)
+    if pause_after_ms is not None:
+        try:
+            bounded_ms = max(0, min(1000, int(pause_after_ms)))
+        except (TypeError, ValueError):
+            bounded_ms = 0
+        gap = bytes(TARGET_RATE * bounded_ms // 1000 * 2)
+        return pcm + gap
+    if text.rstrip().endswith((".", "!", "?")):
         return pcm + _SENTENCE_GAP
     return pcm
 
 
-def synthesize(text: str, voice_id: str = "", speed: float = 1.0) -> bytes:
+# Engine-render cache: fixed lines (the greeting, the recording notice, idle
+# and error prompts) are re-synthesized on every call, so a cold or degraded
+# TTS becomes caller-audible dead air — the 2026-07-26 incident opened with
+# 32s of silence synthesizing the same greeting the line speaks every pickup.
+# Keyed on (normalized text, voice, speed); pauses/declick are applied AFTER
+# the cache so jittered pause targets still hit. Fallback renders are never
+# cached (a warm-up during service startup must not pin piper audio to a
+# real voice's key). Bounded LRU; dynamic reply sentences rarely repeat and
+# simply age out.
+try:
+    _SYNTH_CACHE_CAP = max(0, int(os.environ.get("NANO_CLAW_TTS_CACHE_ENTRIES", "48")))
+except ValueError:
+    _SYNTH_CACHE_CAP = 48
+_synth_cache: "OrderedDict[tuple[str, str, float], bytes]" = OrderedDict()
+_synth_cache_lock = threading.Lock()
+
+
+def clear_synth_cache() -> None:
+    with _synth_cache_lock:
+        _synth_cache.clear()
+
+
+def is_cached(text: str, voice_id: str, speed: float) -> bool:
+    key = (normalize_for_speech(text), voice_id, float(speed))
+    with _synth_cache_lock:
+        return key in _synth_cache
+
+
+def _cache_get(key: tuple) -> bytes | None:
+    with _synth_cache_lock:
+        pcm = _synth_cache.get(key)
+        if pcm is not None:
+            _synth_cache.move_to_end(key)
+        return pcm
+
+
+def _cache_put(key: tuple, pcm: bytes) -> None:
+    with _synth_cache_lock:
+        _synth_cache[key] = pcm
+        _synth_cache.move_to_end(key)
+        while len(_synth_cache) > _SYNTH_CACHE_CAP:
+            _synth_cache.popitem(last=False)
+
+
+def synthesize(
+    text: str,
+    voice_id: str = "",
+    speed: float = 1.0,
+    pause_after_ms: int | None = None,
+) -> bytes:
     """Route to the right engine and return 48kHz mono int16 PCM.
 
     - Kokoro voices → native TTS service (uses `speed`).
     - LuxTTS voices → native voice-cloning service (48kHz, uses `speed`).
     - Piper voices  → local Piper (ignores `speed`; it is the fast option).
     - Unknown id    → Piper default.
+
+    Engine renders are cached (see the cache note above); a service outage
+    falls back to Piper audibly but leaves the cache untouched.
     """
-    from voice import voice_catalog
+    from voice import kokoro_client, lux_client, voice_catalog
 
     text = normalize_for_speech(text)
     entry = voice_catalog.lookup(voice_id) if voice_id else None
-    if entry and entry["engine"] == "kokoro":
-        pcm = _synthesize_kokoro(text, voice_id, speed)
-    elif entry and entry["engine"] == "luxtts":
-        pcm = _synthesize_lux(text, voice_id, speed)
-    else:
-        piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
-        pcm = _synthesize_piper(text, piper_id)
-    return _with_sentence_gap(text, pcm)
+    key = (text, voice_id, float(speed))
+    pcm = _cache_get(key)
+    if pcm is None:
+        cacheable = True
+        if entry and entry["engine"] == "kokoro":
+            try:
+                pcm = _synthesize_kokoro_engine(text, voice_id, speed)
+            except (kokoro_client.KokoroUnavailable, ValueError) as exc:
+                log.warning(
+                    "Kokoro unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE,
+                )
+                pcm = _synthesize_piper(text, DEFAULT_VOICE)
+                cacheable = False
+        elif entry and entry["engine"] == "luxtts":
+            try:
+                pcm = _synthesize_lux_engine(text, voice_id, speed)
+            except (lux_client.LuxUnavailable, ValueError) as exc:
+                log.warning(
+                    "LuxTTS unavailable/degraded for %r (%s); falling back to Piper %s",
+                    voice_id, exc, DEFAULT_VOICE,
+                )
+                pcm = _synthesize_piper(text, DEFAULT_VOICE)
+                cacheable = False
+        else:
+            piper_id = voice_id if (entry and entry["engine"] == "piper") else DEFAULT_VOICE
+            pcm = _synthesize_piper(text, piper_id)
+        if cacheable and pcm and _SYNTH_CACHE_CAP > 0:
+            _cache_put(key, pcm)
+    return _with_sentence_gap(text, pcm, pause_after_ms)

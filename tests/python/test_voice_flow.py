@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from scripts.scheduling_eval import run_eval
 from voice import flow_session, phone, server
+from voice.booking import BookingFlow, BookingTurn
+from voice.calendar_client import CalendarError
 from voice.flow_session import (
     DEFAULT_FLOW_MODE,
     DEFAULT_REGION_MODEL,
@@ -16,15 +19,19 @@ from voice.flow_session import (
     REGION_MODELS,
     FlowReply,
     FlowSession,
+    RefusalSession,
     SCHEDULER_GREETING,
+    active_scheduling_domain,
     get_flow_mode,
     get_flow_profile,
     get_region_model,
+    scheduler_flow_enabled,
     scheduler_region_config,
     set_flow_mode,
     set_region_model,
 )
 from voice.goal_region import RegionTurn
+from voice.scheduling_domains import DOMAINS
 
 
 @pytest.fixture(autouse=True)
@@ -41,10 +48,36 @@ class StaticRunner:
     def __init__(self, turn):
         self.result = turn
         self.caller_texts = []
+        self.config = SimpleNamespace(goal="Book one plumbing appointment.")
+        self.slots = dict(turn.slots)
+        self.turns_used = 1
+        self.max_turns = 12
 
     def turn(self, caller_text):
         self.caller_texts.append(caller_text)
         return self.result
+
+
+class RunnerBooking:
+    """BookingTurn adapter for flow-wrapper cancellation/serialization tests."""
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def turn(self, caller_text):
+        turn = self._runner.turn(caller_text)
+        outcome = turn.exit if turn.exit in ("booked", "escape", "budget") else None
+        return BookingTurn(
+            reply=turn.reply,
+            done=outcome is not None,
+            outcome=outcome,
+            slots=dict(turn.slots),
+            event_id=None,
+            rejected=list(turn.rejected),
+            supervisor_ms=turn.supervisor_ms,
+            turns_used=self._runner.turns_used,
+            max_turns=self._runner.max_turns,
+        )
 
 
 class FakeWebSocket:
@@ -92,6 +125,10 @@ class FakeHttpClient:
         self.calls.append((method, url, kwargs))
         return FakeStreamContext()
 
+    async def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return SimpleNamespace(status_code=200)
+
 
 def test_booked_terminal_is_speech_friendly():
     slots = {
@@ -100,30 +137,174 @@ def test_booked_terminal_is_speech_friendly():
         "duration_minutes": 60,
     }
     session = FlowSession(
-        StaticRunner(
-            RegionTurn(
-                reply="",
-                exit="booked",
-                slots=slots,
-                supervisor_ms=5.0,
-                rejected=[],
-            )
-        )
+        BookingFlow(
+            StaticRunner(
+                RegionTurn(
+                    reply="",
+                    exit="booked",
+                    slots=slots,
+                    supervisor_ms=5.0,
+                    rejected=[],
+                )
+            ),
+            DOMAINS["plumber"],
+            None,
+        ),
+        SCHEDULER_GREETING,
     )
 
     reply = run(session.reply("Monday at ten works"))
 
     assert reply == FlowReply(
         text=(
-            "You're booked: water heater repair on Monday July twentieth at "
-            "10 AM for 60 minutes. See you then. Goodbye!"
+            # Speech-friendly is what this test is named for and what it still
+            # checks: "Monday July twentieth at 10 AM", never the ISO string
+            # asserted absent below. The claim changed because this flow has no
+            # calendar and writes nothing.
+            "I've got that down: water heater repair on Monday July twentieth "
+            "at 10 AM for 60 minutes. Someone will call you back to confirm it. "
+            "Goodbye!"
         ),
         done=True,
         outcome="booked",
         slots=slots,
+        turns_used=1,
+        max_turns=12,
         supervisor_ms=5.0,
     )
     assert "2026-07-20" not in reply.text
+
+
+def test_flow_reply_preserves_booking_event_id():
+    turn = BookingTurn(
+        reply="You're booked. Goodbye!",
+        done=True,
+        outcome="booked",
+        slots={"service_type": "follow_up_call"},
+        event_id="event-123",
+        rejected=[],
+        supervisor_ms=3.5,
+        turns_used=2,
+        max_turns=12,
+    )
+    runner = SimpleNamespace(
+        config=SimpleNamespace(goal="Book one appointment."),
+        slots=turn.slots,
+        turns_used=2,
+        max_turns=12,
+    )
+    booking = SimpleNamespace(_runner=runner, turn=lambda _text: turn)
+
+    reply = run(FlowSession(booking, "Hello").reply("yes"))
+
+    assert reply.event_id == "event-123"
+    assert reply.outcome == "booked"
+    assert reply.done is True
+
+
+def test_lawyer_create_async_wires_live_calendar_off_event_loop(monkeypatch):
+    settings = SimpleNamespace(
+        sa_path="/host/test-gcal.json",
+        calendar_id="lawyer-test@example.invalid",
+        timezone="America/Chicago",
+    )
+    calendar_instances = []
+    snapshot_threads = []
+    runner_args = {}
+    supervisor_client = object()
+    snapshot = {
+        "timezone": "America/Chicago",
+        "days": {
+            "2026-07-27": [
+                {
+                    "start": "2026-07-27T09:00:00",
+                    "end": "2026-07-27T11:00:00",
+                }
+            ]
+        },
+    }
+
+    class FakeCalendar:
+        def __init__(self, loaded_settings):
+            self.settings = loaded_settings
+            calendar_instances.append(self)
+
+    class FakeRunner:
+        def __init__(self, config, windows, client=None):
+            runner_args.update(config=config, windows=windows, client=client)
+            self.config = config
+            self.slots = {}
+            self.turns_used = 0
+            self.max_turns = config.max_turns
+
+    def fake_snapshot(calendar):
+        snapshot_threads.append(threading.get_ident())
+        assert calendar is calendar_instances[0]
+        return snapshot
+
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: settings)
+    monkeypatch.setattr(flow_session, "CalendarClient", FakeCalendar)
+    monkeypatch.setattr(flow_session, "availability_snapshot", fake_snapshot)
+    monkeypatch.setattr(flow_session, "GoalRegionRunner", FakeRunner)
+    caller_thread = threading.get_ident()
+
+    session = run(
+        FlowSession.create_async(
+            domain_id="lawyer",
+            client=supervisor_client,
+        )
+    )
+
+    assert isinstance(session, FlowSession)
+    assert session.greeting == DOMAINS["lawyer"].greeting
+    assert session._booking._domain is DOMAINS["lawyer"]
+    assert session._booking._calendar is calendar_instances[0]
+    assert runner_args["client"] is supervisor_client
+    assert runner_args["config"].goal == DOMAINS["lawyer"].goal
+    assert "2026-07-27" in runner_args["config"].digest
+    assert len(runner_args["windows"]) == 1
+    assert snapshot_threads and snapshot_threads[0] != caller_thread
+
+
+def test_lawyer_create_degrades_for_missing_settings_or_calendar_error(monkeypatch):
+    domain = DOMAINS["lawyer"]
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: None)
+
+    missing = FlowSession.create(domain_id="lawyer")
+    assert isinstance(missing, RefusalSession)
+    assert missing.greeting == domain.greeting
+    assert missing.goal == domain.goal
+    assert missing.slots == {}
+
+    reply = run(missing.reply("I need an initial consultation"))
+    assert reply == FlowReply(
+        text=domain.apology_unavailable,
+        done=True,
+        outcome="not_booked",
+        slots={},
+        turns_used=1,
+        max_turns=domain.max_turns,
+    )
+
+    settings = SimpleNamespace(
+        sa_path="/host/test-gcal.json",
+        calendar_id="lawyer-test@example.invalid",
+        timezone="America/Chicago",
+    )
+    monkeypatch.setattr(flow_session, "load_calendar_settings", lambda: settings)
+    monkeypatch.setattr(
+        flow_session,
+        "CalendarClient",
+        lambda loaded: SimpleNamespace(settings=loaded),
+    )
+
+    def unavailable(_calendar):
+        raise CalendarError("freebusy unavailable")
+
+    monkeypatch.setattr(flow_session, "availability_snapshot", unavailable)
+    failed_fetch = FlowSession.create(domain_id="lawyer")
+    assert isinstance(failed_fetch, RefusalSession)
+    assert run(failed_fetch.reply("Tuesday")).outcome == "not_booked"
 
 
 def test_run_eval_uses_shared_scheduler_config_without_network():
@@ -326,6 +507,58 @@ def test_phone_missing_availability_falls_back_and_logs(
     assert str(missing) in caplog.text
 
 
+def test_phone_lawyer_degraded_start_speaks_apology_and_never_uses_persona(
+    monkeypatch,
+):
+    domain = DOMAINS["lawyer"]
+    events = []
+    monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "lawyer")
+    monkeypatch.delenv("NANO_CLAW_GCAL_CALENDAR_ID", raising=False)
+    monkeypatch.delenv("NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setattr(phone, "get_vad_mode", lambda: "energy")
+    monkeypatch.setattr(phone.metrics_db, "bump_call_turns", lambda *args: None)
+
+    async def fake_telnyx_cmd(client, call_id, command, payload):
+        events.append(("telnyx", call_id, command, payload))
+        return True
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_telnyx_cmd)
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "lawyer-unavailable")
+
+        async def transcribe(_pcm):
+            return "I need an initial consultation"
+
+        async def speak(text):
+            events.append(("speak", text))
+
+        async def unexpected_stream(_text):
+            raise AssertionError("degraded lawyer mode must not use persona chat")
+
+        call._transcribe = transcribe
+        call.speak = speak
+        call._stream_reply = unexpected_stream
+        try:
+            assert isinstance(call.flow, RefusalSession)
+            assert call.default_greeting == domain.greeting
+            await call._run_turn(b"audio")
+            assert call.closed is True
+        finally:
+            await call.close()
+
+    run(exercise())
+    assert events == [
+        ("speak", domain.apology_unavailable),
+        # The payload carries a command_id now, as `answer` always has: Telnyx
+        # dedupes on it, and these calls hang up through
+        # `hangup_after_playback`, which waits for the pacer's surplus so the
+        # apology is not clipped mid-word.
+        ("telnyx", "lawyer-unavailable", "hangup",
+         {"command_id": "hangup-lawyer-unavailable"}),
+    ]
+
+
 def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
     terminal = FlowReply(
         text="You're booked. Goodbye!",
@@ -346,7 +579,8 @@ def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
 
     class FakeFlowSession:
         @classmethod
-        def create(cls):
+        def create(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
             return flow
 
     async def fake_telnyx_cmd(client, call_id, command, payload):
@@ -385,7 +619,8 @@ def test_phone_booked_reply_is_spoken_then_hung_up(monkeypatch):
     assert events == [
         ("flow", "yes, book it"),
         ("speak", terminal.text),
-        ("telnyx", "booked-call", "hangup", {}),
+        ("telnyx", "booked-call", "hangup",
+         {"command_id": "hangup-booked-call"}),
     ]
 
 
@@ -409,6 +644,61 @@ def test_browser_flag_off_routes_to_normal_api(monkeypatch):
     assert client.calls[0][2]["json"]["analysisStyle"] == "topic_map"
     assert session.spoken == ["normal API reply"]
     assert {"type": "agent_reply", "text": "normal API reply"} in ws.messages
+
+
+def test_browser_gate_starts_any_registered_scheduling_domain(monkeypatch):
+    domain = DOMAINS["lawyer"]
+    created_domains = []
+
+    class FakeFlow:
+        greeting = domain.greeting
+        goal = domain.goal
+        slots = {}
+        turns_used = 0
+        max_turns = domain.max_turns
+
+        async def reply(self, text):
+            assert text == "I need contract advice"
+            return FlowReply(
+                text="What day works for the consultation?",
+                done=False,
+                outcome=None,
+                slots={"service_type": "contract_dispute_consult"},
+                turns_used=1,
+                max_turns=domain.max_turns,
+            )
+
+    class FakeFlowSession:
+        @classmethod
+        async def create_async(cls, **kwargs):
+            created_domains.append(kwargs["domain_id"])
+            return FakeFlow()
+
+    monkeypatch.setattr(server, "active_scheduling_domain", lambda mode=None: "lawyer")
+    monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._scheduler_flow_enabled = False
+    session._scheduler_flow_attempted = False
+    session._scheduler_flow = None
+    client = FakeHttpClient()
+
+    run(
+        server._handle_agent_request(
+            ws,
+            session,
+            client,
+            "I need contract advice",
+        )
+    )
+
+    assert created_domains == ["lawyer"]
+    assert client.calls == []
+    assert session.spoken == [
+        domain.greeting,
+        "What day works for the consultation?",
+    ]
 
 
 def test_browser_passes_experimental_analysis_style(monkeypatch):
@@ -436,6 +726,57 @@ def test_browser_passes_current_mode_profile_on_every_agent_request(monkeypatch)
     assert set_flow_mode("none") is True
     run(server._handle_agent_request(ws, session, client, "hello again"))
     assert client.calls[-1][2]["json"]["profile"] == "none"
+
+
+def test_mode_switch_starts_fresh_agent_conversation(monkeypatch):
+    """Switching modes mid-session must wipe the Node-side conversation
+    memory (personas are distinct characters; history from one must not
+    leak into the next) and re-arm the per-session scheduler gate so the
+    new mode's flow can engage even after a completed earlier flow."""
+    create_calls = []
+
+    class FakeFlowSession:
+        @classmethod
+        async def create_async(cls, **kwargs):
+            create_calls.append(kwargs["domain_id"])
+            return None
+
+    monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._agent_session_id = "conv-1"
+    client = FakeHttpClient()
+
+    assert set_flow_mode("spacechannel") is True
+    run(server._handle_agent_request(ws, session, client, "tell me about the station"))
+    assert [call for call in client.calls if call[0] == "DELETE"] == []
+
+    # Leftover one-shot gate from a completed flow earlier in the session.
+    session._scheduler_flow_attempted = True
+    session._scheduler_flow = None
+    session._scheduler_flow_domain = None
+
+    assert set_flow_mode("lawyer") is True
+    run(server._handle_agent_request(ws, session, client, "I need an appointment"))
+
+    deletes = [call for call in client.calls if call[0] == "DELETE"]
+    assert len(deletes) == 1
+    assert deletes[0][2]["json"] == {"sessionId": "conv-1"}
+    # The re-armed gate let the lawyer flow attempt activation...
+    assert create_calls == ["lawyer"]
+    # ...and its failure fell through to the agent on the neutral base profile.
+    assert client.calls[-1][2]["json"]["profile"] == "base"
+
+    assert set_flow_mode("spacechannel") is True
+    run(server._handle_agent_request(ws, session, client, "back to space"))
+    deletes = [call for call in client.calls if call[0] == "DELETE"]
+    assert len(deletes) == 2
+    assert client.calls[-1][2]["json"]["profile"] == "spacechannel"
+
+    # Same mode again: no extra wipe.
+    run(server._handle_agent_request(ws, session, client, "and another question"))
+    assert len([call for call in client.calls if call[0] == "DELETE"]) == 2
 
 
 def test_browser_missing_availability_falls_back_and_logs(
@@ -480,13 +821,15 @@ def test_browser_flow_greets_speaks_and_reverts_to_normal_api(monkeypatch):
 
     class FakeFlowSession:
         @classmethod
-        def create(cls):
+        async def create_async(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
             return flow
 
     monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
     monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
     ws = FakeWebSocket()
     session = FakeBrowserSession()
+    assert set_flow_mode("scheduler") is True
     session._scheduler_flow_enabled = True
     session._scheduler_flow_attempted = False
     session._scheduler_flow = None
@@ -528,12 +871,14 @@ def test_browser_first_flow_reply_keeps_audio_gate_closed(monkeypatch):
 
         class FakeFlowSession:
             @classmethod
-            def create(cls):
+            async def create_async(cls, **kwargs):
+                assert kwargs["domain_id"] == "plumber"
                 return flow
 
         monkeypatch.setattr(server, "FlowSession", FakeFlowSession)
         ws = FakeWebSocket()
         session = FakeBrowserSession()
+        assert set_flow_mode("scheduler") is True
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = False
         session._scheduler_flow = None
@@ -594,6 +939,7 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
         monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
         ws = FakeWebSocket()
         session = BlockingSession()
+        assert set_flow_mode("scheduler") is True
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = True
         session._scheduler_flow = TerminalFlow()
@@ -626,17 +972,65 @@ def test_browser_terminal_playback_cancel_still_reverts_flow(monkeypatch):
 def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     monkeypatch.delenv("NANO_CLAW_VOICE_FLOW", raising=False)
 
+    # "base" first = top of the mode dropdown, selectable for direct testing.
     assert list(FLOW_MODES) == [
+        "base",
         "none",
         "spacechannel",
         "intelligence",
+        "riff",
+        "nanoclaw",
+        "intelligence-platform",
         "replicantpm",
         "scheduler",
+        "lawyer",
+        "delegate",
     ]
+    # Delegate mode speaks another app's words, so it must carry no persona of
+    # ours, no scheduler, and — checked below against the container config —
+    # the literal "none" profile.
+    assert FLOW_MODES["delegate"]["profile"] == "none"
+    assert FLOW_MODES["delegate"]["scheduler"] is False
+    assert "delegate_url" not in FLOW_MODES["delegate"], (
+        "the URL is per-conversation session state, not a process-global mode "
+        "key — one delegate URL == one conversation")
+    assert FLOW_MODES["base"]["profile"] == "base"
+    assert FLOW_MODES["base"]["scheduler"] is False
+    assert all(mode.get("abstract") for mode in FLOW_MODES.values())
+    assert FLOW_MODES["scheduler"]["domain"] == "plumber"
+    assert FLOW_MODES["lawyer"] == {
+        "label": "Lawyer Scheduler",
+        "profile": "base",
+        "scheduler": True,
+        "domain": "lawyer",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
+    }
     assert DEFAULT_FLOW_MODE == "spacechannel"
     assert get_flow_mode() == "spacechannel"
     assert get_flow_profile() == "spacechannel"
     assert get_flow_profile("scheduler") == "spacechannel"
+    assert get_flow_profile("lawyer") == "base"
+
+    # Every mode's profile must be registered in the container config (or be
+    # the literal "none"). An unregistered profile silently falls back to the
+    # global knowledge glob — i.e. EVERY site digest at once — on the Node
+    # side, which is exactly the cross-persona leak this registry prevents.
+    config_path = (
+        Path(__file__).resolve().parents[2] / "docker" / "default-config.json"
+    )
+    registered = set(
+        json.loads(config_path.read_text())["agents"]["profiles"]
+    )
+    for mode_id, mode in FLOW_MODES.items():
+        assert mode["profile"] == "none" or mode["profile"] in registered, (
+            f"mode {mode_id!r} points at unregistered profile "
+            f"{mode['profile']!r}"
+        )
+    assert active_scheduling_domain("scheduler") == "plumber"
+    assert active_scheduling_domain("lawyer") == "lawyer"
+    assert active_scheduling_domain("spacechannel") is None
 
     assert set_flow_mode("off") is True
     assert get_flow_mode() == "spacechannel"
@@ -646,6 +1040,61 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "off")
     monkeypatch.setattr(flow_session, "_flow_mode", None)
     assert get_flow_mode() == "spacechannel"
+    assert scheduler_flow_enabled() is False
+
+    assert set_flow_mode("lawyer") is True
+    assert scheduler_flow_enabled() is True
+
+
+def test_flow_api_payload_contains_lawyer_and_only_checks_calendar_settings(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "NANO_CLAW_GCAL_CALENDAR_ID",
+        "lawyer-test@example.invalid",
+    )
+    monkeypatch.setenv(
+        "NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON",
+        "/host/test-gcal.json",
+    )
+    monkeypatch.setattr(
+        flow_session,
+        "availability_snapshot",
+        lambda _client: (_ for _ in ()).throw(
+            AssertionError("configuration GET must not contact Google")
+        ),
+    )
+    assert set_flow_mode("lawyer") is True
+
+    payload = server._flow_api_payload()
+
+    assert payload["active"] == "lawyer"
+    assert payload["availability_ok"] is True
+    assert {
+        "id": "lawyer",
+        "label": "Lawyer Scheduler",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
+    } in payload["options"]
+
+    monkeypatch.delenv("NANO_CLAW_GCAL_CALENDAR_ID")
+    assert server._flow_api_payload()["availability_ok"] is False
+
+
+# /api/voice/flow and /api/voice/region-model change the assistant mode and
+# scheduler model for EVERY caller on the deployment, so they now require the
+# operator password on top of the same-origin CSRF headers. The guard itself is
+# covered in tests/python/test_operator_auth.py; these constants let the flow
+# integration test drive the endpoints as the console does.
+OPERATOR_PASSWORD = "test-operator-secret"
+OPERATOR_HEADERS = {
+    "Origin": "http://localhost:9090",
+    "Host": "localhost:9090",
+    "Sec-Fetch-Site": "same-origin",
+    "X-NC-Auth": "1",
+    "X-NC-Operator": OPERATOR_PASSWORD,
+}
 
 
 def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_path):
@@ -657,6 +1106,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
     monkeypatch.setenv("NANO_CLAW_VOICE_FLOW", "scheduler")
     monkeypatch.setenv("NANO_CLAW_FLOW_AVAILABILITY", str(availability))
     monkeypatch.setenv("NANO_CLAW_PHONE", "0")
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_PASSWORD", OPERATOR_PASSWORD)
     monkeypatch.delenv("SCHED_EVAL_MODEL", raising=False)
 
     async def exercise():
@@ -665,35 +1115,51 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
         try:
             response = await client.get("/api/voice/flow")
             assert response.status == 200
-            assert await response.json() == {
-                "active": "scheduler",
-                "options": [
-                    {"id": "none", "label": "None"},
-                    {"id": "spacechannel", "label": "Space Channel"},
-                    {"id": "intelligence", "label": "Document Intelligence"},
-                    {"id": "replicantpm", "label": "Replicant PM"},
-                    {"id": "scheduler", "label": "Plumber Scheduler"},
-                ],
-                "availability_ok": True,
-            }
+            payload = await response.json()
+            assert payload["active"] == "scheduler"
+            assert payload["availability_ok"] is True
+            assert [(o["id"], o["label"]) for o in payload["options"]] == [
+                ("base", "Base"),
+                ("none", "None"),
+                ("spacechannel", "Spacechannel"),
+                ("intelligence", "Document Intelligence"),
+                ("riff", "Riff"),
+                ("nanoclaw", "nano-claw"),
+                ("intelligence-platform", "intelligence-platform"),
+                ("replicantpm", "Replicant PM"),
+                ("scheduler", "Plumber Scheduler"),
+                ("lawyer", "Lawyer Scheduler"),
+                # Selectable from the console like any other mode — the point of
+                # putting the delegate in this registry rather than behind an
+                # env var only.
+                ("delegate", "Turn Delegate"),
+            ]
+            assert all(
+                isinstance(o.get("abstract"), str) and o["abstract"]
+                for o in payload["options"]
+            )
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "off"}
+                "/api/voice/flow", json={"mode": "off"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "spacechannel"
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "replicantpm"}
+                "/api/voice/flow", json={"mode": "replicantpm"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "replicantpm"
 
             response = await client.post(
-                "/api/voice/flow", json={"mode": "not-a-flow"}
+                "/api/voice/flow", json={"mode": "not-a-flow"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 400
 
+            response = await client.post(
+                "/api/voice/flow", json={"mode": "scheduler"}, headers=OPERATOR_HEADERS
+            )
+            assert response.status == 200
             monkeypatch.setenv(
                 "NANO_CLAW_FLOW_AVAILABILITY", str(tmp_path / "missing.json")
             )
@@ -711,13 +1177,13 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
             }
 
             response = await client.post(
-                "/api/voice/region-model", json={"model": "xai/grok-4.3"}
+                "/api/voice/region-model", json={"model": "xai/grok-4.3"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 200
             assert (await response.json())["active"] == "xai/grok-4.3"
 
             response = await client.post(
-                "/api/voice/region-model", json={"model": "grok-4-1-fast"}
+                "/api/voice/region-model", json={"model": "grok-4-1-fast"}, headers=OPERATOR_HEADERS
             )
             assert response.status == 400
         finally:
@@ -804,6 +1270,7 @@ def test_browser_flow_turn_emits_live_flow_state(monkeypatch):
     monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
     ws = FakeWebSocket()
     session = FakeBrowserSession()
+    assert set_flow_mode("scheduler") is True
     session._scheduler_flow_enabled = True
     session._scheduler_flow_attempted = True
     session._scheduler_flow = FakeFlow()
@@ -865,9 +1332,13 @@ def test_cancelled_flow_reply_serializes_next_runner_turn(monkeypatch):
         monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
         ws = FakeWebSocket()
         browser_session = FakeBrowserSession()
+        assert set_flow_mode("scheduler") is True
         browser_session._scheduler_flow_enabled = True
         browser_session._scheduler_flow_attempted = True
-        browser_session._scheduler_flow = FlowSession(SlowRunner())
+        browser_session._scheduler_flow = FlowSession(
+            RunnerBooking(SlowRunner()),
+            SCHEDULER_GREETING,
+        )
         client = FakeHttpClient()
 
         first_task = asyncio.create_task(
@@ -948,7 +1419,10 @@ def test_orphaned_flow_exception_does_not_break_next_turn(caplog):
                     rejected=[],
                 )
 
-        flow = FlowSession(RaisingRunner())
+        flow = FlowSession(
+            RunnerBooking(RaisingRunner()),
+            SCHEDULER_GREETING,
+        )
         first_task = asyncio.create_task(flow.reply("first turn"))
         await asyncio.wait_for(first_started.wait(), timeout=1)
         first_task.cancel()
@@ -974,3 +1448,85 @@ def test_orphaned_flow_exception_does_not_break_next_turn(caplog):
     run(exercise())
     assert "Discarded scheduler flow turn failed" in caplog.text
     assert "orphan failed" in caplog.text
+
+
+def test_browser_mid_session_switch_to_scheduler_engages_flow(monkeypatch):
+    """Switching MODE to the scheduler mid-session must engage the flow on the
+    next turn instead of leaving the session on the fallback persona forever
+    (regression: the gate was a snapshot taken at session creation)."""
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+    created = []
+
+    class TrackingFlowSession:
+        @classmethod
+        async def create_async(cls, **kwargs):
+            assert kwargs["domain_id"] == "plumber"
+            created.append(True)
+            return None  # availability missing -> graceful fallback after the attempt
+
+    monkeypatch.setattr(server, "FlowSession", TrackingFlowSession)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()  # created while a non-scheduler mode was active
+    client = FakeHttpClient()
+
+    assert set_flow_mode("scheduler") is True
+    try:
+        run(server._handle_agent_request(ws, session, client, "book me a plumber"))
+    finally:
+        set_flow_mode("spacechannel")
+
+    assert created, "mid-session switch to scheduler must attempt the flow engine"
+    assert len(client.calls) == 1, "failed activation falls back to the normal agent path"
+
+
+def test_browser_switch_away_from_scheduler_disengages_flow(monkeypatch):
+    """Switching MODE away from the scheduler mid-session routes the next turn
+    to the normal agent path without touching the retained flow."""
+    monkeypatch.setattr(server, "_write_turn_metrics", lambda *args: None)
+
+    class UnexpectedFlowSession:
+        @classmethod
+        def create(cls):
+            raise AssertionError("flow must not be created when the mode is not scheduler")
+
+    monkeypatch.setattr(server, "FlowSession", UnexpectedFlowSession)
+    ws = FakeWebSocket()
+    session = FakeBrowserSession()
+    session._scheduler_flow_enabled = True
+    session._scheduler_flow_attempted = True
+    session._scheduler_flow = object()  # active flow retained for a switch-back
+
+    client = FakeHttpClient()
+    assert set_flow_mode("intelligence") is True
+    try:
+        run(server._handle_agent_request(ws, session, client, "hello"))
+    finally:
+        set_flow_mode("spacechannel")
+
+    assert len(client.calls) == 1
+    assert client.calls[0][2]["json"]["profile"] == "intelligence"
+    assert session._scheduler_flow is not None, "flow is retained for switch-back"
+
+
+def test_the_console_dropdown_matches_the_mode_registry():
+    """The static <select> in index.html and FLOW_MODES are two spellings of one
+    fact, which is this codebase's recurring bug shape — two business-id
+    derivations, two routing-table parsers, two honest-copy lists.
+
+    The page also repopulates itself from /api/voice/flow on load, so a stale
+    option would not fail visibly: it would flash the wrong list, then correct
+    itself, and a mode missing from the HTML would still be missing for anyone
+    whose fetch failed. That silence is why this is asserted rather than trusted.
+    """
+    import re
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[2]
+            / "voice" / "web" / "index.html").read_text()
+    block = re.search(r'<select id="flow-select".*?</select>', html, re.S)
+    assert block, "the mode <select> moved or was renamed"
+    in_html = re.findall(r'<option value="([^"]+)"', block.group(0))
+
+    assert in_html == list(FLOW_MODES), (
+        f"console dropdown {in_html} does not match FLOW_MODES "
+        f"{list(FLOW_MODES)} — add the mode to both, in the same order")

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: Agent Self-Knowledge (Settings and Health as Introspection Tools)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, "Segoe UI", sans-serif; max-width: 860px;
+         margin: 2rem auto; padding: 0 1.25rem; color: #1f2933; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e4e7eb; background: #16211f; } }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #2f855a; padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; color: #2f855a; }
+  h3 { font-size: 1.02rem; margin-top: 1.5rem; }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: rgba(47,133,90,.12); padding: .1em .35em; border-radius: 4px; }
+  pre { background: rgba(47,133,90,.07); padding: .8em 1em; border-radius: 6px;
+        overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  .meta { color: #6b7a76; font-size: .9em; }
+  .invariant { border-left: 4px solid #2f855a; padding: .3em .9em; margin: .8em 0;
+               background: rgba(47,133,90,.07); }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; display: block;
+          overflow-x: auto; }
+  th, td { border: 1px solid rgba(47,133,90,.28); padding: .45em .7em; text-align: left;
+           font-size: .94em; }
+  th { background: rgba(47,133,90,.1); }
+  li { margin: .25em 0; }
+  .no { color: #b23; font-weight: 600; }
+  .yes { color: #2f855a; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Agent Self-Knowledge: Settings and Health as Introspection Tools</h1>
+<p class="invariant"><strong>⚠️ This page renders revision 1, which an adversarial
+review returned as “needs rework”.</strong> Revision 2 restructures the design around
+a single capability platform and is authoritative:
+<code>docs/design/2026-07-28-agent-self-knowledge/design.md</code>. This page will be
+regenerated once revision 2 passes re-review.</p>
+<p class="meta">2026-07-28 · branch <code>call-review-panel</code> · proposed by David
+("the AI doesn't know what is selected on the panel… can it query the state of the
+settings as they are right now?"); scoped to query-on-demand rather than per-turn
+digest at David's direction · markdown source:
+<code>docs/design/2026-07-28-agent-self-knowledge/design.md</code></p>
+
+<h2>Problem</h2>
+<p>The agent knows the console panel <em>exists</em> and what every control
+<em>means</em> — <code>data/base/knowledge.md:63-87</code> enumerates the assistant-mode
+dropdown, the barge-in cluster, voice, speed, Whisper model, and the rest. It has no
+idea what any of them are <strong>set to</strong>, and no idea whether the machine
+underneath it is healthy.</p>
+
+<p>Two questions it cannot answer today:</p>
+<ol>
+  <li><em>"What are your settings right now?"</em> — it describes the panel generically
+  from static prose, which sounds like an answer and is not one.</li>
+  <li><em>"Why do you sound choppy — is the machine overloaded?"</em> — it cannot
+  distinguish bad configuration from a degraded host. On 2026-07-26 a bumpy call was
+  diagnosed as host degradation, not pipeline config; an agent reasoning from settings
+  alone would have blamed a perfectly fine barge-in setup.</li>
+</ol>
+
+<p>The blocker is not data availability, it is capability:</p>
+<pre><code>deploy/m1.env.defaults:6:NANO_CLAW_DISABLE_TOOLS=1
+deploy/m3.env.defaults:6:NANO_CLAW_DISABLE_TOOLS=1</code></pre>
+
+<p>Production voice agents run knowledge-only — <strong>zero tools registered, no
+tool-calling at all</strong>. And <code>createToolRegistry()</code>
+(<code>src/api/server.ts:228-244</code>) is all-or-nothing: enabling tools registers
+<code>ShellTool</code>, <code>ReadFileTool</code>, and <code>WriteFileTool</code>
+together. <code>ReadFileTool</code> has no path restriction whatsoever
+(<code>src/agent/tools/file.ts:45</code> is a bare <code>readFileSync(path)</code>), and
+<code>run.sh:287</code> passes secrets into the container via <code>-e</code>, so
+<code>/proc/self/environ</code> exposes every API key. On a publicly-dialable voice line,
+knowledge-only was the only defensible setting.</p>
+
+<p><strong>This design breaks that binary.</strong> The feature is self-knowledge; the
+enabling change is a capability model that lets a deployment expose safe tools without
+exposing a shell.</p>
+
+<h2>Invariant</h2>
+<p class="invariant">A tool reachable by an anonymous caller must expose <strong>no
+caller-controlled target</strong>: zero parameters, fixed data sources, allowlisted
+output fields.</p>
+
+<p>Read-vs-write is explicitly <em>not</em> the safety axis. The most dangerous tool in
+the current registry is a read tool. What predicts danger is whether anything the caller
+says can change what the tool touches:</p>
+
+<table>
+<tr><th>Tool</th><th>Verb</th><th>Caller picks target?</th><th>Anonymous-safe</th></tr>
+<tr><td><code>get_settings()</code></td><td>read</td><td>no — no parameters</td><td class="yes">yes, structurally</td></tr>
+<tr><td><code>get_system_health()</code></td><td>read</td><td>no — no parameters</td><td class="yes">yes, structurally</td></tr>
+<tr><td><code>read_file(path)</code></td><td>read</td><td><strong>yes</strong></td><td class="no">no — /proc/self/environ</td></tr>
+<tr><td><code>shell(cmd)</code></td><td>exec</td><td>yes</td><td class="no">no</td></tr>
+<tr><td><code>write_file(path, content)</code></td><td>write</td><td>yes</td><td class="no">no</td></tr>
+</table>
+
+<p>Safety by construction, not by vigilance: "remember not to add a tool that reads
+<code>.env</code>" is a policy living in a reviewer's head, and it holds until someone
+adds <code>get_config_value(key)</code> because it looked harmless. A tool with no
+parameters offers no lever to pull.</p>
+
+<h2>Decisions</h2>
+
+<h3>1. Query on demand, not a per-turn digest</h3>
+<p>State is asked for rarely and explicitly. A digest injected every turn costs tokens and
+attention permanently — and worse, <code>kokoro_client.is_healthy()</code> is an HTTP
+probe, so a health digest means running network probes on every turn to serve a question
+asked once in a hundred. Health is only meaningful at the instant of asking.</p>
+<p><em>Rejected alternative</em> — digest after <code>SYSTEM_CACHE_MARKER</code>
+(<code>context.ts:105</code>): cheap for settings, wrong for health, and it does not
+compose. Every future fact would make every turn heavier forever. A tool-shaped capability
+composes: call history, cost ledger, and next-appointment all become the same shape
+later.</p>
+
+<h3>2. Deployment allowlist by tool name, not a safety tier</h3>
+<pre><code>NANO_CLAW_TOOLS=get_settings,get_system_health</code></pre>
+<p><code>ToolRegistry</code> is already <code>Map&lt;string, BaseTool&gt;</code> keyed by
+<code>tool.name</code> (<code>registry.ts:47,53</code>), so filtering at registration is a
+small change.</p>
+<p>Chosen over a tier/class enum because <strong>a list fails closed as the codebase
+grows</strong>. When someone adds <code>book_appointment(...)</code> in six months, a tier
+forces them to classify it and a misclassification ships live on the next deploy. With an
+allowlist the new tool is inert until a deploy file names it — new capability defaults to
+dark, everywhere, always.</p>
+<p>Secondary benefits: <code>deploy/m1.env.defaults</code> becomes the complete answer to
+"what can this agent do?" without reading TypeScript, and M1/M3/nano-claw can diverge in
+capability without sharing a taxonomy.</p>
+<p><strong>Unset means no tools.</strong> An absent <code>NANO_CLAW_TOOLS</code> registers
+nothing — the same fail-closed default as today's prod. Every environment that wants tools
+names them explicitly, including local dev; <code>.env.example</code> ships with the two
+introspection tools listed so a fresh checkout gets self-knowledge and nothing else.</p>
+
+<h3>3. <code>NANO_CLAW_ALLOW_UNSAFE_TOOLS</code> defaults to false — including dev</h3>
+<p>An allowlist alone makes safety a <em>deployment-config</em> property: a one-line env
+edit (<code>NANO_CLAW_TOOLS=get_settings,read_file</code>) exposes secrets with no code
+review and no test to catch it. The seatbelt is one boolean on the base class, not a
+taxonomy:</p>
+<pre><code>export abstract class BaseTool {
+  /** Caller-controlled target (path, command, free text). Default: assume yes. */
+  unsafe = true;
+}</code></pre>
+<p><code>ShellTool</code>, <code>ReadFileTool</code>, <code>WriteFileTool</code> inherit
+<code>true</code>. The two introspection tools set <code>false</code>. Naming an unsafe
+tool without <code>NANO_CLAW_ALLOW_UNSAFE_TOOLS</code> <strong>refuses it at boot with a
+loud error</strong> rather than silently registering or silently dropping it.</p>
+<p>Default is <strong>false in every environment, dev included</strong> — there is no
+"trusted" default. Dev opts in deliberately, the same as prod would have to. Written as the
+word <code>false</code> rather than <code>0</code> in <code>.env.example</code> and all
+<code>deploy/*.env.defaults</code>, so the intent reads at a glance. The existing truthy
+parser (<code>['1','true','yes']</code>, <code>src/config/index.ts:126</code>) already
+treats <code>false</code> as falsy; no parser change needed.</p>
+<p><code>NANO_CLAW_DISABLE_TOOLS</code> is retired. <code>NANO_CLAW_TOOLS=</code> (empty) is
+knowledge-only mode, which is what <code>scripts/cross_source_eval/run_eval.py:1009</code>
+becomes.</p>
+
+<h3>4. Read-only tools skip the approval pause</h3>
+<p><code>src/api/server.ts:657</code> pauses on <strong>any</strong> tool call — correct
+for the only tools that exist today, wrong for a side-effect-free read. In a spoken
+conversation, answering "what are your settings?" with an approval dialog is not a slow
+answer, it is a broken one.</p>
+<p><code>BaseTool</code> gains <code>requiresApproval</code>, defaulting to
+<code>true</code>. Tools with <code>unsafe = false</code> set it <code>false</code> and
+bypass the pause. The two fields stay separate: the first governs whether a tool may be
+<em>exposed</em>, the second whether a call <em>interrupts the conversation</em>. They
+coincide today; conflating them would surprise us the first time they do not.</p>
+
+<h3>5. Agent → voice server is a new, deliberate dependency arrow</h3>
+<p>Today the arrow is one-way: the voice server calls <code>POST /api/chat</code>
+(<code>voice/server.py:1319</code>); the Node agent never calls back. Both tools need state
+that lives in the voice server, so the arrow must be added.</p>
+<ul>
+  <li><code>GET /api/runtime/settings?sessionId=…</code> — resolves via
+  <code>_agent_session_id()</code></li>
+  <li><code>GET /api/runtime/health</code></li>
+</ul>
+<p>Reached from Node via <code>NANO_CLAW_VOICE_URL</code>, with a <strong>hard timeout
+(500 ms) and graceful degradation</strong>: on timeout or error the tool returns a
+structured "unavailable" result and the agent says it cannot reach its own status. A
+self-check must never hang a live call.</p>
+
+<h2>The two tools</h2>
+
+<h3><code>get_settings()</code> — no arguments, no I/O</h3>
+<p>Reads what is already in memory. Ten of ~13 panel controls are <em>already</em> on the
+server-side <code>Session</code> object (<code>voice/webrtc.py:106-119</code>) and nothing
+has ever read them for prompt purposes:</p>
+<pre><code>self.voice_id  self.speed  self.model  self.stt_size
+self.analysis_style  self.speech_mode</code></pre>
+<p>Plus <code>get_flow_profile()</code> (assistant mode), the scheduler/region model, and
+phone VAD as server globals.</p>
+<p><strong>Phone sessions are in scope.</strong> A phone caller has no panel, but the
+settings are just as real — voice, model, STT, VAD all come from
+<code>/api/phone/config</code> and <code>/api/phone/vad</code>. The tool reports the phone
+line's configuration for those sessions, and the narration adapts: a phone caller is told
+what the line is set to, never pointed at a control they cannot see.</p>
+
+<h3><code>get_system_health()</code> — no arguments, probes services</h3>
+<p>Kokoro / LuxTTS / STT reachability (<code>kokoro_client.is_healthy()</code>,
+<code>lux_client.is_healthy()</code> — already implemented and already used for a
+user-facing voice warning at <code>voice/server.py:743-751</code>), host load, and recent
+turn latency against a normal band. This is the tool that gets the 07-26 call right:
+degraded host, not bad config.</p>
+<p>It costs real I/O, so it is the case where the thinking-cue filler earns its keep. Kept
+separate from <code>get_settings()</code> precisely because their costs differ — an instant
+question should not pay a probe's latency.</p>
+
+<h2>New plumbing: the barge-in trio</h2>
+<p>Everything else is already server-side. The barge-in settings are pure
+<code>localStorage</code> and reach the server only as <em>events</em>
+(<code>barge_in</code>, <code>barge_in_commit</code>, <code>barge_in_false</code>), never
+as <em>settings</em>.</p>
+<p>Add a <code>set_barge_in</code> WS message mirroring the established
+<code>set_model</code> / <code>set_voice</code> pattern
+(<code>voice/server.py:692-738</code>) exactly, including the
+<code>pending_settings</code> pre-session path, carrying <code>enabled</code>,
+<code>sensitivity</code>, and <code>adaptive</code> onto <code>Session</code>.</p>
+
+<h2>Prompt changes</h2>
+<p><code>data/base/knowledge.md</code> gains an explicit instruction: <strong>you have
+tools for your current settings and health — call them rather than describing the panel
+from memory.</strong> Without this the model answers fluently from the static panel
+description at <code>knowledge.md:63-87</code> and reports no actual values. The failure is
+invisible because the wrong answer sounds completely fine.</p>
+<p><code>knowledge.md:86</code> ("These are changed by the user in the console — you cannot
+flip them yourself") <strong>remains true and unchanged</strong>. This phase is
+read-only.</p>
+<p>Spoken-output note: the tools return structured data; the model narrates. It must not
+read raw thresholds or millisecond figures aloud. "Barge-in is on and fairly sensitive" is
+the register, not "sensitivity low, threshold 0.35."</p>
+
+<h2>Non-goals</h2>
+<ul>
+  <li><strong>No write path.</strong> The agent cannot change settings in this phase. That
+  is phase 2, and it is exactly where the approval pause becomes a feature.</li>
+  <li><strong>No proactive tuning coach.</strong> The agent answers when asked; it does not
+  volunteer configuration opinions. <code>knowledge.md:91-94</code> still governs.</li>
+  <li><strong>No shared state store.</strong> One config owner per session, already in
+  memory in the right process, already the right lifetime.</li>
+  <li><strong>No per-turn config digest.</strong></li>
+</ul>
+
+<h2>Enforcement tests</h2>
+<p>Two small tests, in the spirit of the AST isolation test pattern — the boundary stops
+depending on whoever reviews the next PR:</p>
+<ol>
+  <li><strong>Empty parameter schema.</strong> Every registered tool with
+  <code>unsafe === false</code> exposes <code>parameters.properties === {}</code> and no
+  <code>required</code>. Adding a parameter to an introspection tool fails the build.</li>
+  <li><strong>Allowlisted output fields.</strong> <code>get_system_health()</code> and
+  <code>get_settings()</code> return only fields on an explicit allowlist — never a config
+  dump, never an env echo, never a provider key. A no-argument tool that returns
+  <code>process.env</code> is exactly as dangerous as <code>read_file</code>.</li>
+</ol>
+<p>Plus: boot validation rejects unknown names in <code>NANO_CLAW_TOOLS</code> with a
+startup error. A typo'd tool name that silently disables self-knowledge presents to the
+user as "the AI is being dumb again" — the hardest class of bug to trace.</p>
+
+<h2>Failure modes</h2>
+<table>
+<tr><th>Failure</th><th>Behaviour</th></tr>
+<tr><td>Voice server unreachable from Node</td><td>500 ms timeout → "I can't reach my own status right now"; call continues</td></tr>
+<tr><td>Unknown name in <code>NANO_CLAW_TOOLS</code></td><td>Loud boot error, refuse to start</td></tr>
+<tr><td>Unsafe tool named without the opt-in</td><td>Loud boot error, refuse to start</td></tr>
+<tr><td>Model answers from static panel prose</td><td>Mitigated by the <code>knowledge.md</code> instruction; covered by an eval case</td></tr>
+<tr><td>Model reads raw numbers aloud</td><td>Spoken-register instruction alongside the tool description</td></tr>
+</table>
+
+<h2>Security posture, before and after</h2>
+<p><strong>Before:</strong> binary — knowledge-only, or shell plus unrestricted filesystem
+read on a public voice line. Prod chose knowledge-only, which is why the agent knows
+nothing about itself.</p>
+<p><strong>After:</strong> prod exposes exactly two zero-argument tools with allowlisted
+output. Worst case with a fully adversarial LLM is that it tells a caller the TTS service
+is healthy. Unsafe tools require a second, deliberately separate opt-in that is false by
+default in every environment.</p>
+
+<h2>Build order</h2>
+<ol>
+  <li><code>BaseTool</code> gains <code>unsafe</code> and <code>requiresApproval</code>
+  (defaults <code>true</code>/<code>true</code>)</li>
+  <li>Allowlist + opt-in flag in <code>createToolRegistry()</code>, boot validation, retire
+  <code>NANO_CLAW_DISABLE_TOOLS</code></li>
+  <li>Approval bypass at <code>src/api/server.ts:657</code> for
+  <code>requiresApproval === false</code></li>
+  <li><code>set_barge_in</code> WS message → <code>Session</code></li>
+  <li><code>GET /api/runtime/settings</code> and <code>GET /api/runtime/health</code> on the
+  voice server</li>
+  <li><code>get_settings</code> and <code>get_system_health</code> tools in Node, with
+  timeout handling</li>
+  <li><code>knowledge.md</code> instruction + spoken-register note</li>
+  <li>The two enforcement tests, boot-validation test, and an eval case for "what are your
+  settings?"</li>
+</ol>
+
+<h2>Phase 2 (not in scope)</h2>
+<p>The write path — "turn off barge-in", "switch to the fast model". It needs a different
+safety story: a caller-controlled target by definition, so it is <code>unsafe</code> by the
+rule above, and the approval pause becomes the confirmation UX rather than an obstacle.
+Revisit once phase 1 is live and we know what people actually ask for.</p>
+
+</body>
+</html>

@@ -1,0 +1,155 @@
+{
+  "version": 2,
+  "id": "orange",
+  "name": "C2-P201",
+  "seed": 3,
+  "rigid": true,
+  "backdrop": "#0d0d0e",
+  "body": {
+    "src": "characters/orange/base.webp",
+    "width": 1024,
+    "height": 1280,
+    "sizes": "(max-width: 820px) 100vw, calc(100vw - 330px)"
+  },
+  "parts": [
+    {
+      "id": "lensL",
+      "type": "lens",
+      "side": "left",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        362,
+        561
+      ],
+      "radius": 82,
+      "bloomPx": 22,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fffaf0",
+        "mid": "#ff9d1f",
+        "rim": "#5e2a04"
+      },
+      "mesh": {
+        "bars": 8,
+        "meridians": 2,
+        "color": "#2b1a0e",
+        "widthPx": 3
+      }
+    },
+    {
+      "id": "lensR",
+      "type": "lens",
+      "side": "right",
+      "z": 5,
+      "follows": "head",
+      "center": [
+        660,
+        561
+      ],
+      "radius": 82,
+      "bloomPx": 22,
+      "canvasScale": 2,
+      "glow": {
+        "core": "#fffaf0",
+        "mid": "#ff9d1f",
+        "rim": "#5e2a04"
+      },
+      "mesh": {
+        "bars": 8,
+        "meridians": 2,
+        "color": "#2b1a0e",
+        "widthPx": 3
+      }
+    },
+    {
+      "id": "antennaL",
+      "type": "antenna",
+      "side": "left",
+      "z": 7,
+      "follows": "head",
+      "bbox": [
+        108,
+        258,
+        76,
+        180
+      ],
+      "pivot": [
+        147,
+        434
+      ],
+      "sign": -1,
+      "maxDeg": 10,
+      "threshold": 32,
+      "canvasScale": 2
+    },
+    {
+      "id": "antennaR",
+      "type": "antenna",
+      "side": "right",
+      "z": 7,
+      "follows": "head",
+      "bbox": [
+        844,
+        258,
+        76,
+        180
+      ],
+      "pivot": [
+        877,
+        434
+      ],
+      "sign": 1,
+      "maxDeg": 10,
+      "threshold": 32,
+      "canvasScale": 2
+    },
+    {
+      "id": "chestLeds",
+      "type": "leds",
+      "z": 8,
+      "follows": "body",
+      "canvasScale": 2,
+      "bloomPx": 26,
+      "lamps": [
+        {
+          "center": [
+            542,
+            1128
+          ],
+          "radius": 10
+        },
+        {
+          "center": [
+            540,
+            1167
+          ],
+          "radius": 10
+        },
+        {
+          "center": [
+            541,
+            1205
+          ],
+          "radius": 10
+        }
+      ]
+    },
+    {
+      "id": "head",
+      "type": "head",
+      "z": 2,
+      "follows": "body",
+      "cutY": 900,
+      "collarY": 800,
+      "pivot": [
+        512,
+        812
+      ],
+      "maxRollDeg": 7.1,
+      "threshold": 34,
+      "canvasScale": 1,
+      "centralFromY": 740
+    }
+  ]
+}

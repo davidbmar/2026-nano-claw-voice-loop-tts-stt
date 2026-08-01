@@ -9,6 +9,7 @@ import {
   PRESENCE_PROFILES,
   applyEmotionLayer,
   inferEmotion,
+  inferInboundEmotion,
 } from './emotion-layer.js';
 import { createAuthHistoryUI } from './auth.js';
 import { Pcm16AudioPlayer } from './ws-audio-player.js';
@@ -27,6 +28,7 @@ const textInput = document.getElementById('text-input');
 const sendBtn = document.getElementById('send-btn');
 const debugPanel = document.getElementById('debug-panel');
 const debugToggle = document.getElementById('debug-toggle');
+const appVersionBadge = document.getElementById('app-version');
 
 // Client diagnostics are opt-in. ?diag renders the on-device overlay and ships
 // its lifecycle lines; ?telemetry ships the same lines without the overlay.
@@ -87,6 +89,52 @@ function flushClientTelemetry(keepalive) {
   if (_clientTelemetryQueue.length) scheduleClientTelemetryFlush();
 }
 
+// ── Operator-authenticated configuration writes ──────────────
+// POSTs to /api/phone/config, /api/phone/vad, /api/voice/flow, and
+// /api/voice/region-model change behaviour for EVERY caller on this
+// deployment — phone-line voice/model/STT, assistant mode, scheduler model.
+// The server requires a shared operator password (NANO_CLAW_OPERATOR_PASSWORD)
+// on top of the same-origin CSRF headers, because same-origin alone stops only
+// other websites, not a direct HTTP client.
+//
+// The password is NEVER baked into this file: this script is served publicly,
+// so anything in it is readable by anyone. It only ever lives in sessionStorage
+// after the operator types it, and is gone when the tab closes.
+var SS_OPERATOR_KEY = 'nc_operator_secret';
+
+function operatorSecret(forcePrompt) {
+  var stored = forcePrompt ? '' : sessionStorage.getItem(SS_OPERATOR_KEY) || '';
+  if (stored) return stored;
+  var entered =
+    window.prompt('Operator password — these settings affect every caller:') || '';
+  entered = entered.trim();
+  if (entered) sessionStorage.setItem(SS_OPERATOR_KEY, entered);
+  return entered;
+}
+
+// POST an operator setting. A 403 clears the cached password and re-prompts
+// once, so a typo is recoverable without a page reload.
+function operatorFetch(url, body, retrying) {
+  var secret = operatorSecret(!!retrying);
+  if (!secret) return Promise.reject(new Error('operator password required'));
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-NC-Auth': '1',
+      'X-NC-Operator': secret,
+    },
+    body: JSON.stringify(body),
+  }).then(function (r) {
+    if (r.status === 403 && !retrying) {
+      sessionStorage.removeItem(SS_OPERATOR_KEY);
+      return operatorFetch(url, body, true);
+    }
+    return r;
+  });
+}
+
 function queueClientTelemetry(timestamp, message) {
   if (!CLIENT_TELEMETRY_ON) return;
   _clientTelemetryQueue.push({
@@ -144,6 +192,8 @@ const voiceSelect = document.getElementById('voice-select');
 const voicePreviewBtn = document.getElementById('voice-preview-btn');
 const speedSlider = document.getElementById('speed-slider');
 const speedValue = document.getElementById('speed-value');
+const speechPreparationToggle = document.getElementById('speech-preparation-toggle');
+const speechPreparationHint = document.getElementById('speech-preparation-hint');
 const modelSelect = document.getElementById('model-select');
 const analysisStyleToggle = document.getElementById('analysis-style-toggle');
 const sttSelect = document.getElementById('stt-select');
@@ -174,12 +224,19 @@ const flowRejectionsList = document.getElementById('flow-rejections-list');
 const benchmarkSupervisor = document.getElementById('benchmark-supervisor');
 const benchmarkP50 = document.getElementById('benchmark-p50');
 const benchmarkTurns = document.getElementById('benchmark-turns');
+const contextCollections = document.getElementById('context-collections');
+const speechModeSelect = document.getElementById('speech-mode-select');
+const modeAbstract = document.getElementById('mode-abstract');
+var flowModeAbstracts = {};
 const latencyStt = document.getElementById('latency-stt');
 const latencyLlm = document.getElementById('latency-llm');
 const latencyTts = document.getElementById('latency-tts');
 const latencyOverall = document.getElementById('latency-overall');
 const talkingCubeCanvas = document.getElementById('talking-cube');
 const talkingCubeStatus = document.getElementById('talking-cube-status');
+// The stage wraps the canvas. Character renderers mount their own DOM subtree
+// here rather than drawing into the cube's canvas, so swaps need the container.
+const talkingCubeStage = document.getElementById('talking-cube-stage');
 const cubeScene = document.getElementById('cube-scene');
 const cubePattern = document.getElementById('cube-pattern');
 const cubeFormation = document.getElementById('cube-formation');
@@ -438,11 +495,126 @@ var agentAudioContext = null;
 var agentAudioSource = null;
 var agentAudioAnalyser = null;
 
-const talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+// `let`, not `const`: this binding is the ACTIVE renderer, and the console can
+// swap the cube for a character at runtime. Every downstream call site
+// (`talkingCube.pulse(...)` and ~30 others) resolves the binding when it runs,
+// so they all follow the swap without being rewritten.
+//
+// The cube stays the boot-time renderer because its constructor is synchronous.
+// Mounting a character requires fetching its manifest and awaiting its art, so
+// it can only ever happen behind an awaited swap — see switchRenderer().
+let talkingCube = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
 talkingCube.importProfile(loadedVisualization.profile);
 talkingCube.setPanelOpen(false);
 window.TalkingCube = talkingCube;
 window.VoiceCube = talkingCube;
+
+const RENDERER_STORAGE_KEY = 'nanoClawRenderer';
+var activeRendererId = 'cube';
+
+/** Swap the active renderer. Returns true if the renderer changed.
+ *
+ *  Three things have to survive the swap or it looks broken: the live TTS
+ *  analyser (or the new renderer never reacts to audio), the current emotion and
+ *  presence (or it starts blank mid-conversation), and the outgoing renderer's
+ *  teardown (the mascot documents a measured leak of 14 writes plus a stray
+ *  rAF loop per unmount if destroy() is skipped). */
+async function switchRenderer(id) {
+  const next = ['cube', 'mascot', 'robot-orange', 'robot-pale', 'robot-rust'].includes(id)
+    ? id
+    : 'cube';
+  if (next === activeRendererId) return false;
+
+  const hadAnalyser = !!agentAudioAnalyser;
+  try {
+    talkingCube.disconnectAnalyser();
+  } catch (err) {
+    console.warn('[renderer] disconnectAnalyser failed during swap', err);
+  }
+
+  let replacement;
+  if (next === 'mascot') {
+    // Versioned like every other asset in index.html. A dynamic import is
+    // cached by URL independently of app.js, so without this the browser keeps
+    // serving a stale mascot module after a deploy.
+    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.25');
+    replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
+    talkingCubeCanvas.hidden = true;
+  } else if (next.startsWith('robot-')) {
+    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.25');
+    replacement = await createRobotRenderer(
+      talkingCubeStage || talkingCubeCanvas.parentElement,
+      next.slice('robot-'.length),
+    );
+    talkingCubeCanvas.hidden = true;
+  } else {
+    talkingCubeCanvas.hidden = false;
+    replacement = new TalkingCubeRenderer(talkingCubeCanvas, visualizationSettings);
+    replacement.importProfile(loadedVisualization.profile);
+    replacement.setPanelOpen(false);
+  }
+
+  // Tear the old one down only once the new one exists, so a failed mount
+  // leaves a working display rather than an empty stage.
+  const outgoing = talkingCube;
+  talkingCube = replacement;
+  activeRendererId = next;
+  window.TalkingCube = talkingCube;
+  window.VoiceCube = talkingCube;
+  try {
+    (outgoing.unmount || outgoing.destroy).call(outgoing);
+  } catch (err) {
+    console.warn('[renderer] teardown of previous renderer failed', err);
+  }
+
+  if (hadAnalyser) talkingCube.connectAnalyser(agentAudioAnalyser);
+  applyVisualizationLayers();
+  if (talkingCube.applyEmotion) {
+    talkingCube.applyEmotion(emotionState.emotion, emotionState.intensity);
+    talkingCube.applyPresence(emotionState.presence);
+  }
+  try {
+    localStorage.setItem(RENDERER_STORAGE_KEY, next);
+  } catch {
+    /* storage disabled — the swap still worked for this session */
+  }
+  return true;
+}
+window.VoiceRenderer = { switch: switchRenderer, active: () => activeRendererId };
+
+const rendererSelect = document.getElementById('renderer-select');
+if (rendererSelect) {
+  rendererSelect.addEventListener('change', async () => {
+    const wanted = rendererSelect.value;
+    try {
+      await switchRenderer(wanted);
+    } catch (err) {
+      // A failed mount must not leave the control lying about what is on screen:
+      // switchRenderer only commits after the replacement exists, so the old
+      // renderer is still live and the dropdown should say so.
+      console.error('[renderer] switch failed, staying on', activeRendererId, err);
+      rendererSelect.value = activeRendererId;
+    }
+  });
+
+  // Restore the previous choice. Deliberately after first paint and never
+  // awaited at module scope: the cube is already up, so a slow or broken
+  // character mount degrades to "console works, wrong renderer" instead of a
+  // blank stage.
+  let storedRenderer = null;
+  try {
+    storedRenderer = localStorage.getItem(RENDERER_STORAGE_KEY);
+  } catch {
+    /* storage disabled */
+  }
+  if (storedRenderer && storedRenderer !== 'cube') {
+    rendererSelect.value = storedRenderer;
+    switchRenderer(storedRenderer).catch((err) => {
+      console.error(`[renderer] could not restore ${storedRenderer}, falling back to cube`, err);
+      rendererSelect.value = activeRendererId;
+    });
+  }
+}
 
 // ── Emotion layer state ──────────────────────────────────────
 // Sits between the user's base profile and the caller/moment/speaking
@@ -474,6 +646,19 @@ function setVisualPresence(name) {
 function inferEmotionFromReply(text) {
   if (!emotionAuto) return;
   var inferred = inferEmotion(text);
+  setVisualEmotion(inferred.emotion, { intensity: inferred.intensity });
+}
+
+// The caller's turn. Runs the moment the transcript arrives — before the agent
+// has composed anything — so the display reacts while it is still listening.
+//
+// A neutral read deliberately does NOT clear a live emotion: most utterances
+// match no rule, and letting every unremarkable sentence flatten the display
+// would make it less alive, not more. Only a positive match moves it.
+function inferEmotionFromCaller(text) {
+  if (!emotionAuto) return;
+  var inferred = inferInboundEmotion(text);
+  if (inferred.emotion === 'neutral') return;
   setVisualEmotion(inferred.emotion, { intensity: inferred.intensity });
 }
 
@@ -833,11 +1018,16 @@ function updateFlowVisualization(state, outcome, rejected) {
         pulseDuration: 1500,
         duration: 2000,
       });
-    } else if (outcome === 'escape' || outcome === 'budget') {
+    } else if (outcome === 'escape' || outcome === 'budget' || outcome === 'not_booked') {
       startVisualizationMoment({
         primary: '#64748b',
         secondary: '#334155',
-        label: outcome === 'escape' ? 'Flow ended · Muted' : 'Budget reached · Muted',
+        label:
+          outcome === 'escape'
+            ? 'Flow ended · Muted'
+            : outcome === 'budget'
+              ? 'Budget reached · Muted'
+              : 'Not booked · Muted',
         strength: 0.5,
         pulseDuration: 700,
         duration: 1400,
@@ -973,10 +1163,8 @@ fetch('/api/phone/vad')
     vadSelect.disabled = true;
   });
 vadSelect.addEventListener('change', function () {
-  fetch('/api/phone/vad', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: vadSelect.value }),
+  operatorFetch('/api/phone/vad', { mode: vadSelect.value }).catch(function () {
+    statusText.textContent = 'VAD profile unchanged — operator password required';
   });
 });
 
@@ -989,7 +1177,7 @@ function applyPhoneConfig(cfg) {
   // Don't yank a control out from under the user mid-edit (the 5s poll
   // would otherwise snap an open dropdown back); the lamp always updates.
   var editing =
-    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider].indexOf(
+    [phoneVoiceSelect, phoneModelSelect, phoneSttSelect, phoneSpeedSlider, speechModeSelect].indexOf(
       document.activeElement
     ) >= 0;
   if (!editing) {
@@ -1002,6 +1190,9 @@ function applyPhoneConfig(cfg) {
     phoneSttSelect.value = cfg.stt_size;
     phoneSpeedSlider.value = String(cfg.speed);
     phoneSpeedValue.textContent = cfg.speed.toFixed(1) + '×';
+    if (speechModeSelect && cfg.speech_mode) {
+      speechModeSelect.value = cfg.speech_mode;
+    }
   }
   phoneCallStatus.classList.remove('offline');
   if (cfg.active_calls > 0) {
@@ -1042,11 +1233,7 @@ function loadPhoneConfig() {
 }
 
 function pushPhoneConfig(partial) {
-  fetch('/api/phone/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(partial),
-  })
+  operatorFetch('/api/phone/config', partial)
     .then(function (r) {
       return r.ok ? r.json() : null;
     })
@@ -1054,6 +1241,11 @@ function pushPhoneConfig(partial) {
       if (cfg) {
         applyPhoneConfig(cfg);
       }
+    })
+    .catch(function () {
+      // Password refused or dismissed: re-read the server's real state so the
+      // dropdowns never show a change that did not land.
+      loadPhoneConfig();
     });
 }
 
@@ -1066,6 +1258,11 @@ phoneModelSelect.addEventListener('change', function () {
 phoneSttSelect.addEventListener('change', function () {
   pushPhoneConfig({ stt_size: phoneSttSelect.value });
 });
+if (speechModeSelect) {
+  speechModeSelect.addEventListener('change', function () {
+    pushPhoneConfig({ speech_mode: speechModeSelect.value });
+  });
+}
 phoneSpeedSlider.addEventListener('input', function () {
   phoneSpeedValue.textContent = parseFloat(phoneSpeedSlider.value).toFixed(1) + '×';
 });
@@ -1135,7 +1332,7 @@ function replaceSelectOptions(selectEl, stagedSelect) {
 
 const DEFAULT_FLOW_OPTIONS = Object.freeze([
   { id: 'none', label: 'None' },
-  { id: 'spacechannel', label: 'Space Channel' },
+  { id: 'spacechannel', label: 'HYPERRIFF' },
   { id: 'intelligence', label: 'Document Intelligence' },
   { id: 'replicantpm', label: 'Replicant PM' },
   { id: 'scheduler', label: 'Plumber Scheduler' },
@@ -1151,6 +1348,12 @@ function renderFlowConfig(config) {
     : [];
   if (!options.length) options = DEFAULT_FLOW_OPTIONS.slice();
   var active = typeof config.active === 'string' ? config.active : '';
+  flowModeAbstracts = {};
+  options.forEach(function (option) {
+    if (option && typeof option.abstract === 'string') {
+      flowModeAbstracts[option.id] = option.abstract;
+    }
+  });
   var selected = Pipeline.applyModelOptions(
     flowSelect,
     options.map(function (option) {
@@ -1164,6 +1367,35 @@ function renderFlowConfig(config) {
     'hidden',
     selected !== 'scheduler' || config.availability_ok === true
   );
+  updateModeAbstract(selected);
+}
+
+function updateModeAbstract(modeId) {
+  if (!modeAbstract) return;
+  modeAbstract.textContent = flowModeAbstracts[modeId] || '';
+  reflectModelRelevance(modeId);
+}
+
+// In delegate mode nano-claw runs no model: `_handle_delegate_request` never
+// reads `session.model`, because the app on the other end already chose one.
+// The control still accepted a choice and logged "Model set: …", which is a
+// control that looks live and is not — the same trap as a delegate URL field
+// with nowhere to send.
+function reflectModelRelevance(modeId) {
+  var note = document.getElementById('model-inert-note');
+  var inert = modeId === 'delegate';
+  if (note) note.classList.toggle('hidden', !inert);
+  var select = document.getElementById('model-select');
+  if (!select) return;
+  if (inert) {
+    select.dataset.inertForDelegate = '1';
+    select.disabled = true;
+  } else if (select.dataset.inertForDelegate) {
+    // Only re-enable what THIS disabled; the catalog disables it too when no
+    // model is available, and that decision is not ours to undo.
+    delete select.dataset.inertForDelegate;
+    select.disabled = false;
+  }
 }
 
 function loadFlowConfig() {
@@ -1184,12 +1416,9 @@ function loadFlowConfig() {
 }
 
 flowSelect.addEventListener('change', function () {
+  updateModeAbstract(flowSelect.value);
   flowSelect.disabled = true;
-  fetch('/api/voice/flow', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: flowSelect.value }),
-  })
+  operatorFetch('/api/voice/flow', { mode: flowSelect.value })
     .then(function (r) {
       if (!r.ok) throw new Error('flow update failed');
       return r.json();
@@ -1207,6 +1436,126 @@ flowSelect.addEventListener('change', function () {
 // Populate independently on page load; the assistant mode control never waits
 // for the voice WebSocket to open.
 loadFlowConfig();
+
+// ── turn delegate ───────────────────────────────────────────────────────────
+// In delegate mode every turn is answered by another app over HTTP; nano-claw
+// supplies only the voice. The URL is what makes the mode do anything, so the
+// field appears with the mode and hides with it.
+var delegateRow = document.getElementById('delegate-row');
+var delegateUrlInput = document.getElementById('delegate-url');
+var delegateWarning = document.getElementById('delegate-warning');
+
+function showDelegateWarning(message) {
+  if (!delegateWarning) return;
+  delegateWarning.textContent = message || '';
+  delegateWarning.classList.toggle('hidden', !message);
+}
+
+function renderDelegateConfig(config) {
+  if (!delegateRow || !delegateUrlInput) return;
+  delegateRow.classList.toggle('hidden', flowSelect.value !== 'delegate');
+  if (delegateNewBtn) {
+    window.NANO_CLAW_DELEGATE_START = (config && config.start_url) || '';
+    window.NANO_CLAW_DELEGATE_DID = (config && config.start_did) || '';
+    delegateNewBtn.classList.toggle('hidden', !window.NANO_CLAW_DELEGATE_START);
+  }
+  // Never clobber a URL the operator is mid-way through typing.
+  if (document.activeElement !== delegateUrlInput) {
+    delegateUrlInput.value = (config && config.url) || '';
+  }
+  if (flowSelect.value === 'delegate' && !(config && config.url)) {
+    showDelegateWarning('No app URL set — turns cannot be answered');
+  } else {
+    showDelegateWarning('');
+  }
+}
+
+function loadDelegateConfig() {
+  if (!delegateRow) return Promise.resolve();
+  return fetch('/api/voice/delegate')
+    .then(function (r) {
+      if (!r.ok) throw new Error('delegate load failed');
+      return r.json();
+    })
+    .then(renderDelegateConfig)
+    .catch(function () {
+      showDelegateWarning('Could not load the delegate setting');
+    });
+}
+
+function saveDelegateUrl() {
+  if (!delegateUrlInput) return;
+  var url = delegateUrlInput.value.trim();
+  delegateUrlInput.disabled = true;
+  operatorFetch('/api/voice/delegate', { url: url })
+    .then(function (r) {
+      if (r.status === 400) {
+        // The server refuses non-loopback hosts that are not allowlisted, URLs
+        // carrying credentials, and invalid ports. Say which, rather than
+        // making the operator read server logs.
+        throw new Error(
+          'Refused — must be loopback or an allowed host, with no credentials'
+        );
+      }
+      if (!r.ok) throw new Error('Could not save the app URL');
+      return r.json();
+    })
+    .then(function (config) {
+      delegateUrlInput.disabled = false;
+      renderDelegateConfig(config || {});
+      statusText.textContent = url ? 'Delegate URL updated' : 'Delegate cleared';
+    })
+    .catch(function (err) {
+      delegateUrlInput.disabled = false;
+      showDelegateWarning(err.message);
+    });
+}
+
+var delegateNewBtn = document.getElementById('delegate-new');
+
+function startFreshConversation() {
+  // Only offered when a start URL is configured: without one there is nothing
+  // to ask for a conversation, and a button that always fails is worse than no
+  // button.
+  var startUrl = window.NANO_CLAW_DELEGATE_START || '';
+  if (!startUrl) {
+    showDelegateWarning('No start URL configured for this node');
+    return;
+  }
+  delegateNewBtn.disabled = true;
+  operatorFetch('/api/voice/delegate', {
+    start: startUrl,
+    // Which line: the app refuses an unknown number rather than inventing a
+    // business to attach the conversation to.
+    did: window.NANO_CLAW_DELEGATE_DID || '',
+  })
+    .then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'failed'); });
+      return r.json();
+    })
+    .then(function (config) {
+      delegateNewBtn.disabled = false;
+      renderDelegateConfig(config || {});
+      statusText.textContent = 'Started a new conversation';
+    })
+    .catch(function (err) {
+      delegateNewBtn.disabled = false;
+      showDelegateWarning(err.message);
+    });
+}
+
+if (delegateNewBtn) {
+  delegateNewBtn.addEventListener('click', startFreshConversation);
+}
+
+if (delegateUrlInput) {
+  delegateUrlInput.addEventListener('change', saveDelegateUrl);
+  flowSelect.addEventListener('change', function () {
+    if (delegateRow) delegateRow.classList.toggle('hidden', flowSelect.value !== 'delegate');
+    if (flowSelect.value === 'delegate') loadDelegateConfig();
+  });
+  loadDelegateConfig();
+}
 var activeRegionModel = '';
 
 function renderRegionModelConfig(config) {
@@ -1284,11 +1633,7 @@ function loadRegionModelConfig() {
 
 regionModelSelect.addEventListener('change', function () {
   regionModelSelect.disabled = true;
-  fetch('/api/voice/region-model', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: regionModelSelect.value }),
-  })
+  operatorFetch('/api/voice/region-model', { model: regionModelSelect.value })
     .then(function (r) {
       if (!r.ok) throw new Error('scheduler model update failed');
       return r.json();
@@ -1315,12 +1660,18 @@ let wsMicWorklet = null;
 let wsMicSilence = null;
 let wsAudioPlayer = null;
 let wsAudioFirstFrameLogged = false;
+let activePlaybackGeneration = null;
+let activePlaybackUtteranceId = null;
 let isRecording = false;
 let agentSpeaking = false;
+let deepProjectionPending = false;
 let phoneModeEnabled = false;
 let autoTurnPending = false;
 let linkReady = false;
 let audioConnected = false;
+/** The wire format announced in hello_ack, kept so START MIC can retry
+ *  acquisition inside a user gesture. Null until the first hello_ack. */
+let lastWsAudioFormat = null;
 let textTransportReady = false;
 let pendingTextMessages = [];
 let vadAudioContext = null;
@@ -1348,7 +1699,13 @@ let connectionGeneration = 0;
 function syncReadinessControls() {
   textInput.disabled = !linkReady;
   sendBtn.disabled = !linkReady;
-  talkBtn.disabled = !audioConnected;
+  // Enabled on LINK readiness, not audio readiness. Gating the mic on
+  // audioConnected deadlocked: the automatic getUserMedia on hello_ack runs
+  // outside a user gesture, browsers that require one refuse it, audio never
+  // reaches "ready", and the only control that could supply the gesture stays
+  // disabled forever. The click now drives acquisition — see
+  // handleTalkButtonClick.
+  talkBtn.disabled = !linkReady && !audioConnected;
 }
 
 function renderReadinessState(element, state, textElement, text) {
@@ -1386,7 +1743,7 @@ const PHONE_CALIBRATION_MS = 700;
 const PHONE_REARM_MS = 650;
 // Version the preference so clients that inherited the old unsafe default are
 // reset to off once. Later visits preserve the listener's explicit choice.
-const LS_BARGE_IN_ENABLED = 'nanoclaw.bargeIn.v2.enabled';
+const LS_BARGE_IN_ENABLED = 'nanoclaw.bargeIn.v3.enabled';
 const LS_BARGE_IN_SENSITIVITY = 'nanoclaw.bargeIn.sensitivity';
 const LS_BARGE_IN_ADAPTIVE = 'nanoclaw.bargeIn.adaptive';
 const BARGE_IN_LEVELS = window.BargeInSensitivityLevels || {
@@ -1398,7 +1755,10 @@ const BARGE_IN_LEVELS = window.BargeInSensitivityLevels || {
 // Server availability only exposes the experimental capability. A listener
 // must opt in explicitly because open-speaker echo can look exactly like user
 // speech to the current RMS detector and would otherwise cancel replies.
-let bargeInUserEnabled = localStorage.getItem(LS_BARGE_IN_ENABLED) === 'true';
+// Default ON for new browsers (explicit user off is respected) — matches the
+// server-side NANO_CLAW_BARGE_IN=1 posture; open-speaker users can turn it
+// off and use the Stop audio button instead.
+let bargeInUserEnabled = localStorage.getItem(LS_BARGE_IN_ENABLED) !== 'false';
 let bargeInSensitivity = localStorage.getItem(LS_BARGE_IN_SENSITIVITY) || 'low';
 let bargeInAdaptiveEnabled = localStorage.getItem(LS_BARGE_IN_ADAPTIVE) !== 'false';
 if (!Object.prototype.hasOwnProperty.call(BARGE_IN_LEVELS, bargeInSensitivity)) {
@@ -1668,12 +2028,27 @@ function addBubble(text, role) {
   return transcriptLine.content;
 }
 
+var thinkingTimer = null;
+
 function showThinking() {
   clearThinking();
   const transcriptLine = createTranscriptLine('agent');
   transcriptLine.line.classList.add('thinking');
   transcriptLine.content.textContent = 'Thinking…';
   chatLog.scrollTop = chatLog.scrollHeight;
+
+  // Count the wait out loud. A delegated turn is answered by another app and
+  // cannot stream (contract v0 is atomic), so the browser has nothing to show
+  // between the question and the reply — measured here at 7 and 11 seconds,
+  // which reads as a hang rather than as work. A number that keeps moving is
+  // the difference between "it is thinking" and "it is broken"; the phone
+  // solves the same problem with a chime and ticks.
+  const startedAt = Date.now();
+  thinkingTimer = setInterval(function () {
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    if (seconds < 2) return;      // below this the counter is just noise
+    transcriptLine.content.textContent = 'Thinking… ' + seconds + 's';
+  }, 500);
 }
 
 var streamingBubble = null;
@@ -1682,8 +2057,13 @@ function appendAgentDelta(text) {
   if (!streamingBubble) {
     streamingBubble = addBubble('', 'agent');
   }
-  // addBubble returns the bubble element; append text with a leading space if needed
-  streamingBubble.textContent = (streamingBubble.textContent + ' ' + text).trim();
+  // Concatenate model deltas as they stream — they already carry their own
+  // spacing. Only bridge a space when two word-characters would otherwise
+  // collide (space-less deltas); NEVER before punctuation, which is what the
+  // old unconditional space produced ("word ." / "word ,").
+  var prev = streamingBubble.textContent;
+  var needSpace = prev && /\w$/.test(prev) && /^\w/.test(text);
+  streamingBubble.textContent = prev + (needSpace ? ' ' : '') + text;
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
@@ -1692,6 +2072,10 @@ function finalizeAgentBubble() {
 }
 
 function clearThinking() {
+  if (thinkingTimer !== null) {
+    clearInterval(thinkingTimer);
+    thinkingTimer = null;
+  }
   const el = chatLog.querySelector('.thinking');
   if (el) el.remove();
 }
@@ -1716,6 +2100,133 @@ function updateDeepStatus(message) {
   }
 }
 
+function deepModelLabel(model) {
+  if (!model || typeof model.name !== 'string' || !model.name) return 'Deep model';
+  if (model.name === 'deepseek-v4-pro') return 'DeepSeek V4 Pro';
+  return model.name;
+}
+
+function deepPhaseElapsed(value) {
+  if (typeof value !== 'string' || !value) return '';
+  var started = Date.parse(value);
+  if (!Number.isFinite(started)) return '';
+  var seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  return ' · ' + seconds + 's elapsed';
+}
+
+function deepWorkerHeartbeat(value) {
+  if (typeof value !== 'string' || !value) return '';
+  var heartbeat = Date.parse(value);
+  if (!Number.isFinite(heartbeat)) return '';
+  return Date.now() - heartbeat <= 15000
+    ? ' · backend heartbeat current'
+    : ' · backend heartbeat delayed';
+}
+
+function formatDeepProgress(msg) {
+  var phase = String(msg.phase || 'running');
+  var completedPasses = Number.isInteger(msg.completedPasses)
+    ? msg.completedPasses
+    : Number.isInteger(msg.completedSteps)
+      ? msg.completedSteps
+      : 0;
+  var currentPass = Number.isInteger(msg.currentPass)
+    ? msg.currentPass
+    : phase === 'reasoning'
+      ? completedPasses + 1
+      : completedPasses;
+  var maxPasses = Number.isInteger(msg.maxPasses)
+    ? msg.maxPasses
+    : Number.isInteger(msg.maxSteps)
+      ? msg.maxSteps
+      : 1;
+  var retrievalCompleted = Number.isInteger(msg.retrievalCompleted)
+    ? msg.retrievalCompleted
+    : Number.isInteger(msg.retrievalQueries)
+      ? msg.retrievalQueries
+      : 0;
+  var retrievalPlanned = Number.isInteger(msg.retrievalPlanned)
+    ? msg.retrievalPlanned
+    : retrievalCompleted;
+  var evidenceItems = Number.isInteger(msg.evidenceItems) ? msg.evidenceItems : 0;
+  var heartbeat = deepWorkerHeartbeat(msg.heartbeatAt);
+
+  if (phase === 'retrieving') {
+    return (
+      'Deep analysis · Gathering evidence · ' +
+      retrievalCompleted +
+      ' of ' +
+      retrievalPlanned +
+      ' queries' +
+      heartbeat
+    );
+  }
+  if (phase === 'retrieving_followup') {
+    return (
+      'Deep analysis · Gathering follow-up evidence · ' +
+      retrievalCompleted +
+      ' of ' +
+      retrievalPlanned +
+      ' queries · pass ' +
+      completedPasses +
+      ' complete' +
+      heartbeat
+    );
+  }
+  if (phase === 'reasoning') {
+    var evidenceLabel = evidenceItems
+      ? evidenceItems + ' evidence ' + (evidenceItems === 1 ? 'passage' : 'passages')
+      : 'retrieved evidence';
+    var retrievalLabel = retrievalPlanned
+      ? ' · ' + retrievalCompleted + '/' + retrievalPlanned + ' retrievals complete'
+      : '';
+    return (
+      'Deep analysis · ' +
+      deepModelLabel(msg.model) +
+      ' · pass ' +
+      Math.max(currentPass, 1) +
+      ' in progress · ' +
+      evidenceLabel +
+      retrievalLabel +
+      ' · waiting for model response · up to ' +
+      Math.max(maxPasses, 1) +
+      ' passes if needed' +
+      deepPhaseElapsed(msg.phaseStartedAt) +
+      heartbeat
+    );
+  }
+  if (phase === 'structuring') {
+    return 'Deep analysis · Structuring navigable topics · pass ' + completedPasses + ' complete';
+  }
+  if (phase === 'validating') {
+    return 'Deep analysis · Validating claims, topics, and evidence references';
+  }
+  if (phase === 'finalizing') {
+    return 'Deep analysis · Preparing the supported answer';
+  }
+  if (phase === 'indexing') {
+    return 'Deep analysis · Indexing the artifact for follow-up questions' + heartbeat;
+  }
+  if (phase === 'completed') {
+    var passCount = Math.max(completedPasses, 1);
+    var completedDetails = [
+      deepModelLabel(msg.model),
+      passCount + ' reasoning ' + (passCount === 1 ? 'pass' : 'passes'),
+    ];
+    if (evidenceItems) {
+      completedDetails.push(
+        evidenceItems + ' evidence ' + (evidenceItems === 1 ? 'passage' : 'passages')
+      );
+    }
+    if (msg.artifactStatus === 'indexed') completedDetails.push('artifact indexed');
+    if (msg.artifactStatus === 'failed') completedDetails.push('artifact indexing failed');
+    return 'Deep analysis complete · ' + completedDetails.join(' · ');
+  }
+  if (phase === 'failed') return 'Deep analysis failed';
+  if (phase === 'cancelled') return 'Deep analysis cancelled';
+  return 'Deep analysis · ' + String(msg.message || 'Starting').replace(/[.!?]+$/, '');
+}
+
 function formatLatency(value) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) + ' ms' : '–';
 }
@@ -1737,13 +2248,13 @@ function updateFlowBenchmarks(state) {
       : null;
   if (supervisorMs !== null) {
     supervisorSamples.push(supervisorMs);
-    benchmarkSupervisor.textContent = formatLatency(supervisorMs);
-    benchmarkP50.textContent = formatLatency(median(supervisorSamples));
+    if (benchmarkSupervisor) benchmarkSupervisor.textContent = formatLatency(supervisorMs);
+    if (benchmarkP50) benchmarkP50.textContent = formatLatency(median(supervisorSamples));
     latencyLlm.textContent = formatLatency(supervisorMs);
   }
   var turnsUsed = Number.isInteger(state.turns_used) ? state.turns_used : 0;
   var maxTurns = Number.isInteger(state.max_turns) ? state.max_turns : 0;
-  benchmarkTurns.textContent = turnsUsed + ' / ' + maxTurns;
+  if (benchmarkTurns) benchmarkTurns.textContent = turnsUsed + ' / ' + maxTurns;
 }
 
 function appendFlowTranscriptEvents(state, slots, rejected, outcome) {
@@ -2136,6 +2647,7 @@ debugModalOverlay.addEventListener('click', function (e) {
 // ── Agent speaking state ─────────────────────────────────────
 function setAgentSpeaking(speaking) {
   agentSpeaking = speaking;
+  if (!speaking) deepProjectionPending = false;
   stopBtn.classList.toggle('hidden', !speaking);
 }
 
@@ -2157,7 +2669,27 @@ function sendMsg(type, payload) {
 // ── Voice picker ─────────────────────────────────────────────
 var LS_VOICE = 'nanoclaw.voiceId';
 var LS_SPEED = 'nanoclaw.speed';
-var currentVoiceId = localStorage.getItem(LS_VOICE) || 'lux_heart';
+// Default voice for new users. The catalog `default` only applies when a
+// stored voice is unavailable, so a returning user keeps whatever they picked;
+// this constant is what a first-time visitor hears.
+var DEFAULT_VOICE_ID = 'lux_heart';    // Heart (48k) — cleanest clone by ear (keeps final words)
+var PREV_DEFAULT_VOICE_ID = 'lux_sky'; // the voice this replaced
+// One-time default migration: move anyone still sitting on the previous
+// default onto the new one, without disturbing a deliberate choice of some
+// other voice. Bump VOICE_DEFAULT_GEN whenever DEFAULT_VOICE_ID changes.
+var LS_VOICE_DEFAULT_GEN = 'nanoclaw.voiceDefaultGen';
+var VOICE_DEFAULT_GEN = '3';
+(function migrateVoiceDefault() {
+  try {
+    if (localStorage.getItem(LS_VOICE_DEFAULT_GEN) === VOICE_DEFAULT_GEN) return;
+    var stored = localStorage.getItem(LS_VOICE);
+    if (!stored || stored === PREV_DEFAULT_VOICE_ID) {
+      localStorage.setItem(LS_VOICE, DEFAULT_VOICE_ID);
+    }
+    localStorage.setItem(LS_VOICE_DEFAULT_GEN, VOICE_DEFAULT_GEN);
+  } catch (_e) { /* private mode / storage disabled — fall through to default */ }
+})();
+var currentVoiceId = localStorage.getItem(LS_VOICE) || DEFAULT_VOICE_ID;
 var currentSpeed = parseFloat(localStorage.getItem(LS_SPEED) || '1') || 1;
 var previewAudio = new Audio();
 
@@ -2289,14 +2821,53 @@ voicePreviewBtn.addEventListener('click', function () {
 // ── Pipeline settings (STT / LLM / TTS) ─────────────────────
 var LS_MODEL = 'nanoclaw.model',
   LS_STT = 'nanoclaw.stt',
-  LS_ANALYSIS_STYLE = 'nanoclaw.analysisStyle';
-var currentModel = localStorage.getItem(LS_MODEL) || 'anthropic/claude-haiku-4-5';
+  LS_ANALYSIS_STYLE = 'nanoclaw.analysisStyle',
+  LS_SPEECH_PREPARATION = 'nanoclaw.speechPreparation.v1.enabled';
+// A browser with no stored choice must adopt the DEPLOYMENT default served
+// by /api/models (agents.defaults.model), not this compiled seed — the seed
+// exists only so the UI renders something before the catalog fetch resolves.
+var storedModelChoice = localStorage.getItem(LS_MODEL);
+var currentModel = storedModelChoice || 'anthropic/claude-haiku-4-5';
 var currentStt = localStorage.getItem(LS_STT) || 'base';
+// Prepared mode is now the intended default (the onset/fade artifacts that
+// once made it sound choppy are fixed). Clear a stale opt-out once so returning
+// users land on prepared; they can still toggle back to raw, and that choice
+// then sticks (the gen key stops further resets). Bump the gen to re-flip.
+var LS_SPEECH_PREP_GEN = 'nanoclaw.speechPreparation.defaultGen';
+var SPEECH_PREP_GEN = '1';
+(function migrateSpeechPrepDefault() {
+  try {
+    if (localStorage.getItem(LS_SPEECH_PREP_GEN) === SPEECH_PREP_GEN) return;
+    localStorage.removeItem(LS_SPEECH_PREPARATION); // → default (prepared)
+    localStorage.setItem(LS_SPEECH_PREP_GEN, SPEECH_PREP_GEN);
+  } catch (_e) { /* storage disabled — falls through to the default below */ }
+})();
+var speechPreparationEnabled = localStorage.getItem(LS_SPEECH_PREPARATION) !== 'false';
+var speechPreparationAvailable = true;
+var speechPreparationVersion = 'unknown';
 var currentAnalysisStyle =
   localStorage.getItem(LS_ANALYSIS_STYLE) === 'principle_graph' ? 'principle_graph' : 'topic_map';
 if (analysisStyleToggle) {
   analysisStyleToggle.checked = currentAnalysisStyle === 'principle_graph';
 }
+if (speechPreparationToggle) speechPreparationToggle.checked = speechPreparationEnabled;
+
+function renderSpeechPreparationHint(details) {
+  if (!speechPreparationHint) return;
+  var mode = speechPreparationEnabled && speechPreparationAvailable ? 'Prepared' : 'Raw';
+  var suffix = speechPreparationVersion !== 'unknown' ? speechPreparationVersion : 'version pending';
+  if (details && Number.isInteger(details.chunkCount)) {
+    suffix +=
+      ' · ' +
+      details.chunkCount +
+      (details.chunkCount === 1 ? ' chunk' : ' chunks') +
+      ' · ' +
+      (details.normalizationCount || 0) +
+      ' normalized';
+  }
+  speechPreparationHint.textContent = mode + ' speech · ' + suffix;
+}
+renderSpeechPreparationHint();
 
 // The configuration rail is always present, so keep its phone-line lamp and
 // values fresh whenever this tab is visible.
@@ -2317,13 +2888,19 @@ function syncModelToServer() {
   if (typeof currentAnalysisStyle === 'string') {
     sendMsg('set_analysis_style', { analysisStyle: currentAnalysisStyle });
   }
+  sendMsg('set_speech_mode', {
+    mode: speechPreparationEnabled && speechPreparationAvailable ? 'prepared' : 'raw',
+  });
 }
 
 function loadModels() {
   if (modelsLoading) return Promise.resolve(false);
   if (!currentEnabledSelectOption(modelSelect)) modelSelect.disabled = true;
   modelsLoading = true;
-  var requestedModel = currentModel;
+  // Prefer the user's explicit stored choice; a fresh browser requests the
+  // server default so the deployment's model decision actually applies.
+  // Read storage live: a mid-session user change must survive catalog reloads.
+  var requestedModel = localStorage.getItem(LS_MODEL) || '';
   return fetch('/api/models')
     .then(function (r) {
       if (!r.ok) throw new Error('model catalog unavailable');
@@ -2382,7 +2959,10 @@ function loadModels() {
       resolveEnabledSelectSelection(phoneModelSelect, stagedPhoneResolution.value, '');
       phonePendingModel = null;
       currentModel = appliedResolution.value;
-      localStorage.setItem(LS_MODEL, currentModel);
+      // Persist ONLY on explicit user change (the change handler below):
+      // writing the resolved deployment default here would freeze it as a
+      // pseudo-choice, pinning this browser when the deployment later
+      // changes its default model.
       modelSelect.disabled = false;
       sttSelect.value = currentStt;
       modelsLoaded = true;
@@ -2439,6 +3019,17 @@ if (analysisStyleToggle) {
     statusText.textContent = analysisStyleToggle.checked
       ? 'Principle graph enabled for the next deep analysis'
       : 'Topic map enabled for the next deep analysis';
+  });
+}
+if (speechPreparationToggle) {
+  speechPreparationToggle.addEventListener('change', function () {
+    speechPreparationEnabled = speechPreparationToggle.checked;
+    localStorage.setItem(LS_SPEECH_PREPARATION, String(speechPreparationEnabled));
+    sendMsg('set_speech_mode', { mode: speechPreparationEnabled ? 'prepared' : 'raw' });
+    renderSpeechPreparationHint();
+    statusText.textContent = speechPreparationEnabled
+      ? 'Prepared natural delivery enabled'
+      : 'Raw speech enabled for comparison';
   });
 }
 
@@ -2503,6 +3094,9 @@ function connect() {
 
   socket.onclose = function (event) {
     if (socket !== ws || generation !== connectionGeneration) return;
+    // Nothing is coming now. Same reason as the error case: a counter left
+    // running on a dead socket claims work that stopped.
+    clearThinking();
     pageLog(
       'WS CLOSE code=' +
         (event && event.code) +
@@ -2542,10 +3136,33 @@ function reconnectForIdentityChange() {
 function handleMessage(msg, generation) {
   switch (msg.type) {
     case 'hello_ack':
+      if (contextCollections && Array.isArray(msg.contextCollections)) {
+        contextCollections.textContent = msg.contextCollections.length
+          ? msg.contextCollections.join(', ')
+          : 'none';
+      }
+      if (appVersionBadge && typeof msg.appVersion === 'string' && msg.appVersion.trim()) {
+        var appVersion = msg.appVersion.trim();
+        appVersionBadge.textContent = 'v' + appVersion;
+        appVersionBadge.setAttribute('aria-label', 'Version ' + appVersion);
+      }
       bargeInServerAvailable = !!msg.bargeIn;
       syncBargeInControls();
       createBargeInController();
       wsAudioEnabled = msg.wsAudio === true;
+      if (msg.speechPreparation) {
+        speechPreparationAvailable = msg.speechPreparation.available === true;
+        if (typeof msg.speechPreparation.version === 'string') {
+          speechPreparationVersion = msg.speechPreparation.version;
+        }
+        if (speechPreparationToggle) {
+          speechPreparationToggle.disabled = !speechPreparationAvailable;
+        }
+        renderSpeechPreparationHint();
+        sendMsg('set_speech_mode', {
+          mode: speechPreparationEnabled && speechPreparationAvailable ? 'prepared' : 'raw',
+        });
+      }
       if (typeof msg.conversationId === 'string') {
         _clientTelemetryConversation = msg.conversationId;
       }
@@ -2557,6 +3174,11 @@ function handleMessage(msg, generation) {
           ' path'
       );
       if (wsAudioEnabled) setTextTransportReady(true);
+      // Remembered so START MIC can RE-run acquisition inside a click. The
+      // automatic attempt below runs outside any user gesture, which Safari and
+      // most mobile browsers refuse for getUserMedia — and startWsAudio()
+      // validates this payload and throws without it, so a retry needs it kept.
+      lastWsAudioFormat = msg.wsAudioFormat;
       const startAudio = wsAudioEnabled
         ? startWsAudio(generation, msg.wsAudioFormat)
         : startWebRTC(generation);
@@ -2567,6 +3189,21 @@ function handleMessage(msg, generation) {
           setAudioUnavailable('Connection failed');
         }
       });
+      break;
+
+    case 'speech_plan':
+      if (typeof msg.compilerVersion === 'string') {
+        speechPreparationVersion = msg.compilerVersion;
+      }
+      renderSpeechPreparationHint(msg);
+      pageLog(
+        'speech_plan version=' +
+          speechPreparationVersion +
+          ' mode=' +
+          (msg.mode || '?') +
+          ' chunks=' +
+          (msg.chunkCount || 0)
+      );
       break;
 
     case 'webrtc_answer':
@@ -2598,8 +3235,10 @@ function handleMessage(msg, generation) {
     case 'transcription':
       markTranscriptionLatency();
       deepStatusLine = null;
+      deepProjectionPending = false;
       if (msg.text) {
         addBubble(msg.text, 'user');
+        inferEmotionFromCaller(msg.text);
         showThinking();
         setVisualPresence('thinking');
         setPhoneStatus('Thinking...');
@@ -2636,32 +3275,42 @@ function handleMessage(msg, generation) {
       break;
 
     case 'deep_thinking':
+      deepProjectionPending = true;
+      resetBargeInDetector();
       updateDeepStatus('Deep analysis started');
       setVisualPresence('thinking');
       setPhoneStatus('Thinking deeply...');
       break;
 
     case 'deep_progress':
-      var deepStep = Number.isInteger(msg.completedSteps) ? msg.completedSteps : 0;
-      var deepMax = Number.isInteger(msg.maxSteps) ? msg.maxSteps : 0;
-      var deepQueries = Number.isInteger(msg.retrievalQueries) ? msg.retrievalQueries : 0;
-      var deepLabel =
-        msg.phase === 'completed'
-          ? 'Deep analysis complete'
-          : 'Deep analysis · ' +
-            (msg.message || 'Working...') +
-            ' · step ' +
-            deepStep +
-            ' / ' +
-            deepMax +
-            ' · ' +
-            deepQueries +
-            ' queries';
-      updateDeepStatus(deepLabel);
+      updateDeepStatus(formatDeepProgress(msg));
       setPhoneStatus(msg.phase === 'completed' ? 'Preparing the answer...' : 'Thinking deeply...');
       break;
 
+    case 'deep_projection_ready':
+      deepProjectionPending = false;
+      resetBargeInDetector();
+      if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.unpause();
+      setPhoneStatus('Speaking to the phone...');
+      break;
+
+    case 'barge_in_suppressed':
+      resetBargeInDetector();
+      if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.unpause();
+      setPhoneStatus('Preparing the deep-analysis answer...');
+      break;
+
     case 'agent_audio_start':
+      if (
+        Number.isInteger(msg.generation) &&
+        Number.isInteger(activePlaybackGeneration) &&
+        msg.generation < activePlaybackGeneration
+      ) {
+        break;
+      }
+      activePlaybackGeneration = Number.isInteger(msg.generation) ? msg.generation : 0;
+      activePlaybackUtteranceId =
+        typeof msg.utteranceId === 'string' ? msg.utteranceId : null;
       if (wsAudioEnabled && wsAudioPlayer) wsAudioPlayer.begin();
       setAgentSpeaking(true);
       setVisualizationSpeaking(true);
@@ -2669,6 +3318,22 @@ function handleMessage(msg, generation) {
       break;
 
     case 'agent_audio_end':
+      if (
+        (Number.isInteger(msg.generation) &&
+          Number.isInteger(activePlaybackGeneration) &&
+          msg.generation !== activePlaybackGeneration) ||
+        (typeof msg.utteranceId === 'string' &&
+          typeof activePlaybackUtteranceId === 'string' &&
+          msg.utteranceId !== activePlaybackUtteranceId)
+      ) {
+        break;
+      }
+      if (wsAudioEnabled && wsAudioPlayer) {
+        if (msg.status && msg.status !== 'completed') wsAudioPlayer.pause();
+        else wsAudioPlayer.end();
+      }
+      activePlaybackGeneration = null;
+      activePlaybackUtteranceId = null;
       finalizeAgentBubble();
       setAgentSpeaking(false);
       setVisualizationSpeaking(false);
@@ -2707,6 +3372,10 @@ function handleMessage(msg, generation) {
 
     case 'error':
       console.error('Server error:', msg.message);
+      // A turn that ends in an error ends the wait too. Before the counter this
+      // left a stale "Thinking…"; with it, the line would tick upward forever
+      // while nothing was happening — worse than the stale line it replaced.
+      clearThinking();
       finalizeAgentBubble();
       setVisualizationSpeaking(false);
       rearmPhoneMode('Voice error; listening again...');
@@ -2716,7 +3385,7 @@ function handleMessage(msg, generation) {
 
 // ── WebSocket audio ───────────────────────────────────────────
 function enqueueWsAudioFrame(frame) {
-  if (!wsAudioEnabled || !wsAudioPlayer) return;
+  if (!wsAudioEnabled || !wsAudioPlayer || activePlaybackGeneration === null) return;
   if (!wsAudioFirstFrameLogged) {
     wsAudioFirstFrameLogged = true;
     pageLog('agent frame, ctx=' + wsAudioPlayer.context.state);
@@ -2895,6 +3564,8 @@ function cleanupWsAudio() {
   teardownAgentAudioAnalyser();
   wsAudioPlayer = null;
   wsAudioFirstFrameLogged = false;
+  activePlaybackGeneration = null;
+  activePlaybackUtteranceId = null;
 
   if (wsMicWorklet) {
     wsMicWorklet.port.onmessage = null;
@@ -3163,7 +3834,11 @@ function monitorPhoneAudio(timestamp) {
     console.info('Phone VAD calibrated', thresholds);
     setPhoneStatus('Waiting for the phone side...');
   } else if (agentSpeaking) {
-    if (bargeInEnabled && bargeInController) {
+    if (deepProjectionPending) {
+      // Processing sounds and room echo are not a valid interruption. Keep
+      // the completed deep result alive until its first answer audio is queued.
+      resetBargeInDetector();
+    } else if (bargeInEnabled && bargeInController) {
       const observation = sampleBargeIn(rms, timestamp);
       const evt = observation.event;
       if (evt && evt.type === 'barge_in') {
@@ -3245,8 +3920,25 @@ function stopPhoneMode(options) {
   if (config.status !== false && audioConnected) statusText.textContent = 'Phone mode stopped';
 }
 
-function handleTalkButtonClick() {
+async function handleTalkButtonClick() {
   resumeWsAudioFromGesture();
+  // If the automatic acquisition on hello_ack was refused for want of a user
+  // gesture, THIS click is that gesture. Retry inside it before doing anything
+  // else; without this the button was clickable but inert until some other
+  // interaction (pressing Send) happened to satisfy the browser first.
+  if (!audioConnected && wsAudioEnabled && !phoneModeEnabled && lastWsAudioFormat) {
+    try {
+      await startWsAudio(connectionGeneration, lastWsAudioFormat);
+    } catch (err) {
+      pageLog('mic acquire on click failed: ' + err);
+      cleanupWsAudio();
+      setAudioUnavailable('Mic unavailable');
+    }
+    // Acquisition is asynchronous and the server still has to answer
+    // mic_audio_start. Let that land rather than starting a capture the
+    // transport is not ready for; the next click proceeds normally.
+    if (!audioConnected) return;
+  }
   if (phoneModeEnabled) stopPhoneMode();
   else startPhoneMode();
 }

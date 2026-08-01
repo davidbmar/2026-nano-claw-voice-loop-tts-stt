@@ -7,26 +7,40 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+from functools import partial
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
+from voice.calendar_client import (
+    CalendarClient,
+    CalendarError,
+    availability_snapshot,
+    load_calendar_settings,
+)
 from voice.goal_region import (
     BUSINESS_TIMEZONE,
     FreeWindow,
     GoalRegionRunner,
     RegionConfig,
 )
+from voice.scheduling_domains import (
+    DOMAINS,
+    SCHEDULER_GREETING,
+    SchedulingDomain,
+    region_config_for,
+)
+from voice.turn_delegate import DelegateUrlRefused, validate_delegate_url
+
+if TYPE_CHECKING:
+    from voice.booking import BookingFlow
 
 log = logging.getLogger("nano-claw.flow")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_AVAILABILITY_PATH = REPO_ROOT / "scripts/scheduling_eval/availability.json"
-SCHEDULER_GREETING = (
-    "Thanks for calling Lakeside Plumbing. What can I help you schedule?"
-)
-
-FlowOutcome = Literal["booked", "escape", "budget"]
+FlowOutcome = Literal["booked", "escape", "budget", "not_booked"]
 
 
 class FlowModeConfig(TypedDict):
@@ -35,34 +49,172 @@ class FlowModeConfig(TypedDict):
     label: str
     profile: str
     scheduler: bool
+    domain: NotRequired[str]
+    abstract: str
 
 
 FLOW_MODES: dict[str, FlowModeConfig] = {
-    "none": {"label": "None", "profile": "none", "scheduler": False},
+    # First entry = top of the dropdown. The base layer is the persona-free
+    # voice-assistant identity every other profile composes on top of;
+    # selectable here so it can be tested directly.
+    "base": {
+        "label": "Base",
+        "profile": "base",
+        "scheduler": False,
+        "abstract": (
+            "The self-aware voice-assistant identity layer under every "
+            "persona — select to test it directly."
+        ),
+    },
+    "none": {
+        "label": "None",
+        "profile": "none",
+        "scheduler": False,
+        "abstract": "Plain assistant with no persona and no document knowledge.",
+    },
     "spacechannel": {
-        "label": "Space Channel",
+        "label": "Spacechannel",
         "profile": "spacechannel",
         "scheduler": False,
+        "abstract": "Space Channel persona for general conversation and demos.",
     },
     "intelligence": {
         "label": "Document Intelligence",
         "profile": "intelligence",
         "scheduler": False,
+        "abstract": (
+            "Answers from ingested documents with citations; deep strategy "
+            "analysis on request. Currently loaded: the Owning the Demand playbook."
+        ),
+    },
+    "riff": {
+        "label": "Riff",
+        "profile": "riff",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the Riff codebase (~/src/riff) from its "
+            "indexed source files."
+        ),
+    },
+    "nanoclaw": {
+        "label": "nano-claw",
+        "profile": "nanoclaw",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the nano-claw voice agent codebase from "
+            "its indexed source files."
+        ),
+    },
+    "intelligence-platform": {
+        "label": "intelligence-platform",
+        "profile": "intelligence-platform",
+        "scheduler": False,
+        "abstract": (
+            "Answers questions about the intelligence-platform codebase from "
+            "its indexed source files."
+        ),
     },
     "replicantpm": {
         "label": "Replicant PM",
         "profile": "replicantpm",
         "scheduler": False,
+        "abstract": "Replicant product-manager persona.",
     },
     "scheduler": {
         "label": "Plumber Scheduler",
-        # If the scheduler is unavailable or ends, retain today's Space Channel
+        # If the scheduler is unavailable or ends, retain the Space Channel
         # fallback behavior for subsequent normal agent turns.
         "profile": "spacechannel",
         "scheduler": True,
+        "domain": "plumber",
+        "abstract": "Goal-driven plumber scheduling flow with live availability.",
+    },
+    "lawyer": {
+        "label": "Lawyer Scheduler",
+        # Non-scheduling turns (flow completed, escaped, or unavailable) fall
+        # back to the neutral base assistant — a law office must never answer
+        # as the Space Channel persona. Not "none": that keeps the configured
+        # defaults.systemPrompt, which is the Space Channel persona in the
+        # container config. Plumber above keeps its Space Channel fallback on
+        # purpose: that demo runs on the Space Channel line.
+        "profile": "base",
+        "scheduler": True,
+        "domain": "lawyer",
+        "abstract": (
+            "Goal-driven law-office scheduling with live calendar booking."
+        ),
+    },
+    # The only mode whose turns never reach nano-claw's own model. Everything
+    # acoustic stays here; the words come from another app over the turn-delegate
+    # contract (riff-builder `docs/turn-delegate-contract.md`).
+    #
+    # `profile` is "none" because no persona of ours may colour a reply we did
+    # not author — the delegate's text is spoken as written.
+    #
+    # The URL is deliberately NOT a key here. It is per-connection state on the
+    # Session, defaulting from NANO_CLAW_DELEGATE_URL, because the contract says
+    # "one delegate URL == one conversation". Putting it on this process-global
+    # entry would give one fact two homes, and two homes is where every drift bug
+    # in this system has started.
+    "delegate": {
+        "label": "Turn Delegate",
+        "profile": "none",
+        "scheduler": False,
+        "abstract": (
+            "Routes every turn to another app over HTTP and speaks its reply; "
+            "nano-claw supplies only the voice."
+        ),
     },
 }
 DEFAULT_FLOW_MODE = "spacechannel"
+
+# Spoken phone greeting per mode, so the intro always matches the brain that
+# answers (07-27 bug: every restart re-read NANO_CLAW_VOICE_FLOW and the line
+# played the Space Channel intro over Document Intelligence answers).
+# Scheduler modes carry their own flow greeting and never consult this table;
+# the recording notice is appended separately by the phone layer.
+_MODE_GREETINGS: dict[str, str] = {
+    "spacechannel": (
+        "You've reached Space Channel. Ask me about rocket launches, "
+        "U F O cases, space news, podcasts, or live shows."
+    ),
+    "intelligence": (
+        "You've reached the document intelligence assistant. Ask me anything "
+        "about the documents currently loaded."
+    ),
+    "riff": (
+        "You've reached the Riff codebase assistant. Ask me about the Riff "
+        "source."
+    ),
+    "nanoclaw": (
+        "You've reached the nano-claw codebase assistant. Ask me how this "
+        "voice system works."
+    ),
+    "intelligence-platform": (
+        "You've reached the intelligence-platform codebase assistant. Ask me "
+        "about that codebase."
+    ),
+    "replicantpm": (
+        "You've reached the Replicant product assistant. How can I help?"
+    ),
+    # Deliberately names nobody. The delegate contract (v0) has no greeting
+    # exchange, so the gateway does not know whose line this is — and a greeting
+    # that guessed would be the assistant claiming an identity it was never
+    # given. The delegate introduces itself on the first reply.
+    "delegate": "Hello — how can I help you today?",
+}
+_GENERIC_GREETING = (
+    "Hello! You've reached the nano-claw voice assistant. How can I help?"
+)
+
+
+def flow_mode_greeting(mode: str | None = None) -> str:
+    """Phone greeting matching the active (or given) assistant mode."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        active = DEFAULT_FLOW_MODE
+    return _MODE_GREETINGS.get(active, _GENERIC_GREETING)
 _flow_mode: str | None = None
 # Keep the provider-verified dropdown registry centralized here. These exact
 # IDs were checked against the live provider /v1/models endpoints on 2026-07-17.
@@ -79,6 +231,11 @@ REGION_MODELS = {
 }
 DEFAULT_REGION_MODEL = "claude-haiku-4-5"
 _region_model: str | None = None
+# None = "nobody has chosen", so fall through to the environment. "" = an
+# operator explicitly cleared it, which must NOT fall back to the env value —
+# clearing has to actually clear, or the console would appear to disarm a
+# delegate that is still armed.
+_delegate_url: str | None = None
 _AVAILABILITY_ERRORS = (
     OSError,
     json.JSONDecodeError,
@@ -102,6 +259,7 @@ class FlowReply:
     turns_used: int | None = None
     max_turns: int | None = None
     supervisor_ms: float | None = None
+    event_id: str | None = None
 
 
 def _normalize_flow_mode(mode: str) -> str | None:
@@ -143,6 +301,90 @@ def get_flow_profile(mode: str | None = None) -> str:
     return FLOW_MODES[active]["profile"]
 
 
+def is_delegate_mode(mode: str | None = None) -> bool:
+    """True when turns must be routed to another app rather than to our model."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    return active == "delegate"
+
+
+def delegate_allowed_hosts() -> frozenset[str]:
+    """Non-loopback hosts a delegate URL may point at.
+
+    Loopback needs no entry. Anything else must be named here, because this URL
+    receives everything the human says, on every turn.
+    """
+
+    raw = os.environ.get("NANO_CLAW_DELEGATE_HOSTS", "")
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def default_delegate_url() -> str:
+    """The delegate URL a new session starts with, or "" for none.
+
+    A *default*, not the truth: the session owns its URL, because the contract
+    pairs one URL with one conversation. This only decides where a connection
+    points before anyone says otherwise.
+
+    Precedence is the one this module already uses twice — for the flow mode and
+    for the region model: an operator's runtime choice beats the environment.
+    Per-session state then beats both, which is `resolve_delegate_url`'s job.
+
+    An unset or refused value yields "", which leaves delegate mode inert rather
+    than dialling something unvetted — the same fail-closed choice as
+    `validate_delegate_url` itself.
+    """
+
+    if _delegate_url is not None:
+        return _delegate_url
+    configured = os.environ.get("NANO_CLAW_DELEGATE_URL", "").strip()
+    if not configured:
+        return ""
+    try:
+        return validate_delegate_url(configured, allowed_hosts=delegate_allowed_hosts())
+    except DelegateUrlRefused as exc:
+        log.warning("NANO_CLAW_DELEGATE_URL refused, delegate mode inert: %s", exc)
+        return ""
+
+
+def set_default_delegate_url(url: str) -> bool:
+    """Point new conversations at `url`. "" clears it. False if refused.
+
+    Validated here rather than at dial time so a bad value is rejected while an
+    operator is looking at the answer. Returning False instead of raising keeps
+    the refusal a 400 to the operator, not a 500.
+    """
+
+    global _delegate_url
+    if not isinstance(url, str):
+        return False
+    candidate = url.strip()
+    if candidate:
+        try:
+            candidate = validate_delegate_url(
+                candidate, allowed_hosts=delegate_allowed_hosts())
+        except DelegateUrlRefused as exc:
+            log.warning("delegate URL refused: %s", exc)
+            return False
+    _delegate_url = candidate
+    log.info("Delegate URL set to %s (applies to new conversations)",
+             candidate or "(none)")
+    return True
+
+
+def active_scheduling_domain(mode: str | None = None) -> str | None:
+    """Return the selected scheduling domain, if the mode enables one."""
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    if active is None:
+        return None
+    config = FLOW_MODES[active]
+    domain_id = config.get("domain")
+    if not config["scheduler"] or domain_id not in DOMAINS:
+        return None
+    return domain_id
+
+
 def get_region_model() -> str:
     """Return the runtime scheduler model or its environment/default fallback."""
 
@@ -166,40 +408,13 @@ def set_region_model(name: str) -> bool:
 def scheduler_flow_enabled() -> bool:
     """Compatibility helper for callers that only need a boolean check."""
 
-    return FLOW_MODES[get_flow_mode()]["scheduler"]
+    return active_scheduling_domain() is not None
 
 
 def scheduler_region_config(digest: str) -> RegionConfig:
     """Return the scheduler configuration shared by live voice and evals."""
 
-    return RegionConfig(
-        goal=(
-            "Book one plumbing appointment that satisfies the caller and fits "
-            "the grounded availability. Never shorten the requested duration."
-        ),
-        persona=(
-            "You are a concise, warm plumbing scheduler. Offer concrete available "
-            "times, clarify constraints, and never claim a time outside the digest. "
-            "Keep every reply to one or two short spoken sentences; offer at most "
-            "two candidate times per turn. When a requested duration does not fit "
-            "any window on a day, say so plainly and offer the nearest other day "
-            "whose window fits it; never keep proposing a day that cannot fit the "
-            "duration."
-        ),
-        digest=digest,
-        slots={
-            "job": {"type": "text", "required": True},
-            "slot_start": {"type": "datetime", "required": True},
-            "duration_minutes": {
-                "type": "minutes",
-                "values": [30, 60, 120, 240],
-                "required": True,
-            },
-        },
-        escape_phrases=("operator", "human", "goodbye"),
-        max_turns=12,
-        deadline_s=600,
-    )
+    return region_config_for(DOMAINS["plumber"], digest)
 
 
 def load_free_windows(availability: dict) -> list[FreeWindow]:
@@ -215,6 +430,57 @@ def load_free_windows(availability: dict) -> list[FreeWindow]:
     ]
 
 
+def anchor_availability(availability: dict, *, now: datetime | None = None) -> dict:
+    """Shift a static availability fixture onto upcoming days.
+
+    A frozen fixture goes stale the moment its week passes: on 2026-07-27 the
+    plumber scheduler was still offering July 17-23, so every slot a caller
+    could accept was in the past. The calendar component therefore anchors to
+    the current day at launch and prefers upcoming days.
+
+    The shift is a whole number of WEEKS, so each day keeps its weekday and the
+    fixture's weekend/business-day shape (which the scheduling evals encode)
+    survives. Availability that already starts in the future — every live
+    calendar snapshot, which begins at tomorrow — is returned untouched.
+    Best-effort: malformed input is returned as-is rather than raising, because
+    scheduling must degrade rather than break a live call.
+    """
+
+    try:
+        days = availability.get("days") or {}
+        if not days:
+            return availability
+        current = (now or datetime.now(ZoneInfo(availability["timezone"]))).date()
+        first_day = min(date.fromisoformat(day) for day in days)
+        earliest_allowed = current + timedelta(days=1)
+        if first_day >= earliest_allowed:
+            return availability
+        weeks = -(-(earliest_allowed - first_day).days // 7)  # ceil division
+        shift = timedelta(weeks=weeks)
+    except Exception:
+        log.exception("availability anchoring failed; using it unshifted")
+        return availability
+
+    def _shift(value: str) -> str:
+        return (datetime.fromisoformat(value) + shift).isoformat()
+
+    shifted_days: dict[str, list[dict[str, str]]] = {}
+    for day, windows in days.items():
+        shifted_day = (date.fromisoformat(day) + shift).isoformat()
+        shifted_days[shifted_day] = [
+            {"start": _shift(window["start"]), "end": _shift(window["end"])}
+            for window in windows
+        ]
+    anchored = dict(availability)
+    anchored["days"] = shifted_days
+    log.info(
+        "availability anchored forward %d week(s): now starts %s",
+        weeks,
+        min(shifted_days),
+    )
+    return anchored
+
+
 def _render_availability_window(window: dict) -> str:
     start = datetime.fromisoformat(window["start"])
     end = datetime.fromisoformat(window["end"])
@@ -222,10 +488,21 @@ def _render_availability_window(window: dict) -> str:
     return f"{start:%H:%M}–{end:%H:%M} (fits ≤{capacity_minutes}m)"
 
 
-def availability_digest(availability: dict) -> str:
-    """Render availability for the goal-region supervisor prompt."""
+def availability_digest(availability: dict, *, now: datetime | None = None) -> str:
+    """Render availability for the goal-region supervisor prompt.
 
+    The digest opens with today's date so the supervisor can resolve relative
+    days ("Monday", "tomorrow") against a known anchor instead of guessing,
+    and can notice if it is ever handed days that contradict it.
+    """
+
+    try:
+        current = now or datetime.now(ZoneInfo(availability["timezone"]))
+    except Exception:
+        current = now or datetime.now()
     lines = [
+        f"Today is {current:%A %B} {current.day}, {current:%Y} ({current.date().isoformat()}); "
+        f"the current time is {current:%H:%M}. Only ever offer or book times after now.",
         f"All times are {availability['timezone']}; business hours are 08:00–18:00.",
         "A visit must fit inside one listed half-open free window:",
     ]
@@ -240,58 +517,201 @@ def availability_digest(availability: dict) -> str:
     return "\n".join(lines)
 
 
+def digest_from_windows(windows: list[FreeWindow], timezone: str) -> str:
+    """Render runner free windows without mutating them."""
+
+    days: dict[str, list[dict[str, str]]] = {}
+    for window in sorted(windows, key=lambda item: (item.start, item.end)):
+        day = window.start.date().isoformat()
+        days.setdefault(day, []).append(
+            {
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+            }
+        )
+    return availability_digest({"timezone": timezone, "days": days})
+
+
+class RefusalSession:
+    """Terminal scheduler surface used when a live calendar cannot be trusted."""
+
+    greeting = SCHEDULER_GREETING
+
+    def __init__(self, domain: SchedulingDomain) -> None:
+        self._domain = domain
+        self.greeting = domain.greeting
+        self._turns_used = 0
+
+    @property
+    def goal(self) -> str:
+        return self._domain.goal
+
+    @property
+    def slots(self) -> dict:
+        return {}
+
+    @property
+    def turns_used(self) -> int:
+        return self._turns_used
+
+    @property
+    def max_turns(self) -> int:
+        return self._domain.max_turns
+
+    async def reply(self, caller_text: str) -> FlowReply:
+        """Speak one terminal apology without attempting stale negotiation."""
+
+        del caller_text
+        self._turns_used = 1
+        return FlowReply(
+            text=self._domain.apology_unavailable,
+            done=True,
+            outcome="not_booked",
+            slots={},
+            turns_used=self.turns_used,
+            max_turns=self.max_turns,
+        )
+
+
 class FlowSession:
     """Async voice-facing wrapper around the synchronous goal-region runner."""
 
     greeting = SCHEDULER_GREETING
 
-    def __init__(self, runner: GoalRegionRunner) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        booking: BookingFlow,
+        greeting: str = SCHEDULER_GREETING,
+    ) -> None:
+        self._booking = booking
+        self.greeting = greeting
         self._turn_lock = asyncio.Lock()
         self._inflight_turn: asyncio.Future | None = None
 
     @property
     def goal(self) -> str:
-        return str(getattr(getattr(self._runner, "config", None), "goal", ""))
+        runner = getattr(self._booking, "_runner", None)
+        return str(getattr(getattr(runner, "config", None), "goal", ""))
 
     @property
     def slots(self) -> dict:
-        return dict(getattr(self._runner, "slots", {}) or {})
+        runner = getattr(self._booking, "_runner", None)
+        return dict(getattr(runner, "slots", {}) or {})
 
     @property
     def turns_used(self) -> int:
-        return int(getattr(self._runner, "turns_used", 0))
+        runner = getattr(self._booking, "_runner", None)
+        return int(getattr(runner, "turns_used", 0))
 
     @property
     def max_turns(self) -> int:
-        return int(getattr(self._runner, "max_turns", 0))
+        runner = getattr(self._booking, "_runner", None)
+        return int(getattr(runner, "max_turns", 0))
 
     @classmethod
-    def availability_ok(cls) -> bool:
-        """Check scheduler availability without constructing or caching a runner."""
+    def availability_ok(cls, mode: str | None = None) -> bool:
+        """Check mode prerequisites without probing a live calendar."""
+
+        domain_id = active_scheduling_domain(mode)
+        if domain_id is None:
+            return True
+        domain = DOMAINS[domain_id]
+        if domain.uses_live_calendar:
+            return load_calendar_settings() is not None
 
         try:
             _load_scheduler_inputs()
         except _AVAILABILITY_ERRORS:
+            # Debug level: this runs on every /flow poll, but the REASON the
+            # availability badge is red should be one log-grep away.
+            log.debug("Scheduler availability inputs unavailable", exc_info=True)
             return False
         return True
 
     @classmethod
-    def create(cls, *, client=None) -> FlowSession | None:
-        """Build a scheduler session, or return None when it cannot be loaded."""
+    def create(
+        cls,
+        *,
+        domain_id: str | None = None,
+        client=None,
+    ) -> FlowSession | RefusalSession | None:
+        """Build a domain scheduler; live-calendar failures refuse explicitly."""
 
-        try:
-            path, config, windows = _load_scheduler_inputs()
-        except _AVAILABILITY_ERRORS as exc:
-            path = _availability_path()
-            log.error("Scheduler flow unavailable; cannot load %s: %s", path, exc)
+        selected_domain = domain_id or "plumber"
+        domain = DOMAINS.get(selected_domain)
+        if domain is None:
+            log.error("Scheduler flow unavailable; unknown domain %s", selected_domain)
             return None
 
+        calendar = None
+        if domain.uses_live_calendar:
+            settings = load_calendar_settings()
+            if settings is None:
+                log.error(
+                    "Scheduler flow unavailable; calendar settings are not configured "
+                    "for domain %s",
+                    domain.id,
+                )
+                return RefusalSession(domain)
+            try:
+                calendar = CalendarClient(settings)
+                availability = availability_snapshot(calendar)
+                windows = load_free_windows(availability)
+                config = region_config_for(domain, availability_digest(availability))
+            except (CalendarError, *_AVAILABILITY_ERRORS) as exc:
+                log.error(
+                    "Scheduler flow unavailable; cannot fetch calendar for domain "
+                    "%s: %s",
+                    domain.id,
+                    exc,
+                )
+                return RefusalSession(domain)
+            except Exception as exc:
+                log.exception(
+                    "Scheduler flow unavailable; cannot prepare calendar for domain "
+                    "%s: %s",
+                    domain.id,
+                    exc,
+                )
+                return RefusalSession(domain)
+        else:
+            try:
+                path, config, windows = _load_scheduler_inputs()
+            except _AVAILABILITY_ERRORS as exc:
+                path = _availability_path()
+                log.error("Scheduler flow unavailable; cannot load %s: %s", path, exc)
+                return None
+
         try:
-            return cls(GoalRegionRunner(config, windows, client=client))
+            # Imported lazily because BookingFlow uses the digest/speech helpers
+            # in this module.
+            from voice.booking import BookingFlow
+
+            runner = GoalRegionRunner(config, windows, client=client)
+            booking = BookingFlow(runner, domain, calendar)
+            return cls(booking, domain.greeting)
         except Exception as exc:
             log.error("Scheduler flow unavailable; cannot initialize runner: %s", exc)
-            return None
+            return RefusalSession(domain) if domain.uses_live_calendar else None
+
+    @classmethod
+    async def create_async(
+        cls,
+        *,
+        domain_id: str | None = None,
+        client=None,
+    ) -> FlowSession | RefusalSession | None:
+        """Create live-calendar sessions in an executor; plumber stays synchronous."""
+
+        selected_domain = domain_id or "plumber"
+        domain = DOMAINS.get(selected_domain)
+        if domain is None or not domain.uses_live_calendar:
+            return cls.create(domain_id=domain_id, client=client)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            partial(cls.create, domain_id=selected_domain, client=client),
+        )
 
     async def reply(self, caller_text: str) -> FlowReply:
         """Run one blocking supervisor turn without blocking the event loop."""
@@ -299,7 +719,7 @@ class FlowSession:
         async with self._turn_lock:
             await self._discard_orphaned_turn()
             loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(None, self._runner.turn, caller_text)
+            future = loop.run_in_executor(None, self._booking.turn, caller_text)
             self._inflight_turn = future
             try:
                 # Shield keeps the executor future awaitable after browser
@@ -315,30 +735,20 @@ class FlowSession:
                 self._inflight_turn = None
 
         outcome: FlowOutcome | None = (
-            turn.exit if turn.exit in ("booked", "escape", "budget") else None
+            turn.outcome
+            if turn.outcome in ("booked", "escape", "budget", "not_booked")
+            else None
         )
-        slots = dict(turn.slots)
-        if outcome == "booked":
-            text = (
-                f"You're booked: {slots.get('job')} on "
-                f"{_spoken_datetime(slots.get('slot_start'))} for "
-                f"{slots.get('duration_minutes')} minutes. See you then. Goodbye!"
-            )
-        elif outcome == "escape":
-            text = "Of course — I'm transferring you now. Goodbye!"
-        elif outcome == "budget":
-            text = "Our scheduler will call you back to finish this up. Goodbye!"
-        else:
-            text = turn.reply
         return FlowReply(
-            text=text,
-            done=outcome is not None,
+            text=turn.reply,
+            done=turn.done,
             outcome=outcome,
-            slots=slots,
+            slots=dict(turn.slots),
             rejected=list(turn.rejected),
-            turns_used=getattr(self._runner, "turns_used", None),
-            max_turns=getattr(self._runner, "max_turns", None),
+            turns_used=turn.turns_used,
+            max_turns=turn.max_turns,
             supervisor_ms=turn.supervisor_ms,
+            event_id=turn.event_id,
         )
 
     async def _discard_orphaned_turn(self) -> None:
@@ -370,6 +780,9 @@ def _load_scheduler_inputs() -> tuple[Path, RegionConfig, list[FreeWindow]]:
     availability = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(availability, dict):
         raise ValueError("availability must be a JSON object")
+    # Anchor to the moment the calendar launches: a fixture written last week
+    # must not offer last week's days (2026-07-27 regression).
+    availability = anchor_availability(availability)
     windows = load_free_windows(availability)
     config = scheduler_region_config(availability_digest(availability))
     return path, config, windows
@@ -418,6 +831,7 @@ def _spoken_datetime(value) -> str:
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
+        # health-ok: TTS formatter guard; the spoken fallback below is the handling
         return "the scheduled date and time"
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(BUSINESS_TIMEZONE)

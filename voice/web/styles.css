@@ -218,6 +218,13 @@ summary:focus-visible {
   gap: 3px;
 }
 
+.brand-name-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
 .brand-copy strong {
   font-size: 12px;
   font-weight: 650;
@@ -230,6 +237,14 @@ summary:focus-visible {
   color: var(--faint);
   font-size: 8px;
   letter-spacing: 0.2em;
+}
+
+.brand-copy .brand-version {
+  color: rgba(var(--accent-rgb), 0.72);
+  font-size: 7px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  line-height: 1;
 }
 
 .top-status {
@@ -2262,7 +2277,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 @media (max-width: 500px) {
-  .brand-copy small {
+  .brand-copy .brand-subtitle {
     display: none;
   }
 
@@ -2363,4 +2378,156 @@ input[type="range"]::-moz-range-thumb {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Context panel (task 065 groundwork): loaded corpora + switching hint */
+.context-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim, #8a93a6);
+}
+#context-collections {
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* ── Phone-number banner (config-driven; hidden when no display number) ──
+   The console is an app-shell (#app paints from y=0), so the banner floats
+   as a fixed pill in the top-center band of the topbar. */
+.phone-banner {
+  position: fixed;
+  top: 0.7rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.9rem;
+  padding: 0.5rem 1.4rem;
+  width: fit-content;
+  background: var(--panel-strong);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 999px;
+  backdrop-filter: blur(26px) saturate(130%);
+  -webkit-backdrop-filter: blur(26px) saturate(130%);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+@media (max-width: 900px) {
+  .phone-banner { top: auto; bottom: 0.8rem; padding: 0.4rem 1rem; }
+  .phone-banner-label { display: none; }
+}
+.phone-banner[hidden] { display: none; }
+.phone-banner-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.phone-banner-number {
+  font-family: var(--mono);
+  font-size: clamp(1.25rem, 2.6vw, 1.7rem);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent-2);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.35);
+}
+.phone-banner-number:hover { color: #ffe09a; }
+
+/* ── Mascot renderer ───────────────────────────────────────────────
+   Ported from ~/src/computer-agent-animation/src/styles.css. The rules that
+   look cosmetic are not: `.mascot-screen` and `.mascot-calibration` MUST stay
+   absolutely positioned at 0,0 with `transform-origin: 0 0`, because the rig
+   projects the face onto them with a homography computed against that origin.
+   Move them and the face detaches from the body.
+
+   Scoped to `.mascot-active` so the cube — which shares this stage — is
+   untouched. The stage is `position: fixed; inset: 0` (full viewport), and the
+   rig scales from bodyEl.clientWidth, so without a cap the character renders
+   at roughly twice the visible area and runs behind the side panels. */
+#talking-cube-stage.mascot-active {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 12px;
+  /* Sampled from the artwork's own edge pixels (corners range #e8d4bd-#f4e9d8;
+     the paper carries a vignette, so this is their mean). On a window wider
+     than the art, the character cannot reach both edges without being scaled
+     absurdly — so instead of zooming further, the stage behind it is the same
+     cream and the uncovered strips read as more paper rather than as black
+     bars. Sizing stays driven by height; this covers whatever is left. */
+  background: #efe0ce;
+}
+
+/* The cube's overlay copy would otherwise be painted across the character. */
+#talking-cube-stage.mascot-active .stage-copy,
+#talking-cube-stage.mascot-active .stage-topline {
+  display: none;
+}
+
+/* Centring wrapper. Needed because the art deliberately overflows: grid
+   `place-items: center` uses SAFE alignment, so an overflowing item is clamped
+   to the start edge instead of being centred — measured as 10px of bleed at the
+   top against 281px at the bottom, which left the top edge on screen. Absolute
+   positioning with a translate is not subject to that clamp. It lives here and
+   not on .mascot-inner because the rig owns that element's transform. */
+.mascot-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Whole-body motion (bob, lean, tilt, squash) targets this element, so it must
+   own its `transform` — never centre it with one. */
+.mascot-inner {
+  position: relative;
+  transform-origin: 50% 92%;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.mascot-body {
+  display: block;
+  /* The artwork is OPAQUE — the cream paper is part of the illustration, not a
+     transparent margin. Sized to fit, its rectangular edge is visible against
+     the dark console, and the idle bob moves the whole RECTANGLE rather than
+     appearing to move the character.
+
+     So it deliberately overflows: the paper bleeds past the stage on every
+     side and `overflow: hidden` on .mascot-active clips it, leaving no edge to
+     betray the motion.
+
+     Measured over 241 frames of idle motion: the whole-body bob is ±6.5px
+     vertical and 0 horizontal, so ~40px of bleed per side is ample.
+
+     HEIGHT drives and width follows the aspect ratio — do NOT add a min-width.
+     The stage is full-viewport, so `min-width: calc(100% + n)` demands ~1340px
+     and drags the height past 1100, which reads as badly over-zoomed. It is
+     also unnecessary: at this aspect a viewport-height character is ~960px
+     wide, leaving its left and right edges at roughly x=120 and x=1080, and
+     both are already covered by the config and transcript panels. Only the
+     vertical edges need real bleed. */
+  min-height: calc(100vh + 80px);
+  width: auto;
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.mascot-screen,
+.mascot-calibration {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+
+.mascot-calibration {
+  pointer-events: none;
+  overflow: visible;
 }

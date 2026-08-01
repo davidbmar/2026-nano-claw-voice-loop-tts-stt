@@ -1,14 +1,18 @@
 {
-  "generated_at": "2026-07-17T03:33:24.576117+00:00",
+  "generated_at": "2026-07-25T08:51:42.834122+00:00",
   "supervisor_model": "claude-opus-4-8",
-  "caller_model": "claude-opus-4-8",
+  "supervisor_provider": "anthropic",
+  "supervisor_resolved_model": "claude-opus-4-8",
+  "caller_model": "claude-haiku-4-5",
+  "caller_provider": "anthropic",
+  "caller_resolved_model": "claude-haiku-4-5",
   "overall": {
-    "passed": 8,
-    "failed": 0,
+    "passed": 7,
+    "failed": 1,
     "total": 8,
     "supervisor_latency_ms": {
-      "p50": 3757.3,
-      "p95": 5425.1
+      "p50": 3190.4,
+      "p95": 5515.1
     }
   },
   "scenarios": [
@@ -20,19 +24,19 @@
       "exit": "booked",
       "slots": {
         "job": "leaking faucet",
-        "duration_minutes": 30,
-        "slot_start": "2026-07-17T09:30:00"
+        "slot_start": "2026-07-17T09:30:00",
+        "duration_minutes": 30
       },
       "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 3,
+      "caller_turns": 2,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 3482.5,
-        "p95": 4290.5
+        "p50": 3843.8,
+        "p95": 4813.9
       },
       "supervisor_samples_ms": [
-        4380.2,
-        3482.5,
-        3257.1
+        4921.6,
+        2766.1
       ],
       "rejected": [],
       "expected_match": true,
@@ -54,14 +58,16 @@
         "slot_start": "2026-07-20T10:00:00"
       },
       "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 2,
+      "caller_turns": 3,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 3417.7,
-        "p95": 3723.3
+        "p50": 2646.6,
+        "p95": 4650.2
       },
       "supervisor_samples_ms": [
-        3078.0,
-        3757.3
+        2570.3,
+        4872.9,
+        2646.6
       ],
       "rejected": [],
       "expected_match": true,
@@ -79,19 +85,19 @@
       "exit": "booked",
       "slots": {
         "job": "drain repair",
-        "duration_minutes": 120,
-        "slot_start": "2026-07-21T14:00:00"
+        "slot_start": "2026-07-22T10:00:00",
+        "duration_minutes": 120
       },
       "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 3,
+      "caller_turns": 2,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 5175.0,
-        "p95": 5190.5
+        "p50": 3182.9,
+        "p95": 3453.6
       },
       "supervisor_samples_ms": [
-        5175.0,
-        5192.3,
-        3192.8
+        3483.7,
+        2882.1
       ],
       "rejected": [],
       "expected_match": true,
@@ -109,19 +115,19 @@
       "exit": "booked",
       "slots": {
         "job": "water heater installation",
-        "duration_minutes": 240,
-        "slot_start": "2026-07-21T12:00:00"
+        "slot_start": "2026-07-21T12:00:00",
+        "duration_minutes": 240
       },
       "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 3,
+      "caller_turns": 2,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 4532.1,
-        "p95": 5357.8
+        "p50": 3167.5,
+        "p95": 3481.9
       },
       "supervisor_samples_ms": [
-        3444.1,
-        5449.6,
-        4532.1
+        3516.8,
+        2818.2
       ],
       "rejected": [],
       "expected_match": true,
@@ -136,24 +142,29 @@
       "name": "4h, Friday only",
       "expected": "no_booking",
       "outcome": "no_booking",
-      "exit": "budget",
+      "exit": "caller_cap",
       "slots": {
         "job": "sewer-line repair",
         "duration_minutes": 240
       },
       "scripted_confirmation": "",
-      "caller_turns": 7,
+      "caller_turns": 10,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 4632.8,
-        "p95": 6893.2
+        "p50": 3442.5,
+        "p95": 5014.8
       },
       "supervisor_samples_ms": [
-        4479.6,
-        4786.0,
-        5205.0,
-        7455.9,
-        3679.2,
-        3048.0
+        4455.7,
+        4245.1,
+        3694.7,
+        4345.7,
+        3186.9,
+        5472.3,
+        3190.4,
+        2467.5,
+        2678.3,
+        2383.3
       ],
       "rejected": [],
       "expected_match": true,
@@ -170,29 +181,38 @@
         "booked",
         "no_booking"
       ],
-      "outcome": "booked",
-      "exit": "booked",
+      "outcome": "no_booking",
+      "exit": "caller_cap",
       "slots": {
         "job": "pipe inspection",
-        "duration_minutes": 60,
-        "slot_start": "2026-07-22T10:00:00"
+        "duration_minutes": 60
       },
-      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 3,
+      "scripted_confirmation": "",
+      "caller_turns": 10,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 4349.5,
-        "p95": 4963.2
+        "p50": 2967.3,
+        "p95": 4024.3
       },
       "supervisor_samples_ms": [
-        4349.5,
-        5031.4,
-        3274.1
+        3724.8,
+        3753.8,
+        4245.6,
+        2149.2,
+        2282.2,
+        2548.2,
+        3231.2,
+        2927.4,
+        2940.8,
+        2993.8
       ],
-      "rejected": [],
+      "rejected": [
+        "supervisor: empty reply \u2014 substituted reprompt"
+      ],
       "expected_match": true,
       "exit_match": true,
-      "valid_against_ground_truth": true,
-      "duration_honored": true,
+      "valid_against_ground_truth": null,
+      "duration_honored": null,
       "preference_honored": null,
       "passed": true
     },
@@ -208,15 +228,17 @@
         "slot_start": "2026-07-22T10:00:00"
       },
       "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
-      "caller_turns": 3,
+      "caller_turns": 4,
+      "caller_gave_up": false,
       "supervisor_latency_ms": {
-        "p50": 3167.9,
-        "p95": 3622.0
+        "p50": 3508.7,
+        "p95": 3585.4
       },
       "supervisor_samples_ms": [
-        3167.9,
-        3672.4,
-        2971.4
+        3590.2,
+        3459.0,
+        3558.3,
+        2817.6
       ],
       "rejected": [],
       "expected_match": true,
@@ -230,23 +252,33 @@
       "id": "human-escape",
       "name": "Ask for a human",
       "expected": "escape",
-      "outcome": "escape",
-      "exit": "escape",
-      "slots": {},
-      "scripted_confirmation": "",
-      "caller_turns": 1,
-      "supervisor_latency_ms": {
-        "p50": null,
-        "p95": null
+      "outcome": "booked",
+      "exit": "booked",
+      "slots": {
+        "job": "kitchen sink slow drain",
+        "duration_minutes": 60,
+        "slot_start": "2026-07-20T10:00:00"
       },
-      "supervisor_samples_ms": [],
+      "scripted_confirmation": "You're all set. We'll send the appointment details shortly.",
+      "caller_turns": 4,
+      "caller_gave_up": false,
+      "supervisor_latency_ms": {
+        "p50": 4322.6,
+        "p95": 18887.2
+      },
+      "supervisor_samples_ms": [
+        2959.1,
+        5686.2,
+        21216.8,
+        2847.3
+      ],
       "rejected": [],
-      "expected_match": true,
-      "exit_match": true,
-      "valid_against_ground_truth": null,
-      "duration_honored": null,
+      "expected_match": false,
+      "exit_match": false,
+      "valid_against_ground_truth": true,
+      "duration_honored": true,
       "preference_honored": null,
-      "passed": true
+      "passed": false
     }
   ]
 }

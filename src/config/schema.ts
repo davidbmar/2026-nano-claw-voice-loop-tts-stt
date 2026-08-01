@@ -25,6 +25,7 @@ export const ProvidersConfigSchema = z.object({
   moonshot: ProviderConfigSchema.optional(),
   zhipu: ProviderConfigSchema.optional(),
   vllm: ProviderConfigSchema.optional(),
+  ollama: ProviderConfigSchema.optional(),
 });
 
 /** Evidence retrieval from the local intelligence-platform service. */
@@ -79,6 +80,13 @@ export const AgentDefaultsSchema = z.object({
    * per-attempt timeout for the non-streaming path). The last model in the
    * chain gets no deadline — a slow answer beats none. */
   fallbackTimeoutMs: z.number().positive().optional().default(4000),
+  /** Streaming hedge delay in ms. When set (and fallbacks exist), streaming
+   * turns race the chain instead of trying it sequentially: each fallback
+   * starts this many ms after the previous one unless a first token already
+   * arrived, first token wins, losers are cancelled. Removes the dead
+   * fallbackTimeoutMs wait on every turn where the primary is slow. Unset =
+   * sequential fallback (unchanged behavior). */
+  fallbackHedgeMs: z.number().positive().optional(),
 });
 
 /**
@@ -103,9 +111,10 @@ export const AgentsConfigSchema = z.object({
  * Tools configuration schema
  */
 export const ToolsConfigSchema = z.object({
-  /** false = register no tools at all: the agent answers purely from its
-   * prompt (persona + knowledge). Env override: NANO_CLAW_DISABLE_TOOLS=1. */
-  enabled: z.boolean().optional().default(true),
+  /** Dangerous built-in tools default off. NANO_CLAW_ENABLE_TOOLS=true is
+   * required at the process boundary; NANO_CLAW_DISABLE_TOOLS=true remains a
+   * temporary legacy kill switch. */
+  enabled: z.boolean().optional().default(false),
   restrictToWorkspace: z.boolean().optional().default(false),
   allowedCommands: z.array(z.string()).optional(),
   deniedCommands: z.array(z.string()).optional(),

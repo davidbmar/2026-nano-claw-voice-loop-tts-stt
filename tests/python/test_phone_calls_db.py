@@ -49,3 +49,18 @@ def test_recent_calls_newest_first():
     m.record_call_start(c, "cc-b", "+3", "+2", "n")
     calls = m.recent_calls(c)
     assert [x["call_id"] for x in calls] == ["cc-b", "cc-a"]
+
+
+def test_record_call_end_if_open_only_fills_missing_end():
+    c = _conn()
+    m.record_call_start(c, "cc-9", "+1", "+2", "n")
+    m.record_call_end_if_open(c, "cc-9")
+    assert m.recent_calls(c)[0]["ended_at"]
+    c.execute(
+        "UPDATE phone_calls SET ended_at='2020-01-01 00:00:00' WHERE call_id='cc-9'"
+    )
+    c.commit()
+    m.record_call_end_if_open(c, "cc-9")
+    assert m.recent_calls(c)[0]["ended_at"] == "2020-01-01 00:00:00"
+    m.record_call_end_if_open(None, "cc-9")
+    m.record_call_end_if_open(c, "never-started")

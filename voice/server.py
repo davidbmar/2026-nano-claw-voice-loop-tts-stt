@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -17,22 +18,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import secrets
+
 import httpx
 from aiohttp import WSCloseCode, web
 
-from voice import cost_ledger, metrics_db
+from voice import call_log, cost_ledger, metrics_db
 from voice import voice_catalog
 from voice.flow_session import (
     FLOW_MODES,
     REGION_MODELS,
     FlowSession,
+    active_scheduling_domain,
+    default_delegate_url,
+    delegate_allowed_hosts,
     get_flow_mode,
     get_flow_profile,
     get_region_model,
+    is_delegate_mode,
+    set_default_delegate_url,
     set_flow_mode,
     set_region_model,
 )
+from voice.turn_delegate import (
+    _CONTROL_CHARS,
+    _MAX_REPLY_CHARS,
+    DELEGATE_APOLOGY,
+    DELEGATE_TIMEOUT_S,
+    DelegateUrlRefused,
+    call_delegate,
+    start_conversation,
+    validate_delegate_url,
+)
 from voice.text_chunker import TextChunker
+from voice.speech_preparer import (
+    NORMALIZER_VERSION,
+    SPEECH_COMPILER_VERSION,
+    SpeechPlan,
+    StreamingSpeechCompiler,
+)
 from voice.processing_audio import processing_chime
 from voice.tts import synthesize as tts_synthesize
 from voice.wav import pcm_to_wav
@@ -62,6 +86,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("voice-server")
 client_log = logging.getLogger("client")
+APP_VERSION = "0.4.25"
 DEEP_PROCESSING_CUE_INTERVAL_S = 2.6
 
 
@@ -83,6 +108,28 @@ NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
 METRICS = metrics_db.init_db()
+
+
+def _speech_default_mode() -> str:
+    enabled = os.environ.get("NANO_CLAW_SPEECH_PREPARATION", "1").strip().lower()
+    if enabled in {"0", "false", "off", "no", "raw"}:
+        return "raw"
+    if enabled == "batch":
+        return "batch"
+    return "prepared"
+
+
+def _speech_compile_env_params() -> tuple[int, int]:
+    """(max_words, max_chunk_duration_ms) for the browser speech compiler."""
+    try:
+        max_words = int(os.environ.get("NANO_CLAW_SPEECH_MAX_WORDS", "18"))
+    except ValueError:
+        max_words = 18
+    try:
+        max_duration = int(os.environ.get("NANO_CLAW_SPEECH_MAX_CHUNK_MS", "2500"))
+    except ValueError:
+        max_duration = 2500
+    return max_words, max_duration
 
 
 def _ws_audio_enabled() -> bool:
@@ -232,6 +279,12 @@ async def costs_page_handler(request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "costs.html", headers=_NO_CACHE)
 
 
+async def calls_page_handler(request: web.Request) -> web.FileResponse:
+    """Serve the call review panel (list, retrace, playback)."""
+
+    return web.FileResponse(STATIC_DIR / "calls.html", headers=_NO_CACHE)
+
+
 async def static_handler(request: web.Request) -> web.FileResponse:
     filename = request.match_info["filename"]
     path = (STATIC_DIR / filename).resolve()
@@ -365,8 +418,8 @@ async def client_log_handler(request: web.Request) -> web.Response:
                 ),
             )
     except Exception:
-        # Telemetry is diagnostic-only. A broken logging handler must not turn
-        # this best-effort endpoint into an application failure.
+        # health-ok: telemetry is diagnostic-only. A broken logging handler must
+        # not turn this best-effort endpoint into an application failure.
         pass
     return web.Response(status=204, headers={"Cache-Control": "no-store"})
 
@@ -385,7 +438,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         auth_adapter = request.app.get(AUTH_ADAPTER_KEY)
     except AttributeError:
-        auth_adapter = None
+        auth_adapter = None  # health-ok: transport-free unit-call fallback (see comment above)
     socket_identity = WebSocketIdentity(None, None, conversation_id)
     if auth_adapter is not None:
         ws.headers.update(SECURITY_HEADERS)
@@ -397,7 +450,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         history_runtime = request.app.get(HISTORY_RUNTIME_KEY)
     except AttributeError:
-        history_runtime = None
+        history_runtime = None  # health-ok: transport-free unit-call fallback
     history_registered = False
     if (
         history_runtime is not None
@@ -415,7 +468,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     try:
         client_telemetry_runtime = request.app.get(CLIENT_TELEMETRY_RUNTIME_KEY)
     except AttributeError:
-        client_telemetry_runtime = None
+        client_telemetry_runtime = None  # health-ok: transport-free unit-call fallback
     if client_telemetry_runtime is not None:
         client_telemetry_runtime.register_socket(
             conversation_id, trusted_client_ip(request)
@@ -428,6 +481,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     # anything that arrives before the selected transport creates its Session.
     pending_settings: dict = {}
     http_client = httpx.AsyncClient(timeout=120.0)
+    model_catalog_by_id: dict[str, dict] | None = None
+
+    async def _socket_model_catalog() -> dict[str, dict] | None:
+        """Fetch once from the same Node catalog exposed by /api/models."""
+
+        nonlocal model_catalog_by_id
+        if model_catalog_by_id is None:
+            model_catalog_by_id = await _fetch_model_catalog(http_client)
+        return model_catalog_by_id
 
     def _create_session(audio_transport=None):
         from voice.webrtc import Session
@@ -461,9 +523,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         new_session._history_agent_failed = False
         new_session._backoff = Backoff()
         new_session._resume_task = None
-        new_session._scheduler_flow_enabled = get_flow_mode() == "scheduler"
+        new_session._scheduler_flow_enabled = (
+            active_scheduling_domain(get_flow_mode()) is not None
+        )
         new_session._scheduler_flow_attempted = False
         new_session._scheduler_flow = None
+        new_session._scheduler_flow_domain = None
+        # Runtime prompt settings re-check the exact catalog snapshot that
+        # authorized this socket's model selection.
+        new_session._model_catalog_by_id = model_catalog_by_id or {}
         if "voice" in pending_settings:
             voice = pending_settings["voice"]
             new_session.set_voice(voice["voiceId"], voice["speed"])
@@ -476,6 +544,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         if "analysis_style" in pending_settings:
             new_session.analysis_style = pending_settings["analysis_style"]
             log.info("Analysis style set (pending): %s", new_session.analysis_style)
+        if "speech_mode" in pending_settings:
+            new_session.set_speech_mode(pending_settings["speech_mode"])
+        if "delegate_url" in pending_settings:
+            new_session.delegate_url = pending_settings["delegate_url"]
+            log.info("Delegate URL set (pending): %s",
+                     new_session.delegate_url or "(none)")
         pending_settings.clear()
         return new_session
 
@@ -533,6 +607,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 msg = json.loads(raw_msg.data)
             except json.JSONDecodeError:
+                log.debug("Skipping non-JSON browser WS frame: %.80s", raw_msg.data)
                 continue
 
             msg_type = msg.get("type", "")
@@ -540,9 +615,24 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             if msg_type == "hello":
                 ack = {
                     "type": "hello_ack",
+                    "appVersion": APP_VERSION,
                     "bargeIn": BARGE_IN_ENABLED,
                     "wsAudio": ws_audio_selected,
                     "conversationId": conversation_id,
+                    # Loaded knowledge scope shown in the console Context panel.
+                    # Static (env-configured) until session scoping lands (task 065).
+                    "contextCollections": [
+                        item.strip()
+                        for item in os.environ.get(
+                            "NANO_CLAW_INTELLIGENCE_COLLECTIONS", ""
+                        ).split(",")
+                        if item.strip()
+                    ],
+                    "speechPreparation": {
+                        "available": True,
+                        "version": SPEECH_COMPILER_VERSION,
+                        "defaultMode": _speech_default_mode(),
+                    },
                 }
                 if ws_audio_selected:
                     from voice.ws_audio import WsAudioTransport, wire_format
@@ -614,6 +704,34 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if session:
                     session.cancel_recording()
 
+            elif msg_type == "speak":
+                # "Say exactly this" — no agent, no turn, no reply expected.
+                #
+                # `text_message` means "a human said X" and runs a turn. A
+                # product page driving this gateway needs the other thing: it has
+                # already decided the words and wants them spoken, so it can
+                # announce something the caller did not ask for ("I've marked
+                # that as a keeper"). Without this the page can only speak by
+                # pretending someone talked.
+                #
+                # Bounded like a delegate reply, and for the same reason: this is
+                # text from another origin reaching TTS.
+                raw_text = msg.get("text", "")
+                if not isinstance(raw_text, str):
+                    await ws.send_json(
+                        {"type": "input_error", "error": "invalid_message"})
+                    continue
+                spoken = raw_text.translate(_CONTROL_CHARS)[:_MAX_REPLY_CHARS].strip()
+                if not spoken:
+                    await ws.send_json({"type": "speak_done", "spoken": ""})
+                    continue
+                if session is None:
+                    await ws.send_json(
+                        {"type": "input_error", "error": "no_session"})
+                    continue
+                await _speak_with_events(ws, session, spoken)
+                await ws.send_json({"type": "speak_done", "spoken": spoken})
+
             elif msg_type == "text_message":
                 raw_text = msg.get("text", "")
                 if not isinstance(raw_text, str):
@@ -633,12 +751,54 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 _spawn_agent(_handle_agent_request(ws, session, http_client, text), turn_state)
 
             elif msg_type == "set_model":
-                model_id = msg.get("modelId", "") or ""
+                catalog = await _socket_model_catalog()
+                model_id = msg.get("modelId")
+                entry = (
+                    catalog.get(model_id)
+                    if catalog is not None and isinstance(model_id, str)
+                    else None
+                )
+                if entry is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "unrecognized",
+                        "setting": "model",
+                        "message": "Unrecognized model selection.",
+                    })
+                    continue
+                canonical_model_id = entry["id"]
                 if session:
-                    session.model = model_id
+                    session._model_catalog_by_id = catalog
+                    session.model = canonical_model_id
                     log.info("Model set: %s", session.model or "(default)")
                 else:
-                    pending_settings["model"] = model_id
+                    pending_settings["model"] = canonical_model_id
+
+            elif msg_type == "set_delegate":
+                # Validated at SET time, not at call time: a refused URL must be
+                # rejected here, while someone is looking at the answer, rather
+                # than discovered mid-conversation. "" clears the delegate.
+                raw = msg.get("url", "")
+                if not isinstance(raw, str):
+                    raw = ""
+                raw = raw.strip()
+                if raw:
+                    try:
+                        raw = validate_delegate_url(
+                            raw, allowed_hosts=delegate_allowed_hosts())
+                    except DelegateUrlRefused as exc:
+                        await ws.send_json({
+                            "type": "error",
+                            "error": "refused",
+                            "setting": "delegate",
+                            "message": str(exc),
+                        })
+                        continue
+                if session:
+                    session.delegate_url = raw
+                    log.info("Delegate URL set: %s", raw or "(none)")
+                else:
+                    pending_settings["delegate_url"] = raw
 
             elif msg_type == "set_stt":
                 size = msg.get("size", "base")
@@ -662,19 +822,40 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 else:
                     pending_settings["analysis_style"] = analysis_style
 
+            elif msg_type == "set_speech_mode":
+                speech_mode = msg.get("mode", _speech_default_mode())
+                speech_mode = speech_mode if speech_mode in {"raw", "prepared"} else _speech_default_mode()
+                if session:
+                    session.set_speech_mode(speech_mode)
+                else:
+                    pending_settings["speech_mode"] = speech_mode
+
             elif msg_type == "set_voice":
+                voice_id = msg.get("voiceId")
+                entry = (
+                    voice_catalog.lookup(voice_id)
+                    if isinstance(voice_id, str)
+                    else None
+                )
+                if entry is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "unrecognized",
+                        "setting": "voice",
+                        "message": "Unrecognized voice selection.",
+                    })
+                    continue
+                canonical_voice_id = entry["id"]
                 if not session:
                     pending_settings["voice"] = {
-                        "voiceId": msg.get("voiceId", ""),
+                        "voiceId": canonical_voice_id,
                         "speed": msg.get("speed", 1.0),
                     }
                     continue
-                voice_id = msg.get("voiceId", "")
-                session.set_voice(voice_id, msg.get("speed", 1.0))
+                session.set_voice(canonical_voice_id, msg.get("speed", 1.0))
                 # Proactively warn if a native-service voice was picked but the
                 # service is down — the reply will still work (Piper fallback).
-                entry = voice_catalog.lookup(voice_id)
-                if entry and entry["engine"] in ("kokoro", "luxtts"):
+                if entry["engine"] in ("kokoro", "luxtts"):
                     probe = (kokoro_client.is_healthy if entry["engine"] == "kokoro"
                              else lux_client.is_healthy)
                     label = "Kokoro" if entry["engine"] == "kokoro" else "LuxTTS"
@@ -706,28 +887,36 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     # A manual stop is a hard stop. Clearing only the current
                     # queue leaves the reply task synthesizing more audio and
                     # allows later playback state changes to revive it.
-                    session.cancel_stream()
+                    playback_token = getattr(session, "active_playback", None)
+                    receipt = _call_compat(session.cancel_stream, reason="manual_stop")
                     _abandon_agent_turn(session)
                     session._backoff.reset()
-                    await ws.send_json({"type": "agent_audio_end"})
+                    await _send_delivery_receipt(ws, receipt)
+                    await _send_audio_end(ws, playback_token, receipt)
 
             elif msg_type == "barge_in":
                 if BARGE_IN_ENABLED and session:
-                    # Cancel any pending resume, then pause.
-                    if getattr(session, "_resume_task", None):
-                        session._resume_task.cancel()
-                        session._resume_task = None
-                    session.pause_speaking()
+                    if not await _suppress_deep_projection_barge_in(ws, session):
+                        # Cancel any pending resume, then pause.
+                        if getattr(session, "_resume_task", None):
+                            session._resume_task.cancel()
+                            session._resume_task = None
+                        session.pause_speaking()
 
             elif msg_type == "barge_in_commit":
                 if BARGE_IN_ENABLED and session:
-                    if getattr(session, "_resume_task", None):
-                        session._resume_task.cancel()
-                        session._resume_task = None
-                    session.cancel_stream()          # abort reply + clear audio
-                    _abandon_agent_turn(session)
-                    session._backoff.reset()
-                    await ws.send_json({"type": "agent_audio_end"})   # re-arm mic for the user's turn
+                    if not await _suppress_deep_projection_barge_in(ws, session):
+                        if getattr(session, "_resume_task", None):
+                            session._resume_task.cancel()
+                            session._resume_task = None
+                        playback_token = getattr(session, "active_playback", None)
+                        receipt = _call_compat(
+                            session.cancel_stream, reason="confirmed_barge_in"
+                        )
+                        _abandon_agent_turn(session)
+                        session._backoff.reset()
+                        await _send_delivery_receipt(ws, receipt)
+                        await _send_audio_end(ws, playback_token, receipt)
 
             elif msg_type == "barge_in_false":
                 if BARGE_IN_ENABLED and session and session.is_paused():
@@ -740,7 +929,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             if sess.is_paused() and not w.closed:
                                 sess.resume_speaking()
                         except asyncio.CancelledError:
-                            pass
+                            pass  # health-ok: resume timer cancellation is the expected path
 
                     session._resume_task = asyncio.ensure_future(_resume_after(delay))
 
@@ -752,12 +941,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     finally:
         if session:
             _abandon_agent_turn(session)
+            _finalize_web_call(session)
         if session and session._stream_task and not session._stream_task.done():
             session._stream_task.cancel()
             try:
                 await session._stream_task
             except BaseException:
-                pass  # CancelledError (expected) or the task's own error — we're tearing down
+                pass  # health-ok: CancelledError (expected) or the task's own error — teardown
         if session:
             try:
                 await session.close()
@@ -915,6 +1105,59 @@ async def _mark_history_failure(session: Any) -> None:
         log.warning("Could not persist incomplete-history marker", exc_info=True)
 
 
+def _record_web_call_turn(session: Any) -> None:
+    """Register a browser voice conversation in the call review log.
+
+    Metadata only — when the session happened and how many turns. Anonymous
+    web transcripts deliberately stay ephemeral (the browser-turn scrub
+    decision); signed-in transcripts live in the user's own history.
+    """
+    try:
+        conversation_id = getattr(session, "conversation_id", None)
+        if not isinstance(conversation_id, str) or not conversation_id:
+            return
+        if not getattr(session, "_call_log_started", False):
+            session._call_log_started = True
+            node = (
+                os.environ.get("NANO_CLAW_PHONE_WEBHOOK_BASE", "")
+                .replace("https://", "")
+                .rstrip("/")
+            )
+            metrics_db.record_call_start(
+                METRICS, conversation_id, "webUI", "voice console", node
+            )
+            call_log.emit(
+                METRICS,
+                conversation_id,
+                "call_start",
+                {
+                    "mode": "web",
+                    "sessionId": conversation_id,
+                    "signedIn": bool(getattr(session, "_user_sub", None)),
+                },
+            )
+        metrics_db.bump_call_turns(METRICS, conversation_id)
+    except Exception:
+        log.exception("web call-log record failed")
+
+
+def _finalize_web_call(session: Any) -> None:
+    """Close the call-log record for a browser conversation; idempotent."""
+    try:
+        if not getattr(session, "_call_log_started", False):
+            return
+        if getattr(session, "_call_log_finalized", False):
+            return
+        session._call_log_finalized = True
+        conversation_id = getattr(session, "conversation_id", None)
+        if not isinstance(conversation_id, str):
+            return
+        metrics_db.record_call_end_if_open(METRICS, conversation_id)
+        call_log.emit(METRICS, conversation_id, "call_end")
+    except Exception:
+        log.exception("web call-log finalize failed")
+
+
 async def _capture_user_utterance(ws: Any, session: Any, text: Any) -> bool:
     """Persist a final user transcription, while anonymous turns stay ephemeral."""
 
@@ -934,6 +1177,8 @@ async def _capture_user_utterance(ws: Any, session: Any, text: Any) -> bool:
                 }
             )
         return False
+
+    _record_web_call_turn(session)
 
     store = getattr(session, "_history_store", None)
     owner = _history_owner(session)
@@ -1005,10 +1250,55 @@ def _append_agent_delta(session: Any, text: Any) -> None:
     session._history_agent_parts.append(text)
 
 
+def _call_compat(fn, /, *args, **optional_kwargs):
+    """Call ``fn``, passing each optional kwarg only if its signature takes it.
+
+    Session doubles in the unit suite implement narrow subsets of the real
+    Session API; production code keeps passing newer optional kwargs
+    (``reason=``, ``token=``) without breaking them. Centralizes the
+    try-with-kwarg/retry-without shim that used to be copy-pasted per site.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # health-ok: some doubles defeat introspection
+        return fn(*args, **optional_kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return fn(*args, **optional_kwargs)
+    accepted = {k: v for k, v in optional_kwargs.items() if k in params}
+    return fn(*args, **accepted)
+
+
 def _abandon_agent_turn(session: Any) -> None:
     session._history_agent_active = False
     session._history_agent_failed = True
     session._history_agent_parts = []
+    session._deep_projection_pending = False
+
+
+async def _suppress_deep_projection_barge_in(ws: Any, session: Any) -> bool:
+    """Keep a completed deep result alive until its first answer audio is ready.
+
+    Processing chimes and room noise can satisfy browser VAD while the fast
+    projection model is still producing its first sentence. Treat those events
+    as false alarms so they cannot discard an already-completed deep result.
+    The explicit stop_speaking message remains a hard cancellation path.
+    """
+
+    if not getattr(session, "_deep_projection_pending", False):
+        return False
+    resume_task = getattr(session, "_resume_task", None)
+    if resume_task is not None:
+        resume_task.cancel()
+        session._resume_task = None
+    if session.is_paused():
+        session.resume_speaking()
+    session._backoff.reset()
+    log.info("Barge-in suppressed while deep answer projection is pending")
+    if not getattr(ws, "closed", False):
+        await ws.send_json(
+            {"type": "barge_in_suppressed", "reason": "deep_projection_pending"}
+        )
+    return True
 
 
 async def _complete_agent_turn(
@@ -1100,6 +1390,183 @@ async def _delete_agent_session(client: httpx.AsyncClient, session_id: str) -> N
         log.warning("nano-claw session cleanup request failed", exc_info=True)
 
 
+async def _refresh_agent_conversation_on_mode_switch(
+    session: Session, client: httpx.AsyncClient
+) -> None:
+    """Treat a runtime mode switch as the start of a fresh conversation.
+
+    Modes are distinct characters (profiles), so history from one must not
+    leak into the next: wipe this conversation's Node-side memory (the id
+    itself stays — it is the browser conversation identity used by history
+    persistence and disconnect cleanup) and re-arm the per-session scheduler
+    gate so the new mode's flow can engage even after an earlier completed
+    flow set the one-shot attempted flag.
+    """
+    mode = get_flow_mode()
+    previous = getattr(session, "_agent_flow_mode", None)
+    session._agent_flow_mode = mode
+    if previous is None or previous == mode:
+        return
+    log.info("Mode switch %s -> %s: starting fresh conversation", previous, mode)
+    session._scheduler_flow = None
+    session._scheduler_flow_domain = None
+    session._scheduler_flow_attempted = False
+    session._scheduler_flow_enabled = (
+        active_scheduling_domain(mode) is not None
+    )
+    await _delete_agent_session(client, _agent_session_id(session))
+
+
+# Settings values reach the prompt, so they are a prompt-injection channel.
+# Fields backed by a catalog are validated by membership, never by shape, and
+# only the catalog's canonical value is passed on. _safe_id is the last-line
+# fallback for genuinely open-ended fields: looking like an identifier is not
+# enough to authorize a model or voice supplied by an anonymous client.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:/+-]{1,64}$")
+
+
+def _safe_id(value: object, fallback: str = "unrecognized") -> str:
+    text = value if isinstance(value, str) else ""
+    text = text.strip()
+    if not text:
+        return "default"
+    return text if _SAFE_ID_RE.match(text) else fallback
+
+
+def _catalog_entries_by_id(payload: object) -> dict[str, dict]:
+    """Return canonical model entries from a Node /api/models payload."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return {}
+    entries: dict[str, dict] = {}
+    for item in payload["models"]:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id:
+            entries[model_id] = item
+    return entries
+
+
+async def _fetch_model_catalog(client: httpx.AsyncClient) -> dict[str, dict] | None:
+    """Fetch the authoritative catalog; None means it could not be verified."""
+
+    try:
+        response = await client.get(f"{NANO_CLAW_URL}/api/models")
+        if response.status_code != 200:
+            log.warning("Model catalog lookup failed with status %s", response.status_code)
+            return None
+        payload = response.json()
+    except Exception:
+        log.warning("Model catalog lookup failed", exc_info=True)
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        log.warning("Model catalog lookup returned an invalid payload")
+        return None
+    return _catalog_entries_by_id(payload)
+
+
+_BUNDLED_MODEL_ID_RE = re.compile(r"""\bid\s*:\s*(['"])([^'"\r\n]+)\1""")
+_bundled_model_catalog_cache: dict[str, dict] | None = None
+
+
+def _bundled_model_catalog() -> dict[str, dict]:
+    """Read the catalog source used to build Node, for transport-free callers.
+
+    Live sockets always carry the catalog fetched from Node. Unit-level and
+    other transport-free calls have no HTTP boundary, so they read the same
+    source artifact rather than maintaining a second Python allowlist.
+    """
+
+    global _bundled_model_catalog_cache
+    if _bundled_model_catalog_cache is not None:
+        return _bundled_model_catalog_cache
+    root = Path(__file__).resolve().parents[1]
+    for path in (root / "src/agent/models.ts", root / "dist/agent/models.js"):
+        try:
+            source = path.read_text()
+        except OSError:
+            continue
+        ids = [match[1] for match in _BUNDLED_MODEL_ID_RE.findall(source)]
+        if ids:
+            _bundled_model_catalog_cache = {
+                model_id: {"id": model_id} for model_id in ids
+            }
+            return _bundled_model_catalog_cache
+    _bundled_model_catalog_cache = {}
+    return _bundled_model_catalog_cache
+
+
+def _runtime_settings(session: Session) -> dict:
+    """The live pipeline configuration for this session, as an allowlist.
+
+    Explicitly a fixed set of fields, never a dump of session state: this
+    payload lands in the model's prompt, so every field here is one we are
+    willing to have spoken aloud. No caller identity, no conversation IDs, no
+    internal URLs, no credentials.
+    """
+
+    model_id = getattr(session, "model", "") or ""
+    catalog = getattr(session, "_model_catalog_by_id", None)
+    # An EMPTY dict means the socket has not fetched the live catalog yet: it is
+    # seeded to {} at session creation and only populated by set_model.  Treating
+    # that as an authoritative "no such model" reported a perfectly valid default
+    # model as "unrecognized", which the prompt instructs the agent to describe
+    # as "I cannot tell".  Fall back to the bundled catalog instead — membership
+    # is still enforced, against our own trusted artifact rather than the live
+    # snapshot, so the disclosure guarantee is unchanged.
+    if not isinstance(catalog, dict) or not catalog:
+        catalog = _bundled_model_catalog()
+    model_entry = catalog.get(model_id) if isinstance(model_id, str) else None
+    canonical_model_id = (
+        model_entry.get("id") if isinstance(model_entry, dict) else None
+    )
+
+    # Lazily imported like every other `phone` use in this module: phone imports
+    # server, so a module-level import would be circular.
+    from voice import phone
+
+    voice_id = getattr(session, "voice_id", "") or ""
+    entry = (
+        voice_catalog.lookup(voice_id)
+        if isinstance(voice_id, str)
+        else None
+    )
+    voice_name = entry.get("name") if entry else None
+    try:
+        speed = round(float(getattr(session, "speed", 1.0) or 1.0), 2)
+    except (TypeError, ValueError):
+        speed = 1.0
+    return {
+        "surface": "browser console",
+        "mode": _safe_id(get_flow_mode()),
+        "chatModel": (
+            canonical_model_id
+            if isinstance(canonical_model_id, str) and canonical_model_id
+            else "default" if not model_id else "unrecognized"
+        ),
+        # Catalog membership above makes this canonical human name
+        # ("Isabella (48k)") safe to render without laundering caller text.
+        "voice": (
+            voice_name
+            if isinstance(voice_name, str) and voice_name
+            else "default" if not voice_id else "unrecognized"
+        ),
+        "speed": speed,
+        "sttModel": _safe_id(getattr(session, "stt_size", "base")),
+        "speechMode": _safe_id(getattr(session, "speech_mode", "")),
+        "analysisStyle": _safe_id(getattr(session, "analysis_style", "")),
+        "schedulerModel": _safe_id(get_region_model()),
+        # Both are server-side state, so they can be reported truthfully.  The
+        # barge-in SENSITIVITY and ADAPTIVE controls are deliberately absent:
+        # they live only in the browser (voice/web/barge-in.js), so reporting
+        # them would mean trusting a client-supplied value in the system
+        # prompt — the injection channel task 094 just closed.
+        "bargeIn": "on" if BARGE_IN_ENABLED else "off",
+        "vad": _safe_id(phone.get_vad_mode()),
+    }
+
+
 async def _handle_agent_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1109,6 +1576,9 @@ async def _handle_agent_request(
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     _begin_agent_turn(session)
     try:
+        if await _handle_delegate_request(ws, session, client, text):
+            return
+        await _refresh_agent_conversation_on_mode_switch(session, client)
         if await _handle_scheduler_request(ws, session, text):
             return
         req_start = time.monotonic()
@@ -1120,6 +1590,8 @@ async def _handle_agent_request(
                 "sessionId": _agent_session_id(session),
                 "profile": get_flow_profile(),
                 "analysisStyle": getattr(session, "analysis_style", "topic_map"),
+                "responseMode": "voice",
+                "runtimeSettings": _runtime_settings(session),
                 **({"model": session.model} if session.model else {}),
             },
             headers={"Accept": "text/event-stream"},
@@ -1141,6 +1613,68 @@ async def _handle_agent_request(
         await _speak_with_events(ws, session, error_text)
 
 
+def resolve_delegate_url(session: Session) -> str:
+    """This conversation's delegate URL, falling back to the configured default.
+
+    Kept as one function so the WS handler, the operator API and the tests all
+    read the same precedence: whatever the session was told, else the
+    environment default, else nothing.
+    """
+
+    return getattr(session, "delegate_url", "") or default_delegate_url()
+
+
+async def _handle_delegate_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    client: httpx.AsyncClient,
+    text: str,
+) -> bool:
+    """Route this turn to another app instead of our model. True if handled.
+
+    Runs before the mode re-sync and the scheduler, because in delegate mode
+    neither applies: nano-claw holds no conversation of its own to re-sync, and a
+    scheduler turn would answer in our words rather than the delegate's.
+
+    `call_delegate` has already validated the status and the shape, so what
+    arrives here is safe to hand to `_process_api_response` — which then supplies
+    history, TTS and turn completion exactly as for a normal reply.
+    """
+
+    if not is_delegate_mode():
+        return False
+
+    url = resolve_delegate_url(session)
+    if not url:
+        # Delegate mode with nowhere to send. Say so rather than fall through to
+        # our own model: falling through would answer the caller in nano-claw's
+        # voice from a mode explicitly set to speak in someone else's.
+        log.warning("delegate mode active with no delegate URL configured")
+        await _process_api_response(
+            ws, session,
+            {"type": "final", "response": DELEGATE_APOLOGY},
+            req_start=time.monotonic())
+        return True
+
+    req_start = time.monotonic()
+    # "owner", not "caller". The contract has three values so a gateway can say
+    # WHICH human is speaking, asserted from the channel: someone at this console
+    # is operating the app, not phoning it.
+    #
+    # Sending "caller" had riff-builder narrating the operator in the third
+    # person — "That's a test caller coming through. They said…" — instead of
+    # talking to them. Worse, `who == "owner"` is what gates voice approval
+    # there, so "yes, that's right" approved nothing. The phone builder line was
+    # given the same fix at the app end (`pinned_who`); the browser never was,
+    # because the browser is not a phone line and has no DID to pin.
+    reply = await call_delegate(client, url, text, who="owner")
+    log.info("delegate turn %.1fs ok=%s%s", time.monotonic() - req_start,
+             reply.ok, f" ({reply.failure})" if reply.failure else "")
+    await _process_api_response(
+        ws, session, reply.as_agent_response(), req_start=req_start)
+    return True
+
+
 async def _handle_scheduler_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1148,30 +1682,54 @@ async def _handle_scheduler_request(
 ) -> bool:
     """Handle an enabled scheduler turn before the normal API route."""
 
-    if not getattr(session, "_scheduler_flow_enabled", False):
+    # Live gate: the runtime mode is read per turn so switching to the
+    # scheduler mid-session engages the flow on the next utterance instead of
+    # silently falling through to the FLOW_MODES fallback persona for the rest
+    # of the session (the pre-fix behavior: a stale snapshot taken at session
+    # creation left the engine off and every turn spoke as Space Channel).
+    domain_id = active_scheduling_domain(get_flow_mode())
+    if domain_id is None:
         return False
 
     flow = getattr(session, "_scheduler_flow", None)
+    flow_domain = getattr(session, "_scheduler_flow_domain", None)
+    if flow_domain is not None and flow_domain != domain_id:
+        flow = None
+        session._scheduler_flow = None
+        session._scheduler_flow_attempted = False
+        session._scheduler_flow_domain = None
+    if flow is None and getattr(session, "_scheduler_flow_attempted", False):
+        # A prior activation failed or the flow already completed; later
+        # scheduler-mode turns stay on the normal agent path per FLOW_MODES.
+        return False
     greeting = None
+    greeting_token = None
+    current_token = None
+    greeting_receipt = None
+    current_receipt = None
     if flow is None:
-        if getattr(session, "_scheduler_flow_attempted", False):
-            return False
         session._scheduler_flow_attempted = True
-        flow = FlowSession.create()
+        session._scheduler_flow_domain = domain_id
+        flow = await FlowSession.create_async(domain_id=domain_id)
         if flow is None:
             session._scheduler_flow_enabled = False
             return False
         session._scheduler_flow = flow
+        session._scheduler_flow_enabled = True
         greeting = flow.greeting
         await ws.send_json({"type": "agent_reply", "text": greeting})
         # One audio gate covers both the greeting and the pending first reply;
         # otherwise the greeting's audio_end rearms hands-free VAD too early.
-        await ws.send_json({"type": "agent_audio_start"})
+        greeting_token = _begin_session_stream(session)
+        current_token = greeting_token
+        await _send_audio_start(ws, greeting_token)
         await ws.send_json(_flow_state_message(flow))
 
     try:
         if greeting is not None:
-            await session.speak_text(greeting, session.voice_id, session.speed)
+            await _speak_text_for_generation(session, greeting, greeting_token)
+            greeting_receipt = getattr(session, "last_playback_receipt", None)
+            await _send_delivery_receipt(ws, greeting_receipt)
 
         reply = await flow.reply(text)
         log.info(
@@ -1184,20 +1742,40 @@ async def _handle_scheduler_request(
             # Revert before either so a completed flow cannot be stranded.
             session._scheduler_flow = None
             session._scheduler_flow_enabled = False
+            session._scheduler_flow_domain = None
         await ws.send_json(_flow_state_message(flow, reply))
         await ws.send_json({"type": "agent_reply", "text": reply.text})
         completed_text = (
             f"{greeting}\n\n{reply.text}" if greeting is not None else reply.text
         )
-        await _complete_agent_turn(ws, session, completed_text)
         if greeting is not None:
-            await session.speak_text(reply.text, session.voice_id, session.speed)
+            if greeting_token is not None:
+                current_token = _begin_session_stream(session)
+                await _send_audio_start(ws, current_token)
+            await _speak_text_for_generation(session, reply.text, current_token)
+            current_receipt = getattr(session, "last_playback_receipt", None)
         else:
             await _speak_with_events(ws, session, reply.text)
+            current_receipt = getattr(session, "_last_spoken_receipt", None)
+        if _delivery_completed(greeting_receipt) and _delivery_completed(
+            current_receipt
+        ):
+            await _complete_agent_turn(ws, session, completed_text)
+        else:
+            _abandon_agent_turn(session)
         return True
     finally:
-        if greeting is not None and not ws.closed:
-            await ws.send_json({"type": "agent_audio_end"})
+        task = asyncio.current_task()
+        if (
+            greeting is not None
+            and not ws.closed
+            and (task is None or task.cancelling() == 0)
+        ):
+            if current_receipt is None:
+                candidate = getattr(session, "last_playback_receipt", None)
+                current_receipt = candidate if isinstance(candidate, dict) else None
+            await _send_delivery_receipt(ws, current_receipt)
+            await _send_audio_end(ws, current_token, current_receipt)
 
 
 def _flow_state_message(flow, reply=None) -> dict:
@@ -1242,6 +1820,210 @@ def _flow_state_message(flow, reply=None) -> dict:
     }
 
 
+def _playback_identity(token: Any) -> dict[str, Any]:
+    """Return wire-safe identity fields for modern Session playback tokens."""
+
+    if token is None:
+        return {}
+    utterance_id = getattr(token, "utterance_id", None)
+    generation = getattr(token, "generation", None)
+    fields: dict[str, Any] = {}
+    if isinstance(utterance_id, str) and utterance_id:
+        fields["utteranceId"] = utterance_id
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        fields["generation"] = generation
+    return fields
+
+
+def _begin_session_stream(session: Any) -> Any:
+    """Begin receipt-aware playback when supported by the session seam."""
+
+    begin_stream = getattr(session, "begin_stream", None)
+    return begin_stream() if callable(begin_stream) else None
+
+
+async def _send_audio_start(ws: Any, token: Any) -> None:
+    await ws.send_json({"type": "agent_audio_start", **_playback_identity(token)})
+
+
+async def _send_delivery_receipt(ws: Any, receipt: dict | None) -> None:
+    if not receipt or getattr(ws, "closed", False):
+        return
+    await ws.send_json({"type": "utterance_delivery_receipt", **receipt})
+
+
+async def _send_audio_end(
+    ws: Any,
+    token: Any = None,
+    receipt: dict | None = None,
+) -> None:
+    if getattr(ws, "closed", False):
+        return
+    message: dict[str, Any] = {
+        "type": "agent_audio_end",
+        **_playback_identity(token),
+    }
+    if receipt:
+        message["status"] = receipt.get("status")
+        message["reason"] = receipt.get("reason")
+    await ws.send_json(message)
+
+
+async def _synthesize_and_enqueue(
+    session: Any,
+    loop: asyncio.AbstractEventLoop,
+    token: Any,
+    text: str,
+    *,
+    audio_role: str = "answer",
+    pause_after_ms: int | None = None,
+    chunk_id: str | None = None,
+    plan_sequence: int | None = None,
+) -> int:
+    """Keep expensive synthesis off-loop and admission on the fenced side."""
+
+    synthesize_chunk = getattr(session, "synthesize_chunk", None)
+    enqueue_synthesized = getattr(session, "enqueue_synthesized_chunk", None)
+    if token is not None and callable(synthesize_chunk) and callable(enqueue_synthesized):
+        try:
+            synth_params = inspect.signature(synthesize_chunk).parameters
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
+            synth_params = {}
+        synth_args = (text, session.voice_id, session.speed)
+        if pause_after_ms is not None and "pause_after_ms" in synth_params:
+            synth_args = (*synth_args, pause_after_ms)
+        pcm = await loop.run_in_executor(None, synthesize_chunk, *synth_args)
+        try:
+            enqueue_params = inspect.signature(enqueue_synthesized).parameters
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
+            enqueue_params = {}
+        enqueue_kwargs: dict[str, Any] = {"audio_role": audio_role}
+        if chunk_id is not None and "chunk_id" in enqueue_params:
+            enqueue_kwargs["chunk_id"] = chunk_id
+        if plan_sequence is not None and "plan_sequence" in enqueue_params:
+            enqueue_kwargs["plan_sequence"] = plan_sequence
+        return enqueue_synthesized(token, pcm, **enqueue_kwargs)
+    return await loop.run_in_executor(
+        None, session.enqueue_chunk, text, session.voice_id, session.speed
+    )
+
+
+def _enqueue_generated_audio(
+    session: Any,
+    token: Any,
+    pcm: bytes,
+    *,
+    audio_role: str,
+) -> int:
+    enqueue_generated = getattr(session, "enqueue_generated_pcm", None)
+    if token is not None and callable(enqueue_generated):
+        return enqueue_generated(token, pcm, audio_role=audio_role)
+    return session.enqueue_pcm(pcm)
+
+
+async def _end_session_stream(
+    session: Any, total_bytes: int, token: Any
+) -> dict | None:
+    """Use the receipt-aware Session API while retaining narrow test fakes."""
+
+    end_stream = session.end_stream
+    try:
+        parameters = inspect.signature(end_stream).parameters
+    except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
+        parameters = {}
+    if token is not None and "token" in parameters:
+        result = await end_stream(total_bytes, token=token)
+    else:
+        result = await end_stream(total_bytes)
+    if isinstance(result, dict):
+        return result
+    receipt = getattr(session, "last_playback_receipt", None)
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _delivery_completed(receipt: dict | None) -> bool:
+    """Only confirmed complete playback may become a completed agent turn."""
+
+    return receipt is None or receipt.get("status") == "completed"
+
+
+async def _speak_text_for_generation(
+    session: Any, text: str, token: Any, plan: SpeechPlan | None = None
+) -> float | None:
+    """Speak on a caller-allocated generation, with compatibility for fakes."""
+
+    speak_plan = getattr(session, "speak_plan", None)
+    if plan is not None and callable(speak_plan):
+        try:
+            plan_parameters = inspect.signature(speak_plan).parameters
+        except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
+            plan_parameters = {}
+        if token is not None and "token" in plan_parameters:
+            return await speak_plan(
+                plan,
+                session.voice_id,
+                session.speed,
+                token=token,
+            )
+        return await speak_plan(plan, session.voice_id, session.speed)
+
+    try:
+        parameters = inspect.signature(session.speak_text).parameters
+    except (TypeError, ValueError):  # health-ok: signature back-compat for narrow test fakes
+        parameters = {}
+    if token is not None and "token" in parameters:
+        return await session.speak_text(
+            text,
+            session.voice_id,
+            session.speed,
+            token=token,
+        )
+    return await session.speak_text(text, session.voice_id, session.speed)
+
+
+def _prepare_session_speech(session: Any, text: str) -> SpeechPlan | None:
+    """Compile one complete response, with a guaranteed raw fallback."""
+
+    prepare = getattr(session, "prepare_speech", None)
+    if not callable(prepare):
+        return None
+    try:
+        plan = prepare(text)
+    except Exception:
+        log.exception("Speech preparation failed; using raw text")
+        return None
+    if not isinstance(plan, SpeechPlan):
+        return None
+    metadata = plan.public_metadata()
+    log.info(
+        "Speech plan compiled: version=%s chunks=%d normalizations=%d estimated_ms=%d",
+        metadata["compilerVersion"],
+        metadata["chunkCount"],
+        metadata["normalizationCount"],
+        metadata["estimatedDurationMs"],
+    )
+    return plan
+
+
+async def _send_speech_plan(ws: Any, plan: SpeechPlan | None, mode: str) -> None:
+    """Expose only privacy-safe plan/version data to the listening UI."""
+
+    if getattr(ws, "closed", False):
+        return
+    if plan is None:
+        await ws.send_json(
+            {
+                "type": "speech_plan",
+                "compilerVersion": SPEECH_COMPILER_VERSION,
+                "mode": mode,
+                "chunkCount": 0,
+                "normalizationCount": 0,
+            }
+        )
+        return
+    await ws.send_json({"type": "speech_plan", **plan.public_metadata()})
+
+
 async def _consume_sse(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1259,6 +2041,17 @@ async def _consume_sse(
     first_delta = None
     first_audio = None
     chunker = TextChunker()
+    speech_mode = getattr(session, "speech_mode", "raw")
+    prepared_mode = speech_mode in ("prepared", "batch")
+    streaming_prepared = speech_mode == "prepared"
+    prepared_parts: list[str] = []
+    # Streaming prepared speech: sentences compile and play while the model
+    # writes. held_turn falls back to compile-at-final when the server may
+    # rewrite the reply (deep turns, held-response synthetic deltas).
+    stream_compiler: StreamingSpeechCompiler | None = None
+    stream_emitted: list[Any] = []
+    stream_held = False
+    stream_saw_delta = False
     loop = asyncio.get_running_loop()
     total_bytes = 0
     event = ""
@@ -1266,21 +2059,104 @@ async def _consume_sse(
     final_seen = False
     stream_failed = False
     last_processing_cue = 0.0
+    session._deep_projection_pending = False
 
     _ensure_agent_turn(session)
+    playback_token = None
+    playback_started = False
 
-    async def speak_chunk(chunk: str):
+    async def ensure_playback_started():
+        nonlocal playback_token, playback_started
+        if not playback_started:
+            playback_token = _begin_session_stream(session)
+            playback_started = True
+            await _send_audio_start(ws, playback_token)
+        return playback_token
+
+    async def speak_chunk(
+        chunk: str,
+        *,
+        prepared_chunk: Any = None,
+        emit_text: bool = True,
+    ):
         nonlocal total_bytes, first_audio
-        await ws.send_json({"type": "agent_reply_delta", "text": chunk})
-        queued_bytes = await loop.run_in_executor(
-            None, session.enqueue_chunk, chunk, session.voice_id, session.speed
+        if emit_text:
+            await ws.send_json({"type": "agent_reply_delta", "text": chunk})
+        token = await ensure_playback_started()
+        queued_bytes = await _synthesize_and_enqueue(
+            session,
+            loop,
+            token,
+            chunk,
+            audio_role="answer",
+            pause_after_ms=getattr(prepared_chunk, "pause_after_ms", None),
+            chunk_id=getattr(prepared_chunk, "chunk_id", None),
+            plan_sequence=getattr(prepared_chunk, "sequence", None),
         )
         total_bytes += queued_bytes
         if queued_bytes and first_audio is None:
             first_audio = time.monotonic()
+        if queued_bytes and getattr(session, "_deep_projection_pending", False):
+            session._deep_projection_pending = False
+            await ws.send_json({"type": "deep_projection_ready"})
 
-    session.begin_stream()
-    await ws.send_json({"type": "agent_audio_start"})
+    async def send_streaming_plan_summary() -> None:
+        """The single per-turn speech_plan message, built from what actually
+        streamed (normalizations aren't tracked per-feed, hence 0)."""
+        if getattr(ws, "closed", False):
+            return
+        await ws.send_json(
+            {
+                "type": "speech_plan",
+                "compilerVersion": SPEECH_COMPILER_VERSION,
+                "normalizerVersion": NORMALIZER_VERSION,
+                "mode": "deterministic",
+                "actsProvenance": "text_only",
+                "guaranteeLevel": "text_structural",
+                "chunkCount": len(stream_emitted),
+                "normalizationCount": 0,
+                "estimatedDurationMs": sum(
+                    chunk.estimated_duration_ms + chunk.pause_after_ms
+                    for chunk in stream_emitted
+                ),
+            }
+        )
+
+    async def speak_streamed_chunks(chunks) -> None:
+        for planned in chunks:
+            stream_emitted.append(planned)
+            await speak_chunk(
+                planned.text, prepared_chunk=planned, emit_text=False
+            )
+
+    async def speak_complete_prepared(source_text: str) -> None:
+        """Compile once, then play every declared chunk in order."""
+
+        plan = _prepare_session_speech(session, source_text)
+        if plan is not None:
+            await _send_speech_plan(ws, plan, "prepared")
+            for planned_chunk in plan.chunks:
+                await speak_chunk(
+                    planned_chunk.text,
+                    prepared_chunk=planned_chunk,
+                    emit_text=False,
+                )
+            return
+
+        # A compiler failure must remain audible. Use the established raw
+        # cleanup/chunking path, but do not duplicate text already streamed to
+        # the transcript UI.
+        await _send_speech_plan(ws, None, "raw_fallback")
+        fallback_chunker = TextChunker()
+        fallback_chunks = fallback_chunker.push(source_text)
+        tail = fallback_chunker.flush()
+        if tail:
+            fallback_chunks.append(tail)
+        for fallback_chunk in fallback_chunks:
+            await speak_chunk(fallback_chunk, emit_text=False)
+
+    if not prepared_mode:
+        await ensure_playback_started()
     try:
         async for raw in resp.aiter_lines():
             if raw == "":  # frame boundary
@@ -1295,9 +2171,39 @@ async def _consume_sse(
                     _append_agent_delta(session, delta)
                     if first_delta is None:
                         first_delta = time.monotonic()
-                    for chunk in chunker.push(delta):
-                        await speak_chunk(chunk)
+                    if prepared_mode:
+                        prepared_parts.append(delta)
+                        await ws.send_json({"type": "agent_reply_delta", "text": delta})
+                        if (
+                            streaming_prepared
+                            and not stream_held
+                            and isinstance(delta, str)
+                            and delta
+                        ):
+                            if obj.get("held") or (
+                                not stream_saw_delta and len(delta) > 350
+                            ):
+                                # The server's held-response synthetic delta
+                                # (held:true; size check covers older servers):
+                                # the text may still be guard-rewritten, so
+                                # this turn compiles at final instead.
+                                stream_held = True
+                            else:
+                                if stream_compiler is None:
+                                    words, duration = _speech_compile_env_params()
+                                    stream_compiler = StreamingSpeechCompiler(
+                                        max_words_per_chunk=words,
+                                        max_chunk_duration_ms=duration,
+                                    )
+                                await speak_streamed_chunks(
+                                    stream_compiler.feed(delta)
+                                )
+                            stream_saw_delta = True
+                    else:
+                        for chunk in chunker.push(delta):
+                            await speak_chunk(chunk)
                 elif ev == "deep_started":
+                    stream_held = True
                     acknowledgement = obj.get(
                         "acknowledgement", "Let me think deeply about this."
                     )
@@ -1310,6 +2216,7 @@ async def _consume_sse(
                         if first_delta is None:
                             first_delta = time.monotonic()
                         await speak_chunk(acknowledgement)
+                    session._deep_projection_pending = True
                     last_processing_cue = time.monotonic()
                     await ws.send_json(
                         {
@@ -1329,6 +2236,19 @@ async def _consume_sse(
                             "completedSteps": obj.get("completedSteps", 0),
                             "maxSteps": obj.get("maxSteps", 1),
                             "retrievalQueries": obj.get("retrievalQueries", 0),
+                            "currentPass": obj.get("currentPass", 0),
+                            "completedPasses": obj.get("completedPasses", 0),
+                            "maxPasses": obj.get("maxPasses", 1),
+                            "retrievalPlanned": obj.get("retrievalPlanned", 0),
+                            "retrievalCompleted": obj.get("retrievalCompleted", 0),
+                            "evidenceItems": obj.get("evidenceItems", 0),
+                            "model": obj.get("model"),
+                            "artifactStatus": obj.get(
+                                "artifactStatus", "not_applicable"
+                            ),
+                            "artifactId": obj.get("artifactId"),
+                            "phaseStartedAt": obj.get("phaseStartedAt"),
+                            "heartbeatAt": obj.get("heartbeatAt"),
                         }
                     )
                     now = time.monotonic()
@@ -1337,15 +2257,36 @@ async def _consume_sse(
                         and now - last_processing_cue
                         >= DEEP_PROCESSING_CUE_INTERVAL_S
                     ):
-                        queued_bytes = session.enqueue_pcm(processing_chime())
+                        token = await ensure_playback_started()
+                        queued_bytes = _enqueue_generated_audio(
+                            session,
+                            token,
+                            processing_chime(),
+                            audio_role="processing_earcon",
+                        )
                         total_bytes += queued_bytes
                         if queued_bytes and first_audio is None:
                             first_audio = now
                         last_processing_cue = now
                 elif ev == "tool_pending":
-                    tail = chunker.flush()
-                    if tail:
-                        await speak_chunk(tail)
+                    session._deep_projection_pending = False
+                    if prepared_mode:
+                        if (
+                            streaming_prepared
+                            and stream_compiler is not None
+                            and not stream_held
+                        ):
+                            # Sentences already streamed; only flush the tail.
+                            await speak_streamed_chunks(stream_compiler.finish(None))
+                            await send_streaming_plan_summary()
+                        else:
+                            prepared_text = "".join(prepared_parts).strip()
+                            if prepared_text:
+                                await speak_complete_prepared(prepared_text)
+                    else:
+                        tail = chunker.flush()
+                        if tail:
+                            await speak_chunk(tail)
                     parts = getattr(session, "_history_agent_parts", None)
                     if isinstance(parts, list) and parts:
                         parts.append("\n\n")
@@ -1353,7 +2294,13 @@ async def _consume_sse(
                         session, req_start, first_delta, first_audio, obj.get("debug") or {}
                     )
                     await ws.send_json({"type": "tool_pending", "requestId": obj["requestId"], "tools": obj["tools"]})
-                    await ws.send_json({"type": "agent_audio_end"})
+                    receipt = (
+                        await _end_session_stream(session, total_bytes, playback_token)
+                        if playback_started
+                        else None
+                    )
+                    await _send_delivery_receipt(ws, receipt)
+                    await _send_audio_end(ws, playback_token, receipt)
                     return
                 elif ev == "final":
                     final_seen = True
@@ -1365,17 +2312,51 @@ async def _consume_sse(
                         and isinstance(response_text, str)
                     ):
                         parts.append(response_text)
-                    tail = chunker.flush()
-                    if tail:
-                        await speak_chunk(tail)
+                    if prepared_mode:
+                        prepared_text = (
+                            response_text.strip()
+                            if isinstance(response_text, str) and response_text.strip()
+                            else "".join(prepared_parts).strip()
+                        )
+                        if (
+                            streaming_prepared
+                            and stream_compiler is not None
+                            and not stream_held
+                        ):
+                            fed = stream_compiler.fed_text.strip()
+                            if (
+                                stream_emitted
+                                and prepared_text
+                                and prepared_text != fed
+                                and not prepared_text.startswith(fed)
+                            ):
+                                # Server rewrote the reply after sentences were
+                                # already spoken — never double-speak.
+                                log.warning(
+                                    "Prepared stream: final response diverged"
+                                    " from streamed deltas — tail withheld"
+                                )
+                                await send_streaming_plan_summary()
+                            else:
+                                await speak_streamed_chunks(
+                                    stream_compiler.finish(prepared_text or None)
+                                )
+                                await send_streaming_plan_summary()
+                        elif prepared_text:
+                            await speak_complete_prepared(prepared_text)
+                    else:
+                        tail = chunker.flush()
+                        if tail:
+                            await speak_chunk(tail)
+                        await _send_speech_plan(ws, None, "raw")
+                    session._deep_projection_pending = False
                     debug = obj.get("debug") or {}
                     if debug:
                         await ws.send_json({"type": "debug", **debug})
                     _write_turn_metrics(session, req_start, first_delta, first_audio, debug)
-                    if not stream_failed:
-                        await _complete_agent_turn(ws, session)
                     await ws.send_json({"type": "agent_reply_done"})
                 elif ev == "error":
+                    session._deep_projection_pending = False
                     stream_failed = True
                     _abandon_agent_turn(session)
                     await ws.send_json({"type": "agent_reply", "text": f"Error: {obj.get('error', 'agent error')}"})
@@ -1385,17 +2366,25 @@ async def _consume_sse(
             elif raw.startswith("data:"):
                 data_lines.append(raw[5:].strip())
 
-        await session.end_stream(total_bytes)
+        receipt = (
+            await _end_session_stream(session, total_bytes, playback_token)
+            if playback_started
+            else None
+        )
+        session._deep_projection_pending = False
         session._backoff.reset()   # clean drain — clear consecutive-false count
-        if not final_seen:
+        if final_seen and not stream_failed and _delivery_completed(receipt):
+            await _complete_agent_turn(ws, session)
+        else:
             _abandon_agent_turn(session)
-        if not ws.closed:
-            await ws.send_json({"type": "agent_audio_end"})
+        await _send_delivery_receipt(ws, receipt)
+        await _send_audio_end(ws, playback_token, receipt)
     except Exception:
+        session._deep_projection_pending = False
         _abandon_agent_turn(session)
-        session.stop_speaking()
-        if not ws.closed:
-            await ws.send_json({"type": "agent_audio_end"})
+        receipt = _call_compat(session.stop_speaking, reason="stream_error")
+        await _send_delivery_receipt(ws, receipt)
+        await _send_audio_end(ws, playback_token, receipt)
         raise
 
 
@@ -1527,12 +2516,31 @@ async def _speak_with_events(
     text: str,
 ) -> float | None:
     """Keep browser VAD muted until synthesized audio actually finishes."""
-    await ws.send_json({"type": "agent_audio_start"})
+    playback_token = _begin_session_stream(session)
+    await _send_audio_start(ws, playback_token)
+    plan = _prepare_session_speech(session, text)
+    await _send_speech_plan(
+        ws,
+        plan,
+        getattr(session, "speech_mode", "raw"),
+    )
+    receipt = None
     try:
-        return await session.speak_text(text, session.voice_id, session.speed)
+        first_audio = await _speak_text_for_generation(
+            session, text, playback_token, plan
+        )
+        receipt = getattr(session, "last_playback_receipt", None)
+        session._last_spoken_receipt = receipt
+        return first_audio
+    except BaseException:
+        stop_speaking = getattr(session, "stop_speaking", None)
+        if callable(stop_speaking):
+            receipt = _call_compat(stop_speaking, reason="speech_error")
+        session._last_spoken_receipt = receipt
+        raise
     finally:
-        if not ws.closed:
-            await ws.send_json({"type": "agent_audio_end"})
+        await _send_delivery_receipt(ws, receipt)
+        await _send_audio_end(ws, playback_token, receipt)
 
 
 async def _process_api_response(
@@ -1567,12 +2575,17 @@ async def _process_api_response(
             if isinstance(pending_parts, list) and pending_parts
             else reply
         )
-        await _complete_agent_turn(ws, session, completed_reply)
         first_audio = None
         if reply:
             first_audio = await _speak_with_events(ws, session, reply)
+            receipt = getattr(session, "_last_spoken_receipt", None)
+            if _delivery_completed(receipt):
+                await _complete_agent_turn(ws, session, completed_reply)
+            else:
+                _abandon_agent_turn(session)
         else:
-            await ws.send_json({"type": "agent_audio_end"})
+            await _complete_agent_turn(ws, session, completed_reply)
+            await _send_audio_end(ws)
         _write_turn_metrics(session, req_start, None, first_audio, debug or {})
     elif data.get("type") == "tool_pending":
         _stash_turn_metrics(session, req_start, None, None, debug or {})
@@ -2005,7 +3018,7 @@ async def _auth_sweep_loop(adapter: AiohttpAuthAdapter) -> None:
             await _run_auth_sweep_once(adapter)
             await asyncio.sleep(AUTH_SWEEP_INTERVAL_SECONDS)
     except asyncio.CancelledError:
-        return
+        return  # health-ok: sweep loop cancellation is orderly shutdown
 
 
 async def _auth_sweep_context(app: web.Application):
@@ -2029,13 +3042,42 @@ async def voices_handler(request: web.Request) -> web.Response:
     return web.json_response(voice_catalog.grouped_for_ui())
 
 
+async def voice_version_handler(request: web.Request) -> web.Response:
+    """Expose the active speech contract without leaking deployment secrets."""
+
+    return web.json_response(
+        {
+            "appVersion": APP_VERSION,
+            "speechVersion": SPEECH_COMPILER_VERSION,
+            "speechDefaultMode": _speech_default_mode(),
+        }
+    )
+
+
 async def models_handler(request: web.Request) -> web.Response:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"{NANO_CLAW_URL}/api/models")
         return web.json_response(resp.json())
 
 
+def _ops_token_ok(request: web.Request) -> bool:
+    """Header-only operator-data gate shared with the call review API.
+
+    Imported lazily like every other ``phone`` use in this module.
+    """
+
+    from voice import phone
+
+    return phone.require_operator_read(request)
+
+
 async def metrics_handler(request: web.Request) -> web.Response:
+    # Per-turn rows carry live session IDs, the serving model, and token
+    # counts.  Anonymous readers used to get all of it, which also published
+    # the very session IDs that make a session-scoped lookup route dangerous.
+    # Transcripts were already stripped below; this closes the rest.
+    if not _ops_token_ok(request):
+        return web.Response(status=403, text="bad token")
     if METRICS is None:
         return web.json_response({"recent": [], "byModel": []})
     recent = [
@@ -2049,19 +3091,31 @@ async def metrics_handler(request: web.Request) -> web.Response:
 
 
 async def costs_handler(request: web.Request) -> web.Response:
-    """Return the privacy-safe cost ledger aggregation used by ``/costs``."""
+    """Return the privacy-safe cost ledger aggregation used by ``/costs``.
 
+    Privacy-safe means no caller identities, not public: the report still
+    carries call/customer counts and real spend, so it takes the same operator
+    token as /api/calls.
+    """
+
+    if not _ops_token_ok(request):
+        return web.Response(status=403, text="bad token")
     return web.json_response(cost_ledger.build_report(METRICS))
 
 
 def _flow_api_payload() -> dict:
+    active_mode = get_flow_mode()
     return {
-        "active": get_flow_mode(),
+        "active": active_mode,
         "options": [
-            {"id": mode_id, "label": mode["label"]}
+            {
+                "id": mode_id,
+                "label": mode["label"],
+                "abstract": mode.get("abstract", ""),
+            }
             for mode_id, mode in FLOW_MODES.items()
         ],
-        "availability_ok": FlowSession.availability_ok(),
+        "availability_ok": FlowSession.availability_ok(active_mode),
     }
 
 
@@ -2086,6 +3140,11 @@ async def flow_set_handler(request: web.Request) -> web.Response:
     mode = raw_mode.strip().lower()
     if not set_flow_mode(mode):
         return web.Response(status=400, text=f"unknown mode: {mode}")
+    # Survive restarts: without this the next container boot re-reads
+    # NANO_CLAW_VOICE_FLOW from .env and silently reverts the mode.
+    from voice import phone as phone_module
+
+    phone_module.persist_runtime_setting("NANO_CLAW_VOICE_FLOW", mode)
     return web.json_response(_flow_api_payload())
 
 
@@ -2120,6 +3179,101 @@ async def region_model_set_handler(request: web.Request) -> web.Response:
     return web.json_response(_region_model_api_payload())
 
 
+def _delegate_api_payload() -> dict:
+    """What the console shows about where delegate turns go."""
+
+    # Lazily, as everywhere else in this file: `voice.phone` imports back into
+    # here, so a module-level import is circular.
+    from voice.phone import delegate_starts
+
+    url = default_delegate_url()
+    start_did = next(
+        ((did, profile.start_url) for did, profile in sorted(delegate_starts().items())
+         if profile.start_url), None)
+    return {
+        "url": url,
+        "active": is_delegate_mode(),
+        # The console has to be able to explain a refusal without the operator
+        # reading server logs, so the allowlist is reported alongside.
+        "allowed_hosts": sorted(delegate_allowed_hosts()),
+        # Where a fresh conversation would come from, if any line is delegated,
+        # and WHICH line. Both are needed: the app fails closed on an unknown
+        # number — correctly, since whoever dials a configured one can edit that
+        # business — so a start request without a DID is refused with
+        # "no builder line is configured for ''". The console shows its "New
+        # conversation" button only when these are set, because a button that
+        # always fails is worse than no button.
+        "start_url": start_did[1] if start_did else "",
+        "start_did": start_did[0] if start_did else "",
+    }
+
+
+async def delegate_get_handler(request: web.Request) -> web.Response:
+    """Report the delegate URL new conversations start with."""
+
+    return web.json_response(_delegate_api_payload())
+
+
+async def delegate_set_handler(request: web.Request) -> web.Response:
+    """Point new conversations at a delegate. Empty string clears it.
+
+    `{"start": <url>}` mints a FRESH conversation through the app's start seam
+    and points here at it — the browser's half of what a phone call gets for
+    free. Without it an operator had to create a conversation by hand and paste
+    its URL, and could not start a second one without doing it again. Testing a
+    flow from the top is exactly when you want a clean conversation.
+    """
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.Response(status=400, text="bad json")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="bad json")
+
+    start_url = body.get("start", "")
+    if isinstance(start_url, str) and start_url.strip():
+        try:
+            start_url = validate_delegate_url(
+                start_url.strip(), allowed_hosts=delegate_allowed_hosts())
+        except DelegateUrlRefused as exc:
+            return web.Response(status=400, text=f"start URL refused: {exc}")
+        # A key derived from the URL, so re-clicking mints a NEW conversation
+        # rather than being deduplicated back to the previous one. That is the
+        # opposite of the phone's need, and deliberate: a phone retry is one
+        # call, an operator clicking twice wants two.
+        key = f"console-{secrets.token_hex(8)}"
+        # `to` matters: the app resolves which business this conversation is for
+        # from the DID, and refuses an unknown one rather than inventing a
+        # business. Sending none earned a 404 that said exactly that.
+        did = body.get("did", "")
+        async with httpx.AsyncClient(timeout=DELEGATE_TIMEOUT_S) as client:
+            started = await start_conversation(
+                client, start_url, conversation_key=key, channel="browser",
+                # Matches the turn hop: a console operator is not a caller.
+                # `who` defaults to "caller" because the phone is the common
+                # case, and leaving the default here asserted something false
+                # about who was starting the conversation. riff-builder happens
+                # to pin the role itself today, so this changed no behaviour —
+                # which is exactly why it would have stayed wrong.
+                who="owner",
+                to=str(did) if did else None)
+        if not started.ok:
+            # The app's own reason, which is the only thing that distinguishes a
+            # ceiling from a crash from a line nobody configured.
+            return web.Response(status=502,
+                                text=f"could not start a conversation: {started.failure}")
+        if not set_default_delegate_url(started.delegate_url):
+            return web.Response(status=400, text="delegate URL refused")
+        return web.json_response(_delegate_api_payload())
+
+    if not set_default_delegate_url(body.get("url", "")):
+        # 400 rather than 500: a refused URL is the operator's input being
+        # rejected, which is a normal answer to give them.
+        return web.Response(status=400, text="delegate URL refused")
+    return web.json_response(_delegate_api_payload())
+
+
 async def preview_handler(request: web.Request) -> web.Response:
     body = await request.json()
     voice_id = body.get("voiceId", "")
@@ -2146,16 +3300,21 @@ def create_app(
     app.cleanup_ctx.append(_auth_sweep_context)
     app.on_cleanup.append(close_auth_adapter)
     cost_ledger.ensure_schema(METRICS)
+    call_log.ensure_schema(METRICS)
     app.router.add_get("/", index_handler)
     app.router.add_get("/costs", costs_page_handler)
+    app.router.add_get("/calls", calls_page_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/voices", voices_handler)
+    app.router.add_get("/api/voice/version", voice_version_handler)
     app.router.add_post("/api/preview", preview_handler)
     app.router.add_get("/api/models", models_handler)
     app.router.add_get("/api/metrics", metrics_handler)
     app.router.add_get("/api/costs", costs_handler)
     app.router.add_get("/api/voice/flow", flow_get_handler)
     app.router.add_post("/api/voice/flow", flow_set_handler)
+    app.router.add_get("/api/voice/delegate", delegate_get_handler)
+    app.router.add_post("/api/voice/delegate", delegate_set_handler)
     app.router.add_get("/api/voice/region-model", region_model_get_handler)
     app.router.add_post("/api/voice/region-model", region_model_set_handler)
     app.router.add_post("/api/client-log", client_log_handler)
@@ -2181,7 +3340,13 @@ def create_app(
         lambda: getattr(phone, "_metrics_conn", None) or METRICS,
     )
     cost_ledger.ensure_schema(getattr(phone, "_metrics_conn", None))
-    app.router.add_get("/{filename}", static_handler)
+    # `{filename:.+}`, not `{filename}`: the default pattern matches a SINGLE
+    # path segment, so anything in a subdirectory (voice/web/vendor/...) had no
+    # matching route and 404'd. Widening the match is safe because the guard is
+    # on the RESOLVED path, not on the pattern — static_handler resolves the
+    # candidate and refuses anything that escapes STATIC_DIR, so traversal is
+    # still rejected. Verified by test_static_handler_rejects_traversal.
+    app.router.add_get("/{filename:.+}", static_handler)
     return app
 
 

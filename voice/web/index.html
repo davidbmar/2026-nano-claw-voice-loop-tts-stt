@@ -5,19 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#050606" />
-    <meta name="description" content="Space Channel realtime voice agent console" />
-    <title>Space Channel voice console</title>
-    <link rel="stylesheet" href="styles.css" />
-    <link rel="modulepreload" href="talking-cube.js" />
+    <meta name="description" content="HYPERRIFF realtime voice agent console" />
+    <title>HYPERRIFF voice console</title>
+    <link rel="stylesheet" href="styles.css?v=0.4.25" />
+    <link rel="modulepreload" href="talking-cube.js?v=0.4.25" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
 
     <header class="topbar">
-      <div class="brand" aria-label="Space Channel voice console">
+      <div class="brand" aria-label="HYPERRIFF voice console, version 0.4.7">
         <span class="brand-copy">
-          <strong>SPACE CHANNEL</strong>
-          <small>VOICE CONSOLE</small>
+          <span class="brand-name-row">
+            <strong>HYPERRIFF</strong>
+            <!-- Placeholder only: app.js replaces this from /api/voice/version at
+                 runtime. Hardcoding it here rotted badly — the label read
+                 "Version 0.4.7" while the text read "v0.4.16" — so keep both in
+                 step with APP_VERSION when bumping, or trust the API value. -->
+            <small id="app-version" class="brand-version" aria-label="Version 0.4.25">v0.4.25</small>
+          </span>
+          <small class="brand-subtitle">VOICE CONSOLE</small>
         </span>
       </div>
 
@@ -68,6 +75,11 @@
       </div>
     </header>
 
+    <div id="phone-banner" class="phone-banner" hidden aria-label="Call this agent by phone">
+      <span class="phone-banner-label">Call the line</span>
+      <a id="phone-banner-number" class="phone-banner-number" href="tel:"></a>
+    </div>
+
     <div id="app">
       <aside id="configuration-sidebar" class="glass" aria-label="Voice agent configuration">
         <div class="panel-head console-brand">
@@ -80,23 +92,82 @@
 
         <div id="pipeline-panel">
           <section
-            id="benchmarks-panel"
+            id="context-panel"
             class="console-section"
-            aria-labelledby="benchmarks-heading"
+            aria-labelledby="context-heading"
           >
-            <h2 id="benchmarks-heading" class="console-section-title">Benchmarks</h2>
-            <div class="metric-row">
-              <span class="metric-key">LAST SUPERVISOR</span>
-              <span id="benchmark-supervisor" class="metric-value">–</span>
+            <h2 id="context-heading" class="console-section-title">Context</h2>
+            <div class="pipe-row">
+              <label
+                for="flow-select"
+                title="Assistant mode shared by the phone line and browser sessions"
+                >MODE</label
+              >
+              <span class="pipe-control-stack">
+                <select id="flow-select" aria-label="Assistant mode" disabled>
+                  <option value="base">Base</option>
+                  <option value="none">None</option>
+                  <option value="spacechannel" selected>Spacechannel</option>
+                  <option value="intelligence">Document Intelligence</option>
+                  <option value="riff">Riff</option>
+                  <option value="nanoclaw">nano-claw</option>
+                  <option value="intelligence-platform">intelligence-platform</option>
+                  <option value="replicantpm">Replicant PM</option>
+                  <option value="scheduler">Plumber Scheduler</option>
+                  <option value="lawyer">Lawyer Scheduler</option>
+                  <option value="delegate">Turn Delegate</option>
+                </select>
+                <span id="flow-warning" class="pipe-warning hidden"
+                  >Scheduler availability is unavailable</span
+                >
+              </span>
+            </div>
+            <p id="mode-abstract" class="context-hint"></p>
+            <!-- Only shown in delegate mode: in every other mode there is no
+                 destination to name, and a URL box that does nothing is worse
+                 than no box. -->
+            <div class="pipe-row hidden" id="delegate-row">
+              <label
+                for="delegate-url"
+                title="The app whose replies this assistant speaks"
+                >APP URL</label
+              >
+              <span class="pipe-control-stack">
+                <input
+                  id="delegate-url"
+                  type="url"
+                  inputmode="url"
+                  spellcheck="false"
+                  placeholder="http://127.0.0.1:8790/api/session/…/turn"
+                  aria-label="Turn delegate URL"
+                />
+                <button id="delegate-new" type="button" class="tool-btn hidden">
+                  New conversation
+                </button>
+                <span id="delegate-warning" class="pipe-warning hidden"></span>
+              </span>
+            </div>
+            <div class="pipe-row">
+              <label
+                for="speech-mode-select"
+                title="Phone delivery: prepared streams the speech compiler sentence-by-sentence; batch compiles after the full reply; raw skips the compiler"
+                >SPEECH</label
+              >
+              <select id="speech-mode-select" aria-label="Phone speech delivery mode">
+                <option value="prepared">Prepared (streaming)</option>
+                <option value="batch">Prepared (batch)</option>
+                <option value="raw">Raw (whole sentences)</option>
+              </select>
             </div>
             <div class="metric-row">
-              <span class="metric-key">SESSION P50</span>
-              <span id="benchmark-p50" class="metric-value">–</span>
+              <span class="metric-key">LOADED</span>
+              <span id="context-collections" class="metric-value">–</span>
             </div>
-            <div class="metric-row">
-              <span class="metric-key">TURNS</span>
-              <span id="benchmark-turns" class="metric-value">0 / 0</span>
-            </div>
+            <p id="context-hint" class="context-hint">
+              The agent answers from the loaded knowledge. Switching by voice —
+              “load the riff design”, “switch to the nano-claw code”, “what’s
+              loaded?” — arrives with session scoping (task 065).
+            </p>
           </section>
 
           <section
@@ -159,7 +230,7 @@
                 />
               </div>
               <p id="barge-in-hint" class="barge-in-hint">
-                Off by default. Use headphones for voice interruption; Stop audio always works.
+                On by default — interrupt the agent just by speaking. Use headphones on open speakers; Stop audio always works.
               </p>
             </div>
 
@@ -182,6 +253,10 @@
                 <label for="model-select">MODEL</label>
                 <select id="model-select" aria-label="Chat provider and model"></select>
               </div>
+              <p id="model-inert-note" class="context-hint hidden">
+                Not used in Turn Delegate mode — the app answering each turn
+                chooses its own model.
+              </p>
             </div>
 
             <div class="config-stage">
@@ -217,28 +292,6 @@
               </div>
             </div>
 
-            <div class="config-stage config-stage-single">
-              <div class="pipe-row">
-                <label
-                  for="flow-select"
-                  title="Assistant mode shared by the phone line and browser sessions"
-                  >MODE</label
-                >
-                <span class="pipe-control-stack">
-                  <select id="flow-select" aria-label="Assistant mode" disabled>
-                    <option value="none">None</option>
-                    <option value="spacechannel" selected>Space Channel</option>
-                    <option value="intelligence">Document Intelligence</option>
-                    <option value="replicantpm">Replicant PM</option>
-                    <option value="scheduler">Plumber Scheduler</option>
-                  </select>
-                  <span id="flow-warning" class="pipe-warning hidden"
-                    >Scheduler availability is unavailable</span
-                  >
-                </span>
-              </div>
-            </div>
-
             <div class="config-stage">
               <div class="config-stage-name">TEXT-TO-SPEECH</div>
               <div id="voice-row" class="pipe-row pipe-row-nested">
@@ -264,6 +317,24 @@
                   <span id="speed-value">1.0×</span>
                 </span>
               </div>
+              <div class="pipe-row pipe-row-nested">
+                <label
+                  for="speech-preparation-toggle"
+                  title="Prepare model text as short, normalized spoken chunks"
+                  >NATURAL DELIVERY</label
+                >
+                <input
+                  id="speech-preparation-toggle"
+                  class="pipe-toggle"
+                  type="checkbox"
+                  aria-label="Enable prepared natural speech delivery"
+                  aria-describedby="speech-preparation-hint"
+                  checked
+                />
+              </div>
+              <p id="speech-preparation-hint" class="barge-in-hint">
+                Prepared speech · awaiting server version
+              </p>
             </div>
 
             <details id="phone-line-panel" class="auxiliary-config">
@@ -323,6 +394,20 @@
             <div class="section-heading-row">
               <h2 id="visualization-heading" class="console-section-title">Visualization</h2>
               <span class="section-note">LIVE CANVAS</span>
+            </div>
+            <div class="pipe-row">
+              <label
+                for="renderer-select"
+                title="Which character renders the live voice display"
+                >DISPLAY</label
+              >
+              <select id="renderer-select" aria-label="Voice display renderer">
+                <option value="cube" selected>Voice constellation</option>
+                <option value="mascot">Computer mascot</option>
+                <option value="robot-orange">Robot — Copper</option>
+                <option value="robot-pale">Robot — Chrome</option>
+                <option value="robot-rust">Robot — Rust</option>
+              </select>
             </div>
             <div class="pipe-row">
               <label for="cube-scene">PRESET</label>
@@ -811,10 +896,11 @@
       </div>
     </div>
 
-    <script src="phone-vad.js"></script>
-    <script src="voice-ui.js"></script>
-    <script src="barge-in.js"></script>
-    <script src="pipeline.js"></script>
-    <script type="module" src="app.js"></script>
+    <script src="phone-banner.js?v=0.4.25"></script>
+    <script src="phone-vad.js?v=0.4.25"></script>
+    <script src="voice-ui.js?v=0.4.25"></script>
+    <script src="barge-in.js?v=0.4.25"></script>
+    <script src="pipeline.js?v=0.4.25"></script>
+    <script type="module" src="app.js?v=0.4.25"></script>
   </body>
 </html>

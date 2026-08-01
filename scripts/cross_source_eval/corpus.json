@@ -1,0 +1,520 @@
+{
+  "_meta": {
+    "format_version": 1,
+    "corpus_version": "2026-07-25.1",
+    "description": "Live-provider milestone questions for document, code, and cross-source retrieval through NanoClaw and intelligence-platform.",
+    "format": {
+      "case_fields": {
+        "id": "Stable case identifier.",
+        "group": "One of document, code, or cross_source.",
+        "question": "The scored user turn. Model prose is never string-matched.",
+        "scope": "Collection IDs loaded into a fresh API session before the question.",
+        "setup": "Optional unscored turns in the same isolated session, used only to create controlled registry state.",
+        "expected_route": "One of fast, deep, or registry from debug.evalTrace.route.",
+        "anchors": "Evidence expectations. Every anchor group must pass; rule any/all applies to its match predicates across the returned top-k evidence.",
+        "required_sources": "Collection source prefixes that must each appear in evidence citations.",
+        "min_citation_presence": "Minimum fraction of segmented claims carrying one or more evidence/citation IDs.",
+        "coverage_disclaimer_required": "Requires hedged loaded-corpus language for absence/implementation-coverage answers.",
+        "known_failure": "Tracked capability gap that may fail without turning the run into an infrastructure failure."
+      },
+      "match_fields": [
+        "title",
+        "source_ref",
+        "section_path",
+        "text"
+      ]
+    },
+    "scoring": {
+      "top_k": 5,
+      "candidate_pool": 40,
+      "anchor_case_rule": "all",
+      "fast_claim_segmentation": "Split at sentence punctuation/newlines; exclude questions and fragments shorter than four tokens.",
+      "fast_claim_citation_link": "Best evidence by meaningful-token overlap; require at least two shared terms and 0.12 claim coverage.",
+      "deep_claim_citation_link": "Use validated claim.evidence_ids directly.",
+      "routes": [
+        "fast",
+        "deep",
+        "registry"
+      ],
+      "affirmation_policy": "never",
+      "repetitions": 1,
+      "baseline_selection": "Most recent scoreboard with the same corpus digest, model, and source commit/digest fingerprint.",
+      "delivery_gate": "All document cases, deterministic failure-mode assertions, and every non-known-failure case pass; known code/cross-source capability gaps are reported but tolerated."
+    },
+    "failure_mode_cases": [
+      {
+        "id": "invalid-analysis-artifact",
+        "injection": "Local stub reasoning service returns status=succeeded with a malformed strategy artifact.",
+        "expected_error_code": "invalid_analysis_artifact",
+        "expected_spoken_fallback": "I'm sorry, I couldn't complete the deeper analysis just now. Please try again."
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "riff-design",
+      "kind": "document",
+      "collection_id": "riff-design",
+      "root_arg": "design_doc",
+      "files": [
+        "."
+      ]
+    },
+    {
+      "id": "nano-claw-code",
+      "kind": "code",
+      "collection_id": "nano-claw-code",
+      "root_arg": "nano_root",
+      "files": [
+        "src/api/server.ts",
+        "src/agent/context.ts",
+        "src/agent/deep-reasoning.ts",
+        "src/agent/eval-trace.ts",
+        "src/agent/intelligence.ts",
+        "src/agent/knowledge-scope.ts",
+        "src/agent/memory.ts"
+      ]
+    },
+    {
+      "id": "intelligence-platform-code",
+      "kind": "code",
+      "collection_id": "intelligence-platform-code",
+      "root_arg": "platform_root",
+      "files": [
+        "apps/api/main.py",
+        "src/intelligence_platform/analysis/scope.py",
+        "src/intelligence_platform/contracts/retrieval.py",
+        "src/intelligence_platform/contracts/tasks.py",
+        "src/intelligence_platform/knowledge/catalog.py",
+        "src/intelligence_platform/retrieval/service.py",
+        "src/intelligence_platform/tasks/coordinator.py",
+        "src/intelligence_platform/tasks/service.py"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "document-001-architecture-summary",
+      "group": "document",
+      "question": "Summarize the architecture described in the Riff design document.",
+      "scope": [
+        "riff-design"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "shared-pipeline",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "Everything after ingestion is source-agnostic"
+            },
+            {
+              "field": "text",
+              "contains": "Shared path: storage/indexing"
+            },
+            {
+              "field": "text",
+              "contains": "Ingest -> Store/Index"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.25
+    },
+    {
+      "id": "document-002-core-principle",
+      "group": "document",
+      "question": "What core principle decides when to use deterministic structure, AI enrichment, and heavyweight reasoning?",
+      "scope": [
+        "riff-design"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "core-principle",
+          "rule": "all",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "deterministic structure wherever possible"
+            },
+            {
+              "field": "text",
+              "contains": "heavyweight reasoning only after retrieval"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.25
+    },
+    {
+      "id": "document-003-escalation",
+      "group": "document",
+      "question": "When should a request escalate from the fast model to deeper reasoning?",
+      "scope": [
+        "riff-design"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "escalation-policy",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "low retrieval confidence or conflict"
+            },
+            {
+              "field": "text",
+              "contains": "multiple sources"
+            },
+            {
+              "field": "text",
+              "contains": "user asks for depth"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.25
+    },
+    {
+      "id": "document-004-phase-one",
+      "group": "document",
+      "question": "What capabilities belong in the phase one thin slice?",
+      "scope": [
+        "riff-design"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "phase-one",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "Phase 1 thin slice"
+            },
+            {
+              "field": "text",
+              "contains": "exact/FTS/vector retrieval"
+            },
+            {
+              "field": "text",
+              "contains": "Flash default"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.25
+    },
+    {
+      "id": "document-005-open-decisions",
+      "group": "document",
+      "question": "Which implementation choices are still open in the design?",
+      "scope": [
+        "riff-design"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "open-decisions",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "Open Decisions"
+            },
+            {
+              "field": "text",
+              "contains": "deployment target"
+            },
+            {
+              "field": "text",
+              "contains": "supported languages"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.25
+    },
+    {
+      "id": "code-001-request-routing",
+      "group": "code",
+      "question": "Where is request routing implemented?",
+      "scope": [
+        "nano-claw-code"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "routing-file",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "source_ref",
+              "contains": "src/api/server.ts"
+            },
+            {
+              "field": "source_ref",
+              "contains": "src/agent/deep-reasoning.ts"
+            }
+          ]
+        },
+        {
+          "id": "routing-symbol",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "detectDeepQuestion"
+            },
+            {
+              "field": "text",
+              "contains": "stepLoop"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2
+    },
+    {
+      "id": "code-002-request-path",
+      "group": "code",
+      "question": "Explain the request path from input to answer.",
+      "scope": [
+        "nano-claw-code"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "api-handler",
+          "rule": "all",
+          "matches": [
+            {
+              "field": "source_ref",
+              "contains": "src/api/server.ts"
+            },
+            {
+              "field": "text",
+              "contains": "handleChat"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2,
+      "known_failure": "The current plain-text code corpus has no call graph, so a broad request-path query can retrieve the loop without retrieving the handleChat entry symbol in the same top-k."
+    },
+    {
+      "id": "code-003-retrieval-call",
+      "group": "code",
+      "question": "Where does NanoClaw send the /v1/retrieve evidence request?",
+      "scope": [
+        "nano-claw-code"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "retrieval-client",
+          "rule": "all",
+          "matches": [
+            {
+              "field": "source_ref",
+              "contains": "src/agent/intelligence.ts"
+            },
+            {
+              "field": "text",
+              "contains": "/v1/retrieve"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2
+    },
+    {
+      "id": "code-004-session-scope",
+      "group": "code",
+      "question": "How are session collection scopes applied before routing?",
+      "scope": [
+        "nano-claw-code"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "scope-preparation",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "prepareCollectionScopeTurn"
+            },
+            {
+              "field": "source_ref",
+              "contains": "src/agent/knowledge-scope.ts"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2
+    },
+    {
+      "id": "code-005-stream-route-parity",
+      "group": "code",
+      "question": "Think deeply and compare the non-streaming and streaming request-routing paths.",
+      "scope": [
+        "nano-claw-code"
+      ],
+      "expected_route": "deep",
+      "anchors": [
+        {
+          "id": "both-loop-paths",
+          "rule": "all",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "stepLoop("
+            },
+            {
+              "field": "text",
+              "contains": "stepLoopStream("
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2,
+      "known_failure": "Plain-text code ingestion has no symbol or call graph, so a bounded deep pass may retrieve only one of the two loop implementations."
+    },
+    {
+      "id": "cross-source-001-design-to-code",
+      "group": "cross_source",
+      "question": "Think deeply and compare the Riff design's model-routing section with the NanoClaw components that implement fast and deep reasoning.",
+      "scope": [
+        "riff-design",
+        "nano-claw-code"
+      ],
+      "expected_route": "deep",
+      "anchors": [
+        {
+          "id": "design-router",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "Model Router and Reasoner"
+            },
+            {
+              "field": "text",
+              "contains": "Exact/local -> Flash"
+            }
+          ]
+        },
+        {
+          "id": "code-router",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "detectDeepQuestion"
+            },
+            {
+              "field": "text",
+              "contains": "resolveDeepGate"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design",
+        "nano-claw-code"
+      ],
+      "min_citation_presence": 0.2,
+      "known_failure": "The current lexical index has no requirement-to-symbol mapping or graph expansion, so one source can crowd the other out of the top-k evidence."
+    },
+    {
+      "id": "cross-source-002-coverage",
+      "group": "cross_source",
+      "question": "Which design components have no implementation evidence in the loaded code?",
+      "scope": [
+        "riff-design",
+        "nano-claw-code",
+        "intelligence-platform-code"
+      ],
+      "expected_route": "fast",
+      "anchors": [
+        {
+          "id": "design-components",
+          "rule": "any",
+          "matches": [
+            {
+              "field": "text",
+              "contains": "Service Boundaries and APIs"
+            },
+            {
+              "field": "text",
+              "contains": "Component 5"
+            },
+            {
+              "field": "text",
+              "contains": "graph expansion"
+            }
+          ]
+        }
+      ],
+      "required_sources": [
+        "riff-design"
+      ],
+      "min_citation_presence": 0.0,
+      "coverage_disclaimer_required": true
+    },
+    {
+      "id": "cross-source-003-registry-gaps",
+      "group": "cross_source",
+      "setup": [
+        "Think deeply and perform a fresh analysis of the implementation strategy: which NanoClaw and intelligence-platform components correspond to the routing and reasoning sections of the Riff design?"
+      ],
+      "question": "What evidence is missing or ambiguous?",
+      "scope": [
+        "riff-design",
+        "nano-claw-code",
+        "intelligence-platform-code"
+      ],
+      "expected_route": "registry",
+      "anchors": [],
+      "required_sources": [],
+      "min_citation_presence": 0.0,
+      "coverage_disclaimer_required": true,
+      "known_failure": "Registry follow-up requires the live provider to first produce a valid strategy artifact; malformed or timed-out artifacts intentionally prevent reuse."
+    }
+  ]
+}

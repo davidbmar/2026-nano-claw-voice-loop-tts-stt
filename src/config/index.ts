@@ -7,6 +7,30 @@ import { logger } from '../utils/logger';
 // Re-export getConfigDir for external use
 export { getConfigDir } from '../utils/helpers';
 
+const EXPLICIT_TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const EXPLICIT_FALSE_VALUES = new Set(['0', 'false', 'no', 'off']);
+const BUILT_IN_TOOL_NAMES = ['shell', 'read_file', 'write_file'] as const;
+
+/**
+ * Parse an environment flag that gates a dangerous capability.
+ *
+ * Unset and empty values are always off. Recognized values are
+ * case-insensitive, but whitespace is not trimmed so deployment mistakes fail
+ * loudly instead of silently enabling a capability. Configuration examples
+ * should spell values as the words "true" or "false".
+ */
+export function requireExplicitBoolean(name: string, value: string | undefined): boolean {
+  if (value === undefined || value === '') return false;
+
+  const normalized = value.toLowerCase();
+  if (EXPLICIT_TRUE_VALUES.has(normalized)) return true;
+  if (EXPLICIT_FALSE_VALUES.has(normalized)) return false;
+
+  throw new ConfigError(
+    `${name} must be one of true, false, 1, 0, yes, no, on, or off; received ${JSON.stringify(value)}`
+  );
+}
+
 /**
  * Load configuration from file
  */
@@ -68,10 +92,35 @@ export function createDefaultConfig(): Config {
       },
     },
     tools: {
+      enabled: false,
       restrictToWorkspace: false,
     },
     channels: {},
   });
+}
+
+/**
+ * An integer from the environment, or undefined so the schema default applies.
+ *
+ * `Number('')` is 0 and `Number.isInteger(0)` is true, so the obvious guard —
+ * `Number.isInteger(Number(process.env.X))` — accepts an EMPTY string as a
+ * legitimate zero. That is not hypothetical: `run.sh` passes 76 variables as
+ * `-e VAR="$VAR"`, which sends an empty string when the host var is unset rather
+ * than omitting the variable. Three of those feed schema fields with a minimum
+ * (`deepReasoning.threshold` min 1, `deepReasoning.taskTimeoutMs` min 1000,
+ * `intelligence.timeoutMs` min 10), so an unset var became 0, failed validation,
+ * and took the WHOLE config down with it — the Node API never started, the
+ * container died every three minutes, and the public console served 502 until a
+ * human looked (2026-07-29 22:40, `logs/voice_watchdog.ALERT`).
+ *
+ * Treating empty as absent is what the callers already meant: fall back to the
+ * documented default. Garbage like "abc" is still rejected, as before.
+ */
+function envInt(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) ? value : undefined;
 }
 
 /**
@@ -121,11 +170,22 @@ export function mergeEnvConfig(config: Config): Config {
     } as never;
   }
 
-  // Knowledge-only mode: disable every tool so the agent answers purely
-  // from its prompt (used by voice personas grounded on a site digest).
-  const disableTools = ['1', 'true', 'yes'].includes(
-    (process.env.NANO_CLAW_DISABLE_TOOLS || '').toLowerCase()
+  // Dangerous capabilities require a positive enable at the process boundary.
+  // The legacy negative flag remains a kill switch for one migration release.
+  const enableTools = requireExplicitBoolean(
+    'NANO_CLAW_ENABLE_TOOLS',
+    process.env.NANO_CLAW_ENABLE_TOOLS
   );
+  const disableTools = requireExplicitBoolean(
+    'NANO_CLAW_DISABLE_TOOLS',
+    process.env.NANO_CLAW_DISABLE_TOOLS
+  );
+  if (enableTools && disableTools) {
+    throw new ConfigError(
+      'NANO_CLAW_ENABLE_TOOLS and NANO_CLAW_DISABLE_TOOLS conflict: tools cannot be both enabled and disabled'
+    );
+  }
+  const toolsEnabled = enableTools && !disableTools;
 
   const intelligenceUrl = process.env.NANO_CLAW_INTELLIGENCE_URL?.trim();
   const intelligenceEnabledValue = process.env.NANO_CLAW_INTELLIGENCE_ENABLED?.trim().toLowerCase();
@@ -134,6 +194,12 @@ export function mergeEnvConfig(config: Config): Config {
     : intelligenceUrl
       ? true
       : undefined;
+  // Retrieval timeout: the schema default (750ms) is tuned for snappy voice
+  // turns, but under GPU contention (local LLM generating while the platform
+  // embeds the query) retrieval routinely exceeds it and the document-
+  // intelligence mode silently answers without evidence. Deployments that
+  // prioritize document access set this higher (voice pays the wait).
+  const intelligenceTimeoutMs = envInt('NANO_CLAW_INTELLIGENCE_TIMEOUT_MS');
   const intelligenceCollections = process.env.NANO_CLAW_INTELLIGENCE_COLLECTIONS?.split(',')
     .map((value) => value.trim())
     .filter(Boolean);
@@ -142,14 +208,18 @@ export function mergeEnvConfig(config: Config): Config {
   const deepEnabled = deepEnabledValue
     ? ['1', 'true', 'yes'].includes(deepEnabledValue)
     : undefined;
-  const deepThresholdValue = Number(process.env.NANO_CLAW_DEEP_THRESHOLD);
-  const deepThreshold = Number.isInteger(deepThresholdValue) ? deepThresholdValue : undefined;
-  const deepTimeoutValue = Number(process.env.NANO_CLAW_DEEP_TIMEOUT_MS);
-  const deepTimeoutMs = Number.isInteger(deepTimeoutValue) ? deepTimeoutValue : undefined;
-  const analysisStyle = process.env.NANO_CLAW_ANALYSIS_STYLE?.trim();
+  const deepThreshold = envInt('NANO_CLAW_DEEP_THRESHOLD');
+  const deepTimeoutMs = envInt('NANO_CLAW_DEEP_TIMEOUT_MS');
+  // `|| undefined` so an EMPTY value is absent, not "the operator asked for the
+  // empty string". run.sh sends unset host vars as empty (-e VAR="$VAR"), and
+  // `''.trim()` is `''`, which is `!== undefined` — so without this an unset
+  // NANO_CLAW_ANALYSIS_STYLE or NANO_CLAW_DEEP_ROUTING silently materialises a
+  // whole deepReasoning block out of nothing.
+  const analysisStyle = process.env.NANO_CLAW_ANALYSIS_STYLE?.trim() || undefined;
+  const deepRouting = process.env.NANO_CLAW_DEEP_ROUTING?.trim() || undefined;
   const hasDeepOverride =
     deepEnabled !== undefined ||
-    process.env.NANO_CLAW_DEEP_ROUTING !== undefined ||
+    deepRouting !== undefined ||
     deepThreshold !== undefined ||
     deepTimeoutMs !== undefined ||
     analysisStyle !== undefined;
@@ -157,8 +227,8 @@ export function mergeEnvConfig(config: Config): Config {
     ? {
         ...existingIntelligence?.deepReasoning,
         ...(deepEnabled !== undefined && { enabled: deepEnabled }),
-        ...(process.env.NANO_CLAW_DEEP_ROUTING && {
-          routingMode: process.env.NANO_CLAW_DEEP_ROUTING,
+        ...(deepRouting && {
+          routingMode: deepRouting,
         }),
         ...(deepThreshold !== undefined && { threshold: deepThreshold }),
         ...(deepTimeoutMs !== undefined && { taskTimeoutMs: deepTimeoutMs }),
@@ -171,6 +241,7 @@ export function mergeEnvConfig(config: Config): Config {
     process.env.NANO_CLAW_INTELLIGENCE_TENANT !== undefined ||
     intelligenceCollections !== undefined ||
     process.env.NANO_CLAW_INTELLIGENCE_GROUNDING !== undefined ||
+    intelligenceTimeoutMs !== undefined ||
     hasDeepOverride;
   const intelligence = hasIntelligenceOverride
     ? {
@@ -184,6 +255,7 @@ export function mergeEnvConfig(config: Config): Config {
         ...(process.env.NANO_CLAW_INTELLIGENCE_GROUNDING && {
           groundingMode: process.env.NANO_CLAW_INTELLIGENCE_GROUNDING,
         }),
+        ...(intelligenceTimeoutMs !== undefined && { timeoutMs: intelligenceTimeoutMs }),
         ...(deepReasoning && { deepReasoning }),
       }
     : existingIntelligence;
@@ -200,7 +272,7 @@ export function mergeEnvConfig(config: Config): Config {
         }
       : existingProfiles;
 
-  return ConfigSchema.parse({
+  const merged = ConfigSchema.parse({
     ...config,
     providers: mergedProviders,
     agents: {
@@ -211,8 +283,21 @@ export function mergeEnvConfig(config: Config): Config {
       },
       ...(profiles && { profiles }),
     },
-    ...(disableTools && { tools: { ...config.tools, enabled: false } }),
+    tools: {
+      ...config.tools,
+      enabled: toolsEnabled,
+    },
   });
+
+  logger.info(
+    {
+      toolsEnabled: merged.tools.enabled,
+      registeredTools: merged.tools.enabled ? [...BUILT_IN_TOOL_NAMES] : [],
+    },
+    'Tool gate resolved'
+  );
+
+  return merged;
 }
 
 /**

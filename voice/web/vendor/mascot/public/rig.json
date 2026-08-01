@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "seed": 1,
+  "body": {
+    "src": "layers/body.webp",
+    "width": 2142,
+    "height": 2016,
+    "srcset": "layers/body.webp 1600w, layers/body@2x.webp 2142w",
+    "sizes": "(max-width: 820px) 100vw, calc(100vw - 330px)"
+  },
+  "screen": {
+    "quad": {
+      "tl": [
+        831,
+        404
+      ],
+      "tr": [
+        1321,
+        382
+      ],
+      "br": [
+        1347,
+        826
+      ],
+      "bl": [
+        868,
+        855
+      ]
+    },
+    "outsetPx": 4,
+    "cornerRadiusPx": 30,
+    "cream": "#F6ECE0",
+    "canvasScale": 2
+  }
+}

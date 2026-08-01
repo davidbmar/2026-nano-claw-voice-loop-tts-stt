@@ -176,8 +176,12 @@ class WsAudioTransport:
 
                 if self._generator is not generator or self._closed:
                     break
-                pcm = generator.queue.read(AGENT_FRAME_BYTES)
-                await self.ws.send_bytes(pcm)
+                chunk = generator.next_chunk()
+                if not generator.session.is_playback_current(generator.token):
+                    generator.session.record_late_audio_drop(generator.token)
+                    break
+                await self.ws.send_bytes(chunk.samples)
+                generator.confirm(chunk.payload_bytes)
                 paced_frames += 1
         except asyncio.CancelledError:
             raise

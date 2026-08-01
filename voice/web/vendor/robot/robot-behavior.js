@@ -1,0 +1,212 @@
+// The listening-and-speaking behaviour layer: small movements that track the
+// CONVERSATION rather than the held emotion.
+//
+// The held emotion answers "how does it feel"; this layer answers "is it
+// engaged". A robot that holds one perfect pose while someone talks to it
+// reads as a screensaver. What separates a listener from a statue is small and
+// specific: the occasional head-cock, eyes that widen slightly toward the
+// speaker, a head that ticks along with the rhythm of its own speech, an
+// antenna flick when its mood actually changes.
+//
+// Everything here returns OFFSETS on ordinary channels, composed on top of
+// springs, autonomic noise and the servo. Nothing is written back into held
+// state, so the layer can be dropped without a trace — and every movement is
+// seeded, per the governing rule: electronic commands are deterministic,
+// physical mechanisms are repeatable, only biology gets true randomness.
+
+import { mulberry32 } from './autonomic.js';
+
+const clamp01 = (v) => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0);
+
+export function createBehavior({ seed = 1 } = {}) {
+  const rand = mulberry32(seed * 7919 + 3);
+
+  // --- speech envelope -------------------------------------------------------
+  // Fast attack, slow release: the lamps flare with a syllable and fade in the
+  // gap after it, which is what makes the glow read as THE VOICE rather than
+  // as a lamp that happens to flicker.
+  let envelope = 0;
+  let lastLevel = 0;
+
+  // --- emphasis ticks --------------------------------------------------------
+  // A local peak in the voice with a refractory window behind it is a stressed
+  // beat. The head answers with a small tick — alternating direction, so a run
+  // of beats reads as animated talk rather than repeated nodding at one side.
+  let refractory = 0;
+  // A tick is a SNAP to a small offset, a dead hold, and a snap back — three
+  // mechanical phases, not a decaying impulse. The first version decayed
+  // smoothly and read as organic wobble; a machine repositions and is still.
+  let tickTarget = 0;    // where the tick offset is commanded to be
+  let tickPos = 0;       // where it is
+  let tickHold = 0;      // seconds left before the return is commanded
+  let tickSign = 1;
+
+  // --- listening head-cock ---------------------------------------------------
+  // Listeners cock their heads occasionally and HOLD, they do not sway. The
+  // offset moves at a constant rate toward its target (a mechanism, not a
+  // spring) and re-decides every few seconds.
+  let cockTarget = 0;
+  let cock = 0;
+  let cockTimer = 0;
+
+  // --- wandering gaze --------------------------------------------------------
+  // Every minute or two the lenses take a real look at something else — a
+  // substantial glance held under a second, then back. The autonomic layer's
+  // micro-saccades keep the eyes alive up close; this is the occasional visible
+  // movement that reads across the room. Mechanical accent throughout: quick
+  // constant-rate glance out, dead hold, return.
+  // Two moves in the repertoire: a quick GLANCE (out, hold, back) and a slow
+  // SCAN — the gaze sweeps from one side to the other at reading pace, the way
+  // a camera head surveys a room. Mostly horizontal, occasionally vertical.
+  let wanderTimer = 45 + rand() * 75;   // first move inside ~2 minutes
+  let wanderHold = 0;
+  let wanderPhase = null;               // null | 'glance' | 'toStart' | 'sweep' | 'home'
+  let wanderTX = 0;
+  let wanderTY = 0;
+  let wanderX = 0;
+  let wanderY = 0;
+
+  // --- accents ---------------------------------------------------------------
+  let glowPop = 0;       // brief lens flare, from pulse() or an emotion change
+  let flick = 0;         // antenna impulse, decays fast
+  let flickSign = 1;
+
+  function onPulse(strength = 1) {
+    glowPop = Math.max(glowPop, 0.5 * clamp01(strength));
+    tickSign = -tickSign;
+    tickTarget = 0.012 * tickSign;
+    tickHold = 0.14;
+  }
+
+  function onEmotionChange(intensity = 1) {
+    flick = Math.max(flick, 0.6 + 0.4 * clamp01(intensity));
+    flickSign = -flickSign;
+    glowPop = Math.max(glowPop, 0.35);
+  }
+
+  /**
+   * Advance and return channel offsets for this frame.
+   *
+   * @param dt seconds
+   * @param state { presence, audioLevel }
+   */
+  function update(dt, { presence = null, audioLevel = 0 } = {}) {
+    const h = Math.min(Math.max(dt, 0), 0.05);
+    const level = clamp01(audioLevel);
+
+    // Envelope: attack in ~80ms, release in ~400ms.
+    const k = level > envelope ? Math.min(1, h / 0.08) : Math.min(1, h / 0.4);
+    envelope += (level - envelope) * k;
+
+    // Emphasis: a rise that crests above the envelope's recent shoulder, with
+    // at least 420ms since the last tick. Cheap peak detection, but speech is
+    // forgiving — what matters is that ticks land ON syllable stress and never
+    // machine-gun.
+    refractory = Math.max(0, refractory - h);
+    if (refractory === 0 && level > 0.28 && level > lastLevel + 0.06 && envelope > 0.2) {
+      tickSign = -tickSign;
+      // Live-review trajectory: 0.16 -> 0.09 -> 0.05 -> 0.025 -> 0.012. At a
+      // 7-degree cap this is under a tenth of a degree — subliminal by design.
+      tickTarget = 0.012 * tickSign;
+      tickHold = 0.14;
+      refractory = 0.7;
+    }
+    lastLevel = level;
+    // Snap toward the commanded offset at mechanical rate, exact arrival.
+    if (tickHold > 0) {
+      tickHold -= h;
+      if (tickHold <= 0) tickTarget = 0;
+    }
+    const dtick = tickTarget - tickPos;
+    const tickStep = 2.0 * h;
+    tickPos += Math.abs(dtick) <= tickStep ? dtick : Math.sign(dtick) * tickStep;
+
+    // Listening head-cock: only while the presence is actually `listening`.
+    if (presence === 'listening') {
+      cockTimer -= h;
+      if (cockTimer <= 0) {
+        // Hold roughly 2.5-5s per attitude; a third of the time return to
+        // level, so the cock reads as consideration rather than a stuck pose.
+        // Detented: attitudes land on fixed stops, the way indexed hardware
+        // does, rather than anywhere in a continuous range.
+        // Halved and narrowed: closer stops mean successive attitudes differ
+        // less — the variance was the complaint, not only the size.
+        const DETENTS = [0, 0.025, 0.035];
+        const pick = DETENTS[Math.floor(rand() * DETENTS.length)];
+        cockTarget = (rand() < 0.5 ? -1 : 1) * pick;
+        cockTimer = 2.5 + rand() * 2.5;
+      }
+    } else {
+      cockTarget = 0;
+      cockTimer = 0;
+    }
+    // Constant-rate approach, quick then DEAD still — a mechanism indexing to
+    // a stop. The earlier 1s glide read as soft; 0.4s reads as intent.
+    const dc = cockTarget - cock;
+    const step = 0.6 * h;
+    cock += Math.abs(dc) <= step ? dc : Math.sign(dc) * step;
+
+    // Wandering gaze.
+    wanderTimer -= h;
+    if (wanderTimer <= 0 && wanderPhase === null) {
+      wanderTimer = 60 + rand() * 60;   // the requested every-1-2-minutes
+      if (rand() < 0.5) {
+        wanderPhase = 'glance';
+        wanderTX = (rand() < 0.5 ? -1 : 1) * (0.3 + rand() * 0.35);
+        wanderTY = (rand() - 0.4) * 0.4;
+        wanderHold = 0.8 + rand() * 0.8;
+      } else {
+        // Scan: move quickly to one edge, then sweep slowly to the other.
+        wanderPhase = 'toStart';
+        const horizontal = rand() < 0.7;
+        const sign = rand() < 0.5 ? -1 : 1;
+        wanderTX = horizontal ? sign * 0.45 : 0;
+        wanderTY = horizontal ? 0 : sign * 0.3;
+      }
+    }
+    if (wanderPhase === 'glance' && wanderHold > 0) {
+      wanderHold -= h;
+      if (wanderHold <= 0) { wanderTX = 0; wanderTY = 0; wanderPhase = 'home'; }
+    }
+    // The sweep is the slow phase; every other move is a quick reposition.
+    const wStep = (wanderPhase === 'sweep' ? 0.3 : 2.5) * h;
+    const dwx = wanderTX - wanderX;
+    wanderX += Math.abs(dwx) <= wStep ? dwx : Math.sign(dwx) * wStep;
+    const dwy = wanderTY - wanderY;
+    wanderY += Math.abs(dwy) <= wStep ? dwy : Math.sign(dwy) * wStep;
+    if (wanderX === wanderTX && wanderY === wanderTY) {
+      if (wanderPhase === 'toStart') {
+        wanderPhase = 'sweep';
+        wanderTX = -wanderTX;
+        wanderTY = -wanderTY;
+      } else if (wanderPhase === 'sweep') {
+        wanderPhase = 'home';
+        wanderTX = 0;
+        wanderTY = 0;
+      } else if (wanderPhase === 'home') {
+        wanderPhase = null;
+      }
+    }
+
+    glowPop = Math.max(0, glowPop - h / 0.5);    // ~500ms decay
+    flick = Math.max(0, flick - h / 0.35);       // ~350ms decay
+
+    const attentive = presence === 'listening' ? 1 : 0;
+
+    return {
+      // Head: emphasis ticks while speaking, held cocks while listening.
+      headTilt: tickPos + cock,
+      // Lenses: the voice flares the lamps (eyeScaleY drives glow), listening
+      // widens them slightly — attention, in hardware.
+      eyeScaleY: envelope * 0.14 + glowPop * 0.10 + attentive * 0.05,
+      // Antennas: the flick on a mood change, split so the pair scissors.
+      browLY: flick * 0.45 * flickSign,
+      browRY: flick * 0.45 * -flickSign,
+      // Gaze: the occasional real glance away, on top of the micro-saccades.
+      pupilX: wanderX,
+      pupilY: wanderY,
+    };
+  }
+
+  return { update, onPulse, onEmotionChange };
+}

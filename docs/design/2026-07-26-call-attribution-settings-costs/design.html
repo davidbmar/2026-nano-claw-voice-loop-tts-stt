@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: /calls Provider Truth, Durable Phone Settings, Detailed Costs</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, "Segoe UI", sans-serif; max-width: 860px;
+         margin: 2rem auto; padding: 0 1.25rem; color: #1f2933; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e4e7eb; background: #16211f; } }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #2f855a; padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; color: #2f855a; }
+  h3 { font-size: 1.02rem; margin-top: 1.4rem; }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: rgba(47,133,90,.12); padding: .1em .35em; border-radius: 4px; }
+  pre code { display: block; padding: .8em 1em; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92em; }
+  th, td { border: 1px solid rgba(128,128,128,.35); padding: .4em .6em; text-align: left; }
+  .meta { color: #6b7a76; font-size: .9em; }
+  .decision { border-left: 4px solid #2f855a; padding: .3em .9em; margin: .8em 0;
+              background: rgba(47,133,90,.07); }
+  li { margin: .25em 0; }
+</style>
+</head>
+<body>
+<h1>/calls Panel: Provider Truth, Durable Phone Settings, Detailed Costs</h1>
+<p class="meta">2026-07-26 · branch <code>call-review-panel</code> · markdown source:
+<a href="design.md">design.md</a></p>
+
+<h2>Context</h2>
+<p>Reviewing a live call, David suspected the phone line's TTS was secretly Google
+("sounds like Gemini 3.1") despite the panel implying LuxTTS, and asked to fix the
+attribution, do the same for STT, and improve the per-call cost breakdown. He also
+observed the console at nano.chattychapters.com has phone settings the line
+"doesn't seem to be taking."</p>
+
+<p>Investigation established the ground truth:</p>
+<ul>
+  <li><strong>Audio is genuinely local.</strong> TTS: voice id → <code>voice_catalog</code>
+      engine → <code>voice/tts.py:279-303</code> (luxtts→:8301, kokoro→:8300, piper
+      in-process). STT: local faster-whisper (:8200, size from
+      <code>NANO_CLAW_PHONE_STT_SIZE=medium</code>). There is no cloud TTS/STT code in
+      the repo.</li>
+  <li><strong>But the words can be Gemini's.</strong> The conversation LLM falls back
+      <code>ollama/gemma4:e2b → gemini/gemini-flash-lite-latest → claude-haiku-4-5</code>
+      on a 4s first-token timeout (<code>src/providers/index.ts:170-183,222-258</code>),
+      and nothing records which model actually served a turn —
+      <code>debug.model</code> in the SSE stream is the <em>requested</em> model
+      (<code>src/api/server.ts:577,941</code>). The ear-test was likely catching
+      fallback turns; today that's unverifiable.</li>
+  <li><strong>Settings amnesia is real.</strong> Console phone settings
+      (voice/model/speed/STT size/speech-prep via <code>/api/phone/config</code>, VAD via
+      <code>/api/phone/vad</code>) live in in-memory maps
+      (<code>voice/phone.py:184-190,304-318</code>) wiped on every container restart —
+      the watchdog restarted the stack twice on 2026-07-26 alone.
+      <code>NANO_CLAW_PHONE_MODEL</code>/<code>SPEED</code> are also missing from
+      <code>run.sh</code>'s env passthrough (:290-315).</li>
+  <li><strong>Cost rows discard detail.</strong> <code>cost_ledger</code> accumulates by
+      (component, unit_kind, <em>model</em>) but drops model on write
+      (<code>voice/cost_ledger.py:62-69,729-740</code>); the panel renders raw floats
+      with no labels (<code>voice/web/calls.html:520-558</code>).</li>
+</ul>
+
+<div class="decision"><strong>Decisions (locked with David):</strong> persist settings to
+the data volume; keep the LLM fallback chain but surface per-turn attribution;
+per-component + per-model cost detail.</div>
+
+<h2>Workstream A — Served-model attribution (TS + Python)</h2>
+<ol>
+  <li><code>src/types.ts</code> — add <code>model?: string</code> to
+      <code>LLMResponse</code> (:165) and the <code>done</code> StreamEvent variant
+      (:224-228).</li>
+  <li><code>src/providers/index.ts</code> — in <code>complete()</code> (:196-224) return
+      <code>{...response, model: m}</code> per attempt; in <code>completeStream()</code>
+      (:232-260) wrap each attempt's generator, adding <code>model: m</code> to
+      <code>done</code> events. (Keeps <code>fallback.ts</code> pure.)</li>
+  <li><code>src/api/server.ts</code> — capture served model in the streaming loop
+      (:925-928); <code>DebugInfo</code> (:65-118) gets <code>model</code> = served model
+      and new <code>requestedModel?</code> set only when it differs; both build sites
+      (:577, :941). <code>tool_pending</code> emitters reuse the same debug object.</li>
+  <li><code>voice/phone.py</code> <code>_stream_reply</code> (:872-1046) — capture
+      <code>debug.model</code>/<code>debug.requestedModel</code> from SSE
+      <code>final</code>/<code>tool_pending</code> events (and the non-stream JSON
+      fallback :929-936); emit <code>model</code>, <code>modelRequested</code>,
+      <code>modelFallback</code> on the <code>assistant_turn</code> event (:1033-1043).
+      Scheduler branch (:836-852) adds <code>model</code> from the runner's
+      <code>_model</code> attr.</li>
+  <li><code>call_start</code> payload (:445-457) — add <code>sttSize</code>,
+      <code>speed</code>, <code>model</code>, catalog <code>engine</code> so every call
+      is self-describing.</li>
+</ol>
+<p><code>voice/cost_ledger.py:918-931</code> already reads <code>debug.get("model")</code>
+into the ledger accumulation key — the TS fix flows into cost attribution with no
+extra work.</p>
+
+<h2>Workstream B — Durable phone settings</h2>
+<ol>
+  <li><code>voice/phone.py</code>: <code>_SETTINGS_KEYS</code> = {VOICE, MODEL, SPEED,
+      STT_SIZE, SPEECH_PREPARATION} + persist VAD (<code>NANO_CLAW_PHONE_VAD</code>) in
+      the same file. Path via <code>NANO_CLAW_PHONE_SETTINGS_PATH</code>, default
+      <code>/app/data/phone-settings.json</code>. Shared validators between POST handler
+      and loader. <code>_load_persisted_overrides()</code>: unknown keys ignored, bad
+      values dropped (one warning each), any exception leaves overrides untouched — a
+      corrupt file can never brick call handling; called from
+      <code>register_phone_routes</code> after the <code>phone_enabled()</code> gate.
+      <code>_persist_overrides()</code>: atomic tmp + <code>os.replace</code>,
+      best-effort; write-through from the config and VAD POST handlers; a cleared model
+      persists as absence.</li>
+  <li><code>run.sh</code> passthrough block (:290-310) — add
+      <code>-e NANO_CLAW_PHONE_MODEL</code> and <code>-e NANO_CLAW_PHONE_SPEED</code>.
+      Precedence: persisted console overrides &gt; .env &gt; code default (how
+      <code>_cfg</code> already works).</li>
+</ol>
+
+<h2>Workstream C — Cost breakdown with details</h2>
+<ol>
+  <li><code>voice/cost_ledger.py</code>: <code>model TEXT DEFAULT ''</code> in
+      <code>_SCHEMA</code> + idempotent migration in <code>ensure_schema</code> via
+      <code>PRAGMA table_info</code> guard (live-volume safe; old rows read back
+      <code>''</code> → "unattributed"). <code>LedgerEntry</code> gains
+      <code>model</code>; <code>write_call</code> writes it; <code>finish_call</code>
+      stops dropping the accumulation key's model. Phone tracking: STT rows
+      <code>whisper/&lt;stt_size&gt;</code>; TTS rows
+      <code>&lt;catalog engine&gt;/&lt;voice_id&gt;</code> (e.g.
+      <code>luxtts/lux_george</code>; in-process piper <em>fallback</em> inside tts.py is
+      not distinguished — documented caveat). New <code>component_meta()</code>: pricing
+      labels/colors/math per ledger component, <code>{}</code> on failure.</li>
+  <li><code>voice/call_review.py</code> <code>timeline_handler</code> (:126-146) — add
+      <code>"costMeta": cost_ledger.component_meta()</code>.</li>
+  <li><code>voice/web/calls.html</code>: <code>call_start</code> renders a
+      <strong>Providers</strong> line (TTS engine/voice · STT whisper/size · VAD · codec
+      · speed · model); agent bubbles get a model chip with a distinct "(fallback)"
+      style; <code>renderCost</code> rewrite — component groups (label + color swatch)
+      → per-model subrows, formatted units ("41.6s audio", "1,843 chars", "12.3k in /
+      800 out"), "unpriced" marker instead of silent $0, note that telephony + infra
+      bill the same connected minutes, total row kept.</li>
+</ol>
+
+<h2>Tests</h2>
+<ul>
+  <li><code>test_cost_ledger.py</code>: model roundtrip; legacy 8-column DB migration
+      (idempotent, old rows <code>model=''</code>); STT/TTS engine strings
+      (monkeypatch <code>_cfg</code>); <code>_capture</code> attributes fallback model;
+      <code>component_meta()</code> happy + bad path.</li>
+  <li>New <code>test_phone_settings_persistence.py</code>: POST writes file; fresh load
+      restores exactly known keys; unknown/bad/corrupt handling; cleared model stays
+      cleared.</li>
+  <li><code>test_phone_gateway.py</code>: settings path pointed at tmp_path in the
+      fixture that already clears <code>_overrides</code>.</li>
+  <li><code>test_call_review_api.py</code>: payload has <code>costMeta</code>; cost rows
+      carry <code>model</code>.</li>
+  <li>TS: <code>done</code> event / <code>LLMResponse</code> carry <code>model</code>;
+      <code>debug.model</code> reflects the fallback winner; <code>requestedModel</code>
+      present only on fallback.</li>
+</ul>
+<p class="meta">Known pre-existing order-dependent flakes (not ours):
+<code>test_history_api.py::test_all_completion_paths_and_partial_error_rules</code>,
+two in <code>test_tts_sentence_pipeline.py</code>.</p>
+
+<h2>Verification</h2>
+<ol>
+  <li><code>pytest tests/python -q</code> + <code>npm test</code> green modulo known
+      flakes.</li>
+  <li>Low-downtime rebuild + redeploy; then mandatory
+      <code>.venv-test/bin/python scripts/phone_loopback_test.py "…"</code> →
+      "FIRST ANSWER AUDIO".</li>
+  <li>In-container: <code>PRAGMA table_info(cost_ledger)</code> shows <code>model</code>;
+      <code>/costs</code> still renders; old calls on <code>/calls</code> still open.</li>
+  <li>Settings: set voice/model/speed/VAD in console → check
+      <code>/app/data/phone-settings.json</code> → restart container →
+      <code>GET /api/phone/config</code> returns persisted values.</li>
+  <li>Real test call: Providers line under call start; per-turn model chips (stop
+      ollama briefly to force a fallback → "(fallback)" chip + correct ledger model
+      row); cost card shows labels, per-model subrows, formatted units, the
+      telephony/infra note, total consistent with <code>/costs</code>.</li>
+</ol>
+
+<p class="meta">Sequencing: C1 (schema) → A (TS→py) → B → C2-3 → tests interleaved →
+docs. Investigation evidence (tap timelines, loopback baselines, watchdog logs) in the
+2026-07-26 session; see also <code>docs/design/2026-07-25-call-review-panel.md</code>.</p>
+</body>
+</html>

@@ -5,7 +5,15 @@ from types import SimpleNamespace
 import numpy as np
 
 from voice import phone, server
-from voice.processing_audio import CHIME_SECONDS, PEAK_AMPLITUDE, SAMPLE_RATE, processing_chime
+from voice.processing_audio import (
+    CHIME_SECONDS,
+    PEAK_AMPLITUDE,
+    SAMPLE_RATE,
+    TICK_PEAK_AMPLITUDE,
+    TICK_SECONDS,
+    processing_chime,
+    thinking_tick,
+)
 
 
 def run(coro):
@@ -20,6 +28,20 @@ def test_processing_chime_is_quiet_click_free_pcm16():
     assert samples[0] == 0
     assert np.max(np.abs(samples.astype(np.int32))) <= PEAK_AMPLITUDE
     assert processing_chime() is pcm
+
+
+def test_thinking_tick_is_quiet_click_free_pcm16():
+    pcm = thinking_tick()
+    samples = np.frombuffer(pcm, dtype=np.int16)
+
+    assert len(samples) == int(SAMPLE_RATE * TICK_SECONDS)
+    assert samples[0] == 0
+    assert np.max(np.abs(samples.astype(np.int32))) <= TICK_PEAK_AMPLITUDE
+    assert TICK_PEAK_AMPLITUDE < PEAK_AMPLITUDE  # ticks sit under the chime
+    # Fully decayed tail so the 0.5s repeat cadence cannot click.
+    tail = samples[-int(SAMPLE_RATE * 0.002):]
+    assert np.max(np.abs(tail.astype(np.int32))) < TICK_PEAK_AMPLITUDE * 0.05
+    assert thinking_tick() is pcm
 
 
 def test_phone_processing_marker_bypasses_tts():
@@ -64,6 +86,9 @@ class FakeSession:
         self._history_agent_parts = []
         self._turn = {}
         self._backoff = SimpleNamespace(reset=lambda: None)
+        self._deep_projection_pending = False
+        self._paused = False
+        self.resumed = 0
 
     def set_stream_task(self, _task):
         return None
@@ -84,6 +109,13 @@ class FakeSession:
 
     def stop_speaking(self):
         return None
+
+    def is_paused(self):
+        return self._paused
+
+    def resume_speaking(self):
+        self._paused = False
+        self.resumed += 1
 
 
 def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch):
@@ -106,6 +138,21 @@ def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch
                     "completedSteps": 0,
                     "maxSteps": 6,
                     "retrievalQueries": 1,
+                    "currentPass": 1,
+                    "completedPasses": 0,
+                    "maxPasses": 6,
+                    "retrievalPlanned": 5,
+                    "retrievalCompleted": 5,
+                    "evidenceItems": 19,
+                    "model": {
+                        "provider": "deepseek",
+                        "name": "deepseek-v4-pro",
+                        "thinking": "enabled",
+                        "effort": "high",
+                    },
+                    "artifactStatus": "not_applicable",
+                    "phaseStartedAt": "2026-07-22T01:00:54Z",
+                    "heartbeatAt": "2026-07-22T01:01:34Z",
                 },
             ),
             ("delta", {"text": "The two phases form a sequence."}),
@@ -127,4 +174,148 @@ def test_browser_voice_speaks_acknowledgement_and_plays_progress_cue(monkeypatch
     assert session.pcm == [processing_chime()]
     assert session.total_bytes == 200 + len(processing_chime())
     assert any(message["type"] == "deep_thinking" for message in websocket.messages)
-    assert any(message["type"] == "deep_progress" for message in websocket.messages)
+    progress = next(
+        message for message in websocket.messages if message["type"] == "deep_progress"
+    )
+    assert progress["currentPass"] == 1
+    assert progress["retrievalCompleted"] == 5
+    assert progress["evidenceItems"] == 19
+    assert progress["model"]["name"] == "deepseek-v4-pro"
+    assert progress["heartbeatAt"] == "2026-07-22T01:01:34Z"
+    assert any(
+        message["type"] == "deep_projection_ready"
+        for message in websocket.messages
+    )
+    assert session._deep_projection_pending is False
+
+
+def test_deep_projection_barge_in_is_suppressed_until_answer_audio():
+    websocket = FakeWebSocket()
+    session = FakeSession()
+    session._deep_projection_pending = True
+    session._paused = True
+
+    suppressed = run(
+        server._suppress_deep_projection_barge_in(websocket, session)
+    )
+
+    assert suppressed is True
+    assert session.resumed == 1
+    assert websocket.messages == [
+        {
+            "type": "barge_in_suppressed",
+            "reason": "deep_projection_pending",
+        }
+    ]
+
+    session._deep_projection_pending = False
+    assert (
+        run(server._suppress_deep_projection_barge_in(websocket, session))
+        is False
+    )
+
+
+# ── Web console: streaming prepared speech ──────────────────────────────────
+
+
+def _drain_sse(session, response):
+    ws = FakeWebSocket()
+
+    async def exercise():
+        await server._consume_sse(ws, session, response)
+
+    run(exercise())
+    return ws
+
+
+def test_web_prepared_streaming_speaks_sentences_before_final():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    full = "One is done. Two is next."
+
+    class GatedResponse:
+        async def aiter_lines(self):
+            for line in (
+                "event: delta",
+                'data: {"text": "One is done. Two is next. "}',
+                "",
+            ):
+                yield line
+            for _ in range(200):
+                if session.chunks:
+                    break
+                await asyncio.sleep(0.005)
+            assert session.chunks, "nothing was spoken before final arrived"
+            final = json.dumps({"response": full})
+            for line in ("event: final", f"data: {final}", ""):
+                yield line
+
+    ws = _drain_sse(session, GatedResponse())
+    assert session.chunks == [c.text for c in compile_speech(full).chunks]
+    plans = [m for m in ws.messages if m.get("type") == "speech_plan"]
+    assert plans and plans[-1]["chunkCount"] == len(session.chunks)
+    # The transcript still received the raw deltas.
+    assert any(m.get("type") == "agent_reply_delta" for m in ws.messages)
+
+
+def test_web_prepared_streaming_mismatch_never_double_speaks():
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    response = FakeResponse(
+        [
+            ("delta", {"text": "Alpha beta gamma. Delta epsilon "}),
+            ("final", {"response": "A completely rewritten reply."}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == ["Alpha beta gamma."]
+
+
+def test_web_batch_mode_speaks_only_at_final():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "batch"
+    session.prepare_speech = compile_speech
+    full = "One is done. Two is next. Three lands."
+    response = FakeResponse(
+        [
+            ("delta", {"text": "One is done. Two is next. "}),
+            ("delta", {"text": "Three lands."}),
+            ("final", {"response": full}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == [c.text for c in compile_speech(full).chunks]
+
+
+def test_web_set_speech_mode_accepts_batch():
+    from voice.webrtc import Session
+
+    session = Session.__new__(Session)
+    session.set_speech_mode("batch")
+    assert session.speech_mode == "batch"
+    try:
+        session.set_speech_mode("bogus")
+        raise AssertionError("bogus mode accepted")
+    except ValueError:
+        pass
+
+
+def test_web_prepared_streaming_honors_held_flag():
+    from voice.speech_preparer import compile_speech
+
+    session = FakeSession()
+    session.speech_mode = "prepared"
+    session.prepare_speech = compile_speech
+    rewritten = "The rewritten reply. It is authoritative."
+    response = FakeResponse(
+        [
+            ("delta", {"text": "Pre-rewrite text. More.", "held": True}),
+            ("final", {"response": rewritten}),
+        ]
+    )
+    _drain_sse(session, response)
+    assert session.chunks == [c.text for c in compile_speech(rewritten).chunks]

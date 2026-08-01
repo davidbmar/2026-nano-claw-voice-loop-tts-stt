@@ -2,9 +2,9 @@ import { Config } from '../config/schema';
 import { Message, LLMResponse, ToolDefinition, ProviderConfig, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
-import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider } from './base';
+import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider, OllamaProvider } from './base';
 import { findProviderByModel } from './registry';
-import { completeWithFallback, streamWithFallback } from './fallback';
+import { completeWithFallback, streamWithFallback, streamWithHedge } from './fallback';
 
 /** Gateway providers that can route an arbitrary model id (so a fallback model
  * is reachable even without its own direct provider key). */
@@ -97,6 +97,9 @@ export class ProviderManager {
           throw new ProviderError('vLLM provider requires apiBase configuration');
         }
         provider = new OpenAIProvider(providerConfig.apiKey, providerConfig.apiBase);
+        break;
+      case 'ollama':
+        provider = new OllamaProvider(providerConfig.apiKey, providerConfig.apiBase);
         break;
       default:
         throw new ProviderError(`Unknown provider: ${providerName}`);
@@ -201,19 +204,20 @@ export class ProviderManager {
     return completeWithFallback(
       chain.map((m) => ({
         label: m,
-        run: () => {
+        run: async () => {
           const providerName = this.detectProvider(m);
           logger.info(
             { provider: providerName, model: m, messageCount: messages.length },
             'Completing chat'
           );
-          return this.getProviderInstance(providerName).complete(
+          const response = await this.getProviderInstance(providerName).complete(
             messages,
             m,
             temperature,
             maxTokens,
             tools
           );
+          return { ...response, model: m };
         },
       })),
       this.fallbackTimeoutMs()
@@ -234,25 +238,42 @@ export class ProviderManager {
     tools?: ToolDefinition[]
   ): AsyncGenerator<StreamEvent> {
     const chain = this.resolveModelChain(model);
-    yield* streamWithFallback(
-      chain.map((m) => ({
-        label: m,
-        run: () => {
-          const providerName = this.detectProvider(m);
-          logger.info(
-            { provider: providerName, model: m, messageCount: messages.length },
-            'Completing chat (stream)'
-          );
-          return this.getProviderInstance(providerName).completeStream(
+    const attempts = chain.map((m) => ({
+      label: m,
+      run: () => {
+        const providerName = this.detectProvider(m);
+        logger.info(
+          { provider: providerName, model: m, messageCount: messages.length },
+          'Completing chat (stream)'
+        );
+        return tagDoneWithModel(
+          this.getProviderInstance(providerName).completeStream(
             messages,
             m,
             temperature,
             maxTokens,
             tools
-          );
-        },
-      })),
-      this.fallbackTimeoutMs()
-    );
+          ),
+          m
+        );
+      },
+    }));
+    const hedgeMs = this.config.agents?.defaults?.fallbackHedgeMs;
+    if (hedgeMs != null && attempts.length > 1) {
+      yield* streamWithHedge(attempts, hedgeMs);
+    } else {
+      yield* streamWithFallback(attempts, this.fallbackTimeoutMs());
+    }
+  }
+}
+
+/** Stamp `done` events with the model that streamed them so consumers can
+ * attribute the turn even after a fallback switch. Pass-through otherwise. */
+async function* tagDoneWithModel(
+  gen: AsyncGenerator<StreamEvent>,
+  model: string
+): AsyncGenerator<StreamEvent> {
+  for await (const event of gen) {
+    yield event.type === 'done' ? { ...event, model } : event;
   }
 }

@@ -91,6 +91,149 @@ function isFirstToken(ev: StreamEvent): boolean {
  * next. Once the first event is emitted we are committed: no further switching,
  * and a later error propagates (the partial reply is already spoken).
  */
+interface HedgeRacer {
+  label: string;
+  gen: AsyncGenerator<StreamEvent>;
+  /** Pre-first-token events (in practice only an empty reply's `done`). */
+  buffer: StreamEvent[];
+  settled: boolean;
+}
+
+/**
+ * Hedged streaming: attempt 0 starts immediately; each later attempt starts
+ * `hedgeDelayMs` after the previous one UNLESS a first token has already
+ * arrived — and starts at once when a running attempt dies, so an erroring
+ * primary never makes the caller wait out the delay. All in-flight attempts
+ * race to the first meaningful token; the winner takes the turn and every
+ * other attempt is cancelled immediately (its request aborts, so a losing
+ * local model stops burning the GPU that TTS/STT need). The no-double-speak
+ * rule is identical to streamWithFallback: after the first token we are
+ * committed, and a later error propagates. An attempt that ends with no
+ * tokens drops out; if every attempt does, the last empty reply is surfaced
+ * so usage accounting still sees its `done` event. If every attempt errors
+ * before a commit, the last error is thrown.
+ */
+export async function* streamWithHedge(
+  attempts: Array<StreamAttempt>,
+  hedgeDelayMs: number,
+): AsyncGenerator<StreamEvent> {
+  if (attempts.length === 0) throw new Error('streamWithHedge: no attempts');
+
+  type Win = { racer: HedgeRacer; firstEvent?: StreamEvent; index: number };
+  let decideWin!: (w: Win) => void;
+  let decideFail!: (e: unknown) => void;
+  const arbitration = new Promise<Win>((resolve, reject) => {
+    decideWin = resolve;
+    decideFail = reject;
+  });
+  let decided = false;
+
+  const racers: HedgeRacer[] = [];
+  let started = 0;
+  let settledCount = 0;
+  let lastError: unknown = new Error('streamWithHedge: no attempt produced output');
+  let lastEmpty: HedgeRacer | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const scheduleNext = () => {
+    if (decided || started >= attempts.length) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(startNext, hedgeDelayMs);
+  };
+
+  const startNext = () => {
+    if (decided || started >= attempts.length) return;
+    const index = started++;
+    const attempt = attempts[index];
+    const racer: HedgeRacer = {
+      label: attempt.label,
+      gen: attempt.run(),
+      buffer: [],
+      settled: false,
+    };
+    racers.push(racer);
+    if (index > 0) {
+      logger.warn({ model: attempt.label, hedgeDelayMs }, 'Hedge attempt started');
+    }
+    void pump(racer, index);
+    scheduleNext();
+  };
+
+  const pump = async (racer: HedgeRacer, index: number) => {
+    try {
+      while (true) {
+        const step = await racer.gen.next();
+        if (decided) return; // lost while awaiting; cancellation is under way
+        if (step.done) break; // ended with no first token: an empty reply
+        if (isFirstToken(step.value)) {
+          decided = true;
+          if (timer) clearTimeout(timer);
+          decideWin({ racer, firstEvent: step.value, index });
+          return; // the main body takes over pulling this generator
+        }
+        racer.buffer.push(step.value);
+      }
+      lastEmpty = racer;
+    } catch (error) {
+      if (decided) return;
+      lastError = error;
+      logger.warn(
+        { model: racer.label, error: (error as Error).message },
+        'Hedge attempt failed before first token',
+      );
+    }
+    racer.settled = true;
+    settledCount++;
+    if (decided) return;
+    if (started < attempts.length) {
+      startNext(); // a dead racer hands its slot to the next model immediately
+    } else if (settledCount === started) {
+      decided = true;
+      if (timer) clearTimeout(timer);
+      if (lastEmpty) {
+        decideWin({ racer: lastEmpty, index: racers.indexOf(lastEmpty) });
+      } else {
+        decideFail(lastError);
+      }
+    }
+  };
+
+  const cancelOthers = (winner?: HedgeRacer) => {
+    for (const racer of racers) {
+      if (racer === winner || racer.settled) continue;
+      void racer.gen.return(undefined as unknown as StreamEvent).catch(() => {});
+    }
+  };
+
+  startNext();
+  let win: Win;
+  try {
+    win = await arbitration;
+  } catch (error) {
+    cancelOthers();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  cancelOthers(win.racer);
+  if (win.index > 0 && win.firstEvent) {
+    logger.warn({ model: win.racer.label }, 'Streaming via hedged fallback model');
+  }
+  try {
+    for (const event of win.racer.buffer) yield event;
+    if (!win.firstEvent) return; // every attempt was an empty reply
+    yield win.firstEvent;
+    while (true) {
+      const step = await win.racer.gen.next();
+      if (step.done) return;
+      yield step.value;
+    }
+  } finally {
+    // The consumer may bail mid-reply (barge-in): close the winner too.
+    void win.racer.gen.return(undefined as unknown as StreamEvent).catch(() => {});
+  }
+}
+
 export async function* streamWithFallback(
   attempts: Array<StreamAttempt>,
   timeoutMs: number,
@@ -135,7 +278,8 @@ export async function* streamWithFallback(
         try {
           await gen.return(undefined as unknown as StreamEvent);
         } catch {
-          /* ignore cleanup errors */
+          /* health-ok: best-effort close of an abandoned stream; the failed
+             attempt itself was already logged above */
         }
       }
     }

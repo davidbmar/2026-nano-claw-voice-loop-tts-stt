@@ -157,6 +157,23 @@ def record_call_end(conn, call_id: str) -> None:
         log.exception("metrics record_call_end failed")
 
 
+def record_call_end_if_open(conn, call_id: str) -> None:
+    """Set ended_at only when no end was recorded — calls without a hangup
+    webhook (loopback tests, web sessions, dropped sockets) still get a
+    duration; a webhook-recorded end is never overwritten."""
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE phone_calls SET ended_at = datetime('now')"
+            " WHERE call_id = ? AND ended_at IS NULL",
+            (call_id,),
+        )
+        conn.commit()
+    except Exception:
+        log.exception("metrics record_call_end_if_open failed")
+
+
 def bump_call_turns(conn, call_id: str) -> None:
     if conn is None:
         return

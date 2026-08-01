@@ -176,6 +176,7 @@ def test_handler_binds_binary_audio_to_its_server_owned_session(monkeypatch):
     session = CaptureSession.last
     assert socket is not None and session is not None
     ack = next(message for message in socket.messages if message["type"] == "hello_ack")
+    assert ack["appVersion"] == server.APP_VERSION
     assert ack["wsAudio"] is True
     assert ack["wsAudioFormat"] == wire_format()
     assert any(message["type"] == "mic_audio_ready" for message in socket.messages)

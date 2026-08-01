@@ -14,6 +14,7 @@ Supply-chain pins (see .gstack/security-reports/2026-07-17-luxtts-supply-chain.j
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -55,6 +56,11 @@ if str(REPO_DIR) not in sys.path:
 _models = None      # (model, feature_extractor, vocos, tokenizer, transcriber)
 _prompts: dict = {}  # voice_id -> encoded prompt tuple
 _device: str | None = None
+# Serialize model load + prompt encode. Two threads loading the model onto MPS
+# at once (e.g. the prewarm thread racing an incoming synth) corrupts the load
+# into "Cannot copy out of meta tensor". Reentrant so _get_prompt can hold it
+# while calling _get_models. The cached fast-paths run outside the lock.
+_load_lock = threading.RLock()
 
 
 def _pick_device() -> str:
@@ -81,30 +87,34 @@ def _snapshot_path() -> str:
 
 def _get_models():
     global _models
-    if _models is not None:
+    if _models is not None:  # fast path, no lock once loaded
         return _models
 
-    if not VERIFIED_MARKER.exists():
-        raise RuntimeError(
-            "lux-service/.verified missing — run lux-service/setup.sh first "
-            "(it pickle-scans the pinned model weights before first load)"
+    with _load_lock:
+        if _models is not None:  # another thread finished the load while we waited
+            return _models
+
+        if not VERIFIED_MARKER.exists():
+            raise RuntimeError(
+                "lux-service/.verified missing — run lux-service/setup.sh first "
+                "(it pickle-scans the pinned model weights before first load)"
+            )
+
+        from zipvoice.modeling_utils import load_models_gpu
+
+        device = _pick_device()
+        model_path = _snapshot_path()
+        log.info("Loading LuxTTS models (device=%s, snapshot=%s) ...", device, model_path)
+        start = time.time()
+        model, feature_extractor, vocos, tokenizer, transcriber = load_models_gpu(
+            model_path=model_path, device=device
         )
-
-    from zipvoice.modeling_utils import load_models_gpu
-
-    device = _pick_device()
-    model_path = _snapshot_path()
-    log.info("Loading LuxTTS models (device=%s, snapshot=%s) ...", device, model_path)
-    start = time.time()
-    model, feature_extractor, vocos, tokenizer, transcriber = load_models_gpu(
-        model_path=model_path, device=device
-    )
-    # Match the upstream LuxTTS wrapper's vocoder settings (luxvoice.py).
-    vocos.freq_range = 12000
-    vocos.return_48k = True
-    _models = (model, feature_extractor, vocos, tokenizer, transcriber)
-    log.info("LuxTTS ready in %.1fs", time.time() - start)
-    return _models
+        # Match the upstream LuxTTS wrapper's vocoder settings (luxvoice.py).
+        vocos.freq_range = 12000
+        vocos.return_48k = True
+        _models = (model, feature_extractor, vocos, tokenizer, transcriber)
+        log.info("LuxTTS ready in %.1fs", time.time() - start)
+        return _models
 
 
 def _list_voices() -> list[dict]:
@@ -121,7 +131,7 @@ def _list_voices() -> list[dict]:
 
 def _get_prompt(voice_id: str):
     """Encode a reference wav once (Whisper + fbank) and cache the result."""
-    if voice_id in _prompts:
+    if voice_id in _prompts:  # fast path
         return _prompts[voice_id]
 
     wav_path = VOICES_DIR / f"{voice_id}.wav"
@@ -130,14 +140,17 @@ def _get_prompt(voice_id: str):
 
     from zipvoice.modeling_utils import process_audio
 
-    model, feature_extractor, vocos, tokenizer, transcriber = _get_models()
-    log.info("Encoding reference prompt for %s ...", voice_id)
-    prompt = process_audio(
-        str(wav_path), transcriber, tokenizer, feature_extractor,
-        _pick_device(), target_rms=0.01, duration=5,
-    )
-    _prompts[voice_id] = prompt
-    return prompt
+    with _load_lock:  # serialize with the model load and other encodes on MPS
+        if voice_id in _prompts:
+            return _prompts[voice_id]
+        model, feature_extractor, vocos, tokenizer, transcriber = _get_models()
+        log.info("Encoding reference prompt for %s ...", voice_id)
+        prompt = process_audio(
+            str(wav_path), transcriber, tokenizer, feature_extractor,
+            _pick_device(), target_rms=0.01, duration=5,
+        )
+        _prompts[voice_id] = prompt
+        return prompt
 
 
 def _prewarm() -> None:
@@ -172,9 +185,14 @@ async def list_voices():
     return {"voices": _list_voices()}
 
 
-def _synthesize_pcm(text: str, voice_id: str, speed: float) -> bytes:
+def _synthesize_pcm(text: str, voice_id: str, speed: float, tail_pad: int = 0) -> bytes:
     """Blocking LuxTTS synthesis; runs on a threadpool worker so /health and
-    concurrent requests aren't blocked by the GPU/CPU-bound generate call."""
+    concurrent requests aren't blocked by the GPU/CPU-bound generate call.
+
+    tail_pad appends N extra generation frames that repeat the final token's
+    condition, so the last word finishes its release instead of being clipped by
+    the duration predictor — without slowing the rest of the utterance.
+    """
     from zipvoice.modeling_utils import generate
 
     prompt_tokens, prompt_features_lens, prompt_features, prompt_rms = _get_prompt(voice_id)
@@ -185,6 +203,7 @@ def _synthesize_pcm(text: str, voice_id: str, speed: float) -> bytes:
             prompt_tokens, prompt_features_lens, prompt_features, prompt_rms,
             text, model, vocos, tokenizer,
             num_step=4, guidance_scale=3.0, speed=speed, t_shift=0.5, target_rms=0.01,
+            tail_pad_frames=tail_pad,
         )
     except RuntimeError as exc:
         # Borderline duration prediction on tiny chunks can yield fewer frames
@@ -197,6 +216,7 @@ def _synthesize_pcm(text: str, voice_id: str, speed: float) -> bytes:
             prompt_tokens, prompt_features_lens, prompt_features, prompt_rms,
             text, model, vocos, tokenizer,
             num_step=4, guidance_scale=3.0, speed=speed * 0.5, t_shift=0.5, target_rms=0.01,
+            tail_pad_frames=tail_pad,
         )
     audio = wav.cpu().numpy().squeeze().astype(np.float32)
     return np.clip(audio * 32767.0, -32768, 32767).astype(np.int16).tobytes()
@@ -209,6 +229,12 @@ async def synthesize(request: Request):
     text = (payload.get("text") or "").strip()
     voice = payload.get("voice") or "lux_heart"
     speed = float(payload.get("speed") or 1.0)
+    # Tail-widen: append render frames to the last token so the final word isn't
+    # clipped by the duration predictor. Default 24 was tuned by ear on Heart
+    # (recovers "promise"/"less" at normal speed, no artifact on clean endings).
+    # Payload overrides the env default so it can be calibrated live / per voice.
+    _tail_default = int(os.environ.get("LUX_TAIL_PAD_FRAMES", "24") or 24)
+    tail_pad = int(payload.get("tail_pad_frames", _tail_default) or 0)
 
     if not text:
         return Response(content=b"", headers={"X-Sample-Rate": str(LUX_RATE)})
@@ -218,7 +244,7 @@ async def synthesize(request: Request):
 
     start = time.time()
     try:
-        pcm = await run_in_threadpool(_synthesize_pcm, text, voice, speed)
+        pcm = await run_in_threadpool(_synthesize_pcm, text, voice, speed, tail_pad)
     except RuntimeError as exc:
         log.error("Synthesis unavailable: %s", exc)
         return Response(status_code=503, content=str(exc).encode())

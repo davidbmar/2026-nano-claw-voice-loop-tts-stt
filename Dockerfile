@@ -33,6 +33,11 @@ RUN if [ -f voice/requirements.lock ]; then \
 # resolves here — without it NANO_CLAW_VOICE_FLOW=scheduler silently no-ops.
 COPY scripts/scheduling_eval/ scripts/scheduling_eval/
 
+# Operator diagnostics that must run where the data lives. The call taps are
+# inside the container at /app/data/phone-taps, so a report over them is
+# useless on the host.
+COPY scripts/seam_report.py scripts/seam_report.py
+
 # Create dirs for runtime data
 RUN mkdir -p /root/.nano-claw/memory /app/voice/models
 RUN mkdir -p /app/data

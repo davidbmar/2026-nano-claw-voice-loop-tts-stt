@@ -1,0 +1,1250 @@
+{
+  "cases": [
+    {
+      "citations": [
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_d24c96a906c15ae4ac89642a545dae6a",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 1292,
+          "charStart": 0,
+          "citationId": "cite_aebd04103cc85b8b8124696f390620b3",
+          "evidenceId": "ev_7d25b162fa055cf5a2946e7d8886684d",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 2712,
+          "charStart": 1074,
+          "citationId": "cite_8a020d769d8f55b4baaed938892f797a",
+          "evidenceId": "ev_88a81591c54351cda69c5341bfb5b87c",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 4062,
+          "charStart": 2344,
+          "citationId": "cite_a13c134c4add5aa2aec7a358f7855027",
+          "evidenceId": "ev_3f4014703c205e71801bfdc043f1296e",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_f31fceae748e5105bdd86b5d92d6069c",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 17,
+      "claim_count": 18,
+      "duration_ms": 9834,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "document",
+      "id": "document-001-architecture-summary",
+      "metrics": {
+        "citation_presence": 0.9444,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "shared-pipeline"
+      ],
+      "response_excerpt": "Based on the **Riff + NanoQA\u202f\u2014\u202fUnified Knowledge and Reasoning Architecture** document, the architecture is a **source\u2011agnostic pipeline** built around a shared knowledge object model. The high\u2011level flow is:\n\n**Ingest \u2192 Store/Index \u2192 Retrieve \u2192 Build Context \u2192 Route/Reason \u2192 Verify \u2192 Speak**  \n(Evidence\u202f3, \u00a72)\n\nTwo se",
+      "response_sha256": "408afd7719ad5cbe6dccd3a572392508003b4954b893875a97452014bffdbd20",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 1292,
+          "charStart": 0,
+          "citationId": "cite_aebd04103cc85b8b8124696f390620b3",
+          "evidenceId": "ev_816c723b195f59e7ab7b2be50994a39f",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 2712,
+          "charStart": 1074,
+          "citationId": "cite_8a020d769d8f55b4baaed938892f797a",
+          "evidenceId": "ev_52e801e900eb5a7588daa0906632a0e2",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_9706700c92175637b64c0c4828a549c3",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 7824,
+          "charStart": 6176,
+          "citationId": "cite_e34ee7f82119538ab70093b7d6ed7c9f",
+          "evidenceId": "ev_f8ca78bde6135079b98b2a882781ca27",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 4062,
+          "charStart": 2344,
+          "citationId": "cite_a13c134c4add5aa2aec7a358f7855027",
+          "evidenceId": "ev_b624f17952885325b7880b7ddc5c0b07",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 2,
+      "claim_count": 2,
+      "duration_ms": 3084,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "document",
+      "id": "document-002-core-principle",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "core-principle"
+      ],
+      "response_excerpt": "The core principle is: **deterministic structure wherever possible, AI enrichment where meaning is required, and heavyweight reasoning only after retrieval has narrowed the evidence.**  \n\nThis is stated in the *Riff + NanoQA \u2014 Unified Knowledge and Reasoning Architecture* document (Section 1 \u2013 Executive Summary).",
+      "response_sha256": "1de126058000575fe139b87fedbd8dd1b01daf46d6094846d3a4b59b55cf3d67",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_d08e60ebbecc5d6eb32443ad62e51f63",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_8fa2d445234c58f1814d014efbce16aa",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 7824,
+          "charStart": 6176,
+          "citationId": "cite_e34ee7f82119538ab70093b7d6ed7c9f",
+          "evidenceId": "ev_6d873738b79157d484169c32c698ff68",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 5240,
+          "charStart": 3765,
+          "citationId": "cite_4f4fc22e5d2f5a2588ad9c72b5dc3170",
+          "evidenceId": "ev_51cfe6b7a5d95d1988069adab7ffc776",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 9024,
+          "charStart": 7636,
+          "citationId": "cite_6205f71c8a835642915544d69abe0356",
+          "evidenceId": "ev_3681e32968e654af839a54f9c4de1427",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 7,
+      "claim_count": 7,
+      "duration_ms": 5139,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "document",
+      "id": "document-003-escalation",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "escalation-policy"
+      ],
+      "response_excerpt": "A request escalates from the fast model (Flash) to deeper reasoning (Pro) when any of the following conditions are met (*Component 5 \u2014 Model Router and Reasoner*, \u00a79.1):\n\n- low retrieval confidence or conflict  \n- more than one graph hop or multiple sources  \n- counting, comparison, causal, or synthesis questions  \n- t",
+      "response_sha256": "025ae3752d9d423a75845c5468766af5ee0918df66e9406c38dd532255908e9a",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 9024,
+          "charStart": 7636,
+          "citationId": "cite_6205f71c8a835642915544d69abe0356",
+          "evidenceId": "ev_13f0724154eb521c8240d90df3fce2da",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 7824,
+          "charStart": 6176,
+          "citationId": "cite_e34ee7f82119538ab70093b7d6ed7c9f",
+          "evidenceId": "ev_00ddc8782e38500289f6693063b5565c",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_3ba6e8dac56d5eafad32bf2ebb1cc51b",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_3aa2a7b5b9795ea08e4de3a32be75ba9",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 5240,
+          "charStart": 3765,
+          "citationId": "cite_4f4fc22e5d2f5a2588ad9c72b5dc3170",
+          "evidenceId": "ev_9786506fb316560986442656d6ce79e2",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 7,
+      "claim_count": 7,
+      "duration_ms": 4985,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "document",
+      "id": "document-004-phase-one",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "phase-one"
+      ],
+      "response_excerpt": "Phase 1 thin slice capabilities:\n\n- **Ingestion**: Python/TypeScript code via Tree-sitter; Markdown, PDF, DOCX text ingestion.\n- **Storage**: Postgres or SQLite plus one vector index.\n- **Retrieval**: exact, full\u2011text search (FTS), and vector retrieval.\n- **Context building**: simple context builder with token budgets ",
+      "response_sha256": "642e1ec50e852d24bc01bc10adc8674044514eecdc314b2b39284affcae71c04",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_b355603a035d5516b62edceb07a6609f",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_91b69ebfedc358d5bdc6881365dfc9ad",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 9024,
+          "charStart": 7636,
+          "citationId": "cite_6205f71c8a835642915544d69abe0356",
+          "evidenceId": "ev_aeb7f9252e7b55d59b9f3482b498eebc",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 2712,
+          "charStart": 1074,
+          "citationId": "cite_8a020d769d8f55b4baaed938892f797a",
+          "evidenceId": "ev_0b93ba81720854329ee1a6720dbed476",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 1292,
+          "charStart": 0,
+          "citationId": "cite_aebd04103cc85b8b8124696f390620b3",
+          "evidenceId": "ev_d4ecf728325653daa3233edf68b42929",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 6,
+      "claim_count": 7,
+      "duration_ms": 2964,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "document",
+      "id": "document-005-open-decisions",
+      "metrics": {
+        "citation_presence": 0.8571,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "open-decisions"
+      ],
+      "response_excerpt": "The design document lists several open implementation decisions in **section 17 \u201cOpen Decisions\u201d** (Evidence\u202f1):\n\n- Language and how to integrate with the existing Riff/NanoQA stack  \n- Model endpoints and context limits  \n- Which document format to support first  \n- Which programming languages to support for code inge",
+      "response_sha256": "52993e57b947b8b68b72fd517240ff9e58f92d58c366949c776dfd6cddf3cddc",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 1698,
+          "charStart": 0,
+          "citationId": "cite_74b3c8f2643a5943a725f004f57671aa",
+          "evidenceId": "ev_1adc4704e91e585eb27f7517351c273f",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/context.ts",
+          "title": "src/agent/context.ts"
+        },
+        {
+          "charEnd": 15940,
+          "charStart": 13699,
+          "citationId": "cite_5adfbe32e861528da8e1299062356007",
+          "evidenceId": "ev_58c3253811085b30a15d0ec5692e20be",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 25844,
+          "charStart": 23426,
+          "citationId": "cite_0f1986ccd2435991910fd3c1240a6c41",
+          "evidenceId": "ev_577dbc35ed7150febbc8c97d0208b790",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 25891,
+          "charStart": 23645,
+          "citationId": "cite_4fedf46f4c52573b8e6b069b4bd7689b",
+          "evidenceId": "ev_6c912e585bd755db9ebdebf7faa785bd",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 24103,
+          "charStart": 22263,
+          "citationId": "cite_65ad2da1c1205b4a84c9934caf19d36b",
+          "evidenceId": "ev_da86c2005e3d576b9b4829ed7f89783e",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        }
+      ],
+      "cited_claim_count": 3,
+      "claim_count": 3,
+      "duration_ms": 6010,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "code",
+      "id": "code-001-request-routing",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "routing-file",
+        "routing-symbol"
+      ],
+      "response_excerpt": "Request routing is implemented in **`src/api/server.ts`** (main routing decisions via `detectDeepQuestion` and `resolveDeepGate`) and **`src/agent/deep-reasoning.ts`** (the `resolveDeepGate` function and the `deepConfirmPolicy`/`strategyWorkflow` that govern how deep requests are gated).  \n\nIn `server.ts`, the turn ite",
+      "response_sha256": "32f4057a0646dbd828f29f17c2e055bde4bfda80e71aa7e77df1f6db0252bbec",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 6622,
+          "charStart": 4620,
+          "citationId": "cite_9f05d01aad4c55bab7c78e79b7a9b57e",
+          "evidenceId": "ev_2861a00e573656d28d315f59f7a3bb95",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/eval-trace.ts",
+          "title": "src/agent/eval-trace.ts"
+        },
+        {
+          "charEnd": 37894,
+          "charStart": 35460,
+          "citationId": "cite_585371bcb0b855098ce64ec3e4004609",
+          "evidenceId": "ev_d0c44eac0b6a5c4ebf99b52a1d4ae8eb",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 3288,
+          "charStart": 1405,
+          "citationId": "cite_ed92b8dd010c55fbae04af4f67f38e2c",
+          "evidenceId": "ev_aee948bcba90536e8dfc12a6256a32bf",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/memory.ts",
+          "title": "src/agent/memory.ts"
+        },
+        {
+          "charEnd": 25891,
+          "charStart": 23645,
+          "citationId": "cite_4fedf46f4c52573b8e6b069b4bd7689b",
+          "evidenceId": "ev_8fb8e864c46e5abd9bc759568fdd184f",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 12180,
+          "charStart": 10070,
+          "citationId": "cite_255eece331e659e8bb1c48cfcee36d41",
+          "evidenceId": "ev_0ef07f3327705e0686eaef336ac7bc75",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        }
+      ],
+      "cited_claim_count": 18,
+      "claim_count": 20,
+      "duration_ms": 14166,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [
+        "api-handler"
+      ],
+      "group": "code",
+      "id": "code-002-request-path",
+      "known_failure": "The current plain-text code corpus has no call graph, so a broad request-path query can retrieve the loop without retrieving the handleChat entry symbol in the same top-k.",
+      "metrics": {
+        "citation_presence": 0.9,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 0.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": false,
+      "passed_anchors": [],
+      "response_excerpt": "Based on the loaded source, the request path from input to answer involves:\n\n1. **API entry** \u2014 A request arrives at the server (`src/api/server.ts`). The server prepares configuration (model, temperature, etc.) and optionally enables an evaluation trace if `NANO_CLAW_EVAL_TRACE` is set.\n\n2. **Deep reasoning routing** ",
+      "response_sha256": "e140d3ff2f0e1201102088c101572fcdc44774010bab0658510319c1b0cdeee8",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "known_fail"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 27303,
+          "charStart": 25616,
+          "citationId": "cite_4dc60942ad54591a94a8200bc526aa41",
+          "evidenceId": "ev_43a710e3197e55ca8569fc91dd7be867",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 43152,
+          "charStart": 40881,
+          "citationId": "cite_250b2bbcc3ed5e9b950214fa2a3d9072",
+          "evidenceId": "ev_69b0f72b9d435503b2d0ecfbbc848de3",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 15654,
+          "charStart": 13565,
+          "citationId": "cite_9ddfb677d60e54cb983c87b239196ad9",
+          "evidenceId": "ev_2aec02dd91ef5b28983d7c27cf3e17f0",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 48222,
+          "charStart": 46172,
+          "citationId": "cite_f969e099c32e5e6c83f72e449f08f8b4",
+          "evidenceId": "ev_fbfbe3c993ec5edfbb720da03465e564",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 5058,
+          "charStart": 2968,
+          "citationId": "cite_d029bfc9ef8d5935be41ee5592146c43",
+          "evidenceId": "ev_f21c18e167805ebc8855f8ac0a52cfde",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/intelligence.ts",
+          "title": "src/agent/intelligence.ts"
+        }
+      ],
+      "cited_claim_count": 1,
+      "claim_count": 1,
+      "duration_ms": 2087,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "code",
+      "id": "code-003-retrieval-call",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "retrieval-client"
+      ],
+      "response_excerpt": "NanoClaw sends the `/v1/retrieve` evidence request to the intelligence API URL, specifically to `{intelligence.apiUrl}/v1/retrieve` (Evidence 5: `src/agent/intelligence.ts`).",
+      "response_sha256": "23cf8621b679b45a17735d89ce7d0ae4c8d05b7eedb2f4021589f3e714582d2c",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 1683,
+          "charStart": 0,
+          "citationId": "cite_167c17f72591569a9d0285cb7544231f",
+          "evidenceId": "ev_719af007dc5f522b81b6c88ab02e880e",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/memory.ts",
+          "title": "src/agent/memory.ts"
+        },
+        {
+          "charEnd": 9079,
+          "charStart": 7385,
+          "citationId": "cite_1941dc5cfd8e5ea696017821c58f96a1",
+          "evidenceId": "ev_b254e1af29bf572eb1261be80d272b66",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/knowledge-scope.ts",
+          "title": "src/agent/knowledge-scope.ts"
+        },
+        {
+          "charEnd": 45826,
+          "charStart": 44296,
+          "citationId": "cite_8519278e401e566baa974c88548bc006",
+          "evidenceId": "ev_4251fc04ce62583da25e081e645d33a9",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 3288,
+          "charStart": 1405,
+          "citationId": "cite_ed92b8dd010c55fbae04af4f67f38e2c",
+          "evidenceId": "ev_ca3ac0ab7f9258828f04313eb7a40327",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/memory.ts",
+          "title": "src/agent/memory.ts"
+        },
+        {
+          "charEnd": 1833,
+          "charStart": 0,
+          "citationId": "cite_87f4f2f8d6515e14b329cc07d3d90ae9",
+          "evidenceId": "ev_695453eb083a5602af4d4652e4d9663f",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/knowledge-scope.ts",
+          "title": "src/agent/knowledge-scope.ts"
+        }
+      ],
+      "cited_claim_count": 6,
+      "claim_count": 6,
+      "duration_ms": 8883,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "code",
+      "id": "code-004-session-scope",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "scope-preparation"
+      ],
+      "response_excerpt": "The collection scope is applied **before analysis routing or retrieval** by calling `prepareCollectionScopeTurn` (from `src/agent/knowledge-scope.ts`). This function:\n\n1. Receives the current message list, the session\u2019s `Memory` object, and the agent config.\n2. Uses the deterministic parser `matchCollectionScopeIntent`",
+      "response_sha256": "a8576511b4296c3b4cb04dfd0a7e1ae30eddba3270fbba00978cdf1007a6477f",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 37134,
+          "charStart": 35416,
+          "citationId": "cite_bcc89dc3e13050aba06ba00ee9f1efa6",
+          "evidenceId": "ev_43b791e093185910a550d883aa651a2b",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 35786,
+          "charStart": 33562,
+          "citationId": "cite_a5f0d6d11eda506e9fd0cbde4f61172d",
+          "evidenceId": "ev_d37bb163962c5faab0c1d6ccdd3db301",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 15654,
+          "charStart": 13565,
+          "citationId": "cite_9ddfb677d60e54cb983c87b239196ad9",
+          "evidenceId": "ev_8c28649f449559cba8ba64bad4fb9bee",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 47305,
+          "charStart": 46940,
+          "citationId": "cite_6305f2219bdf591baee0b418736f2336",
+          "evidenceId": "ev_6d405d4424a851ffb8430ed400c7ef37",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 5941,
+          "charStart": 4506,
+          "citationId": "cite_b25c7ced67ee58998487baeef8f4f23c",
+          "evidenceId": "ev_f835d40348a95d119880c96c8d56ef73",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/api/server.ts",
+          "title": "src/api/server.ts"
+        },
+        {
+          "charEnd": 18691,
+          "charStart": 17181,
+          "citationId": "cite_88b483dd7bde52199705223a166e698c",
+          "evidenceId": "ev_764463cb7bbb50ea9e0c341280084d94",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 1698,
+          "charStart": 0,
+          "citationId": "cite_74b3c8f2643a5943a725f004f57671aa",
+          "evidenceId": "ev_7e0366cdae1a52a1bbb3fceb627fd76e",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/context.ts",
+          "title": "src/agent/context.ts"
+        },
+        {
+          "charEnd": 24103,
+          "charStart": 22263,
+          "citationId": "cite_65ad2da1c1205b4a84c9934caf19d36b",
+          "evidenceId": "ev_6d2bfec9f3dc5eb6820721748704a06f",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        }
+      ],
+      "cited_claim_count": 5,
+      "claim_count": 5,
+      "duration_ms": 41965,
+      "error_code": null,
+      "expected_route": "deep",
+      "failed_anchors": [
+        "both-loop-paths"
+      ],
+      "group": "code",
+      "id": "code-005-stream-route-parity",
+      "known_failure": "Plain-text code ingestion has no symbol or call graph, so a bounded deep pass may retrieve only one of the two loop implementations.",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 0.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": false,
+      "passed_anchors": [],
+      "response_excerpt": "The Nano Claw Code API server routes requests based on two conditions: the `STREAM_ENABLED` environment variable and the client\u2019s `Accept` header.  \n\n- **Non\u2011streaming path**: When either streaming is disabled or the client does not request `text/event-stream`, the server collects the entire agent response and sends a ",
+      "response_sha256": "e86057b40d154f614cc074cf4670fc80c3fd28bed081282651736e90ffd13322",
+      "route": "deep",
+      "scope_ok": true,
+      "setup": [],
+      "status": "known_fail"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_a9f6981aea785584ae1ba4bbeb7a75e6",
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_7580c53f69b35f3497abaf66dc3d4c9b",
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 29077,
+          "charStart": 26967,
+          "citationId": "cite_d6bc80f3c9385c3d9f23a908d03443de",
+          "evidenceId": "ev_a8c278091b7f5a369f3c8785a365cf17",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 2712,
+          "charStart": 1074,
+          "citationId": "cite_8a020d769d8f55b4baaed938892f797a",
+          "evidenceId": "ev_85f824c72fb2555788af3f42502e01f2",
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 25891,
+          "charStart": 23645,
+          "citationId": "cite_4fedf46f4c52573b8e6b069b4bd7689b",
+          "evidenceId": "ev_3cfa8ace31395c13972158ef7d28814f",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 1292,
+          "charStart": 0,
+          "citationId": "cite_aebd04103cc85b8b8124696f390620b3",
+          "evidenceId": "ev_675a48156b18554ba5d306e55daeaf65",
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 27303,
+          "charStart": 25616,
+          "citationId": "cite_4dc60942ad54591a94a8200bc526aa41",
+          "evidenceId": "ev_32a3af0e58b25e7fb98640aea9911fe8",
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/deep-reasoning.ts",
+          "title": "src/agent/deep-reasoning.ts"
+        },
+        {
+          "charEnd": 4062,
+          "charStart": 2344,
+          "citationId": "cite_a13c134c4add5aa2aec7a358f7855027",
+          "evidenceId": "ev_1414d7ac23405f2fb0bc3579d4826787",
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        }
+      ],
+      "cited_claim_count": 3,
+      "claim_count": 3,
+      "duration_ms": 41760,
+      "error_code": null,
+      "expected_route": "deep",
+      "failed_anchors": [],
+      "group": "cross_source",
+      "id": "cross-source-001-design-to-code",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "design-router",
+        "code-router"
+      ],
+      "response_excerpt": "The Riff design\u2019s Model Router (Component\u202f5) splits queries into two lanes: exact/local \u2192 a fast model (Flash), and cross-cutting/analytical \u2192 a deep model (Pro). It also defines escalation triggers like low retrieval confidence, multi\u2011hop deductions, missing context, or a user request for depth.\n\nNanoClaw implements t",
+      "response_sha256": "a885b04953804d3846e2dc984cb510e732c7469b0cbd1f3d86522a795762b488",
+      "route": "deep",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [
+        {
+          "charEnd": 10163,
+          "charStart": 8801,
+          "citationId": "cite_584551615a1f5a599ea8520a032ede77",
+          "evidenceId": "ev_1662b1cdc93f58feaa164246b65bc32a",
+          "rank": 1,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 6406,
+          "charStart": 5036,
+          "citationId": "cite_04cc4f4bc98f5e739217a11b1fa562b7",
+          "evidenceId": "ev_2d7a82576da558428f73215188ece55a",
+          "rank": 2,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 9024,
+          "charStart": 7636,
+          "citationId": "cite_6205f71c8a835642915544d69abe0356",
+          "evidenceId": "ev_c25022152be4594db9edf21fb7f0db1b",
+          "rank": 3,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 2712,
+          "charStart": 1074,
+          "citationId": "cite_8a020d769d8f55b4baaed938892f797a",
+          "evidenceId": "ev_ddb427c510085cc98f5ddedc80ec696a",
+          "rank": 4,
+          "sectionPath": [],
+          "sourceRef": "eval://riff-design/riff-nanoqa-unified-knowledge.md",
+          "title": "riff-nanoqa-unified-knowledge.md"
+        },
+        {
+          "charEnd": 1698,
+          "charStart": 0,
+          "citationId": "cite_74b3c8f2643a5943a725f004f57671aa",
+          "evidenceId": "ev_15892ba688965b7a81e92941a204f446",
+          "rank": 5,
+          "sectionPath": [],
+          "sourceRef": "eval://nano-claw-code/src/agent/context.ts",
+          "title": "src/agent/context.ts"
+        }
+      ],
+      "cited_claim_count": 10,
+      "claim_count": 10,
+      "duration_ms": 15387,
+      "error_code": null,
+      "expected_route": "fast",
+      "failed_anchors": [],
+      "group": "cross_source",
+      "id": "cross-source-002-coverage",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [
+        "design-components"
+      ],
+      "response_excerpt": "I didn't find complete evidence about that in what's loaded, so these gaps are not proof that a source omits the topic or that a component is unimplemented. Based only on the loaded documents (riff-nanoqa-unified-knowledge.md and src/agent/context.ts), the design components that have no implementation evidence in the l",
+      "response_sha256": "b7e0c0edd23f9ca7e37a77dcaa861ecb3efd98778c153b993569e83dccae51ad",
+      "route": "fast",
+      "scope_ok": true,
+      "setup": [],
+      "status": "pass"
+    },
+    {
+      "citations": [],
+      "cited_claim_count": 6,
+      "claim_count": 6,
+      "duration_ms": 140701,
+      "error_code": null,
+      "expected_route": "registry",
+      "failed_anchors": [],
+      "group": "cross_source",
+      "id": "cross-source-003-registry-gaps",
+      "metrics": {
+        "citation_presence": 1.0,
+        "coverage_disclaimer": 1.0,
+        "expected_evidence_hit_rate": 1.0,
+        "required_source_coverage": 1.0,
+        "routing_correctness": 1.0
+      },
+      "missing_sources": [],
+      "outcome": "answered",
+      "passed": true,
+      "passed_anchors": [],
+      "response_excerpt": "I didn't find complete evidence about that in what's loaded, so these gaps are not proof that a source omits the topic or that a component is unimplemented. The analysis flagged three gaps: how the NanoClaw agent calls the TaskService and handles escalation results is unclear; whether the TaskService dynamically select",
+      "response_sha256": "4c9bc2166e5ca3ce6e6cf39ea68773aba64ebbfd2ae25aeb07537c807c67eea5",
+      "route": "registry",
+      "scope_ok": true,
+      "setup": [
+        {
+          "error_code": null,
+          "outcome": "answered",
+          "response_sha256": "0a862b54a8524edea37dab950142c52feadfce03b2570f5487d0b262cc52efe9",
+          "route": "deep"
+        }
+      ],
+      "status": "pass"
+    }
+  ],
+  "deltas_vs_baseline": null,
+  "failure_modes": [
+    {
+      "errorCode": "invalid_analysis_artifact",
+      "finishReason": "invalid_analysis_artifact",
+      "id": "invalid-analysis-artifact",
+      "outcome": "fallback",
+      "passed": true,
+      "route": "deep",
+      "spokenFallbackMatched": true,
+      "status": "pass"
+    }
+  ],
+  "metadata": {
+    "affirmation_policy": "never",
+    "baseline_file": null,
+    "baseline_key": "ef20d2f3099a65b2d0e9df9141f6aaf6c82a6fcc133305ee773715519ef779ef",
+    "candidate_pool": 40,
+    "completed_at": "2026-07-25T07:05:34.372552+00:00",
+    "corpus_digest": "07cd956dbef04596235517153151f342c698ea94a7b793f2eca58434a6f5b902",
+    "implementation_digest": "a31baa4a6c590ae95507f99eae939a35d11cba4b57decef4710117494b9e6af9",
+    "corpus_path": "scripts/cross_source_eval/corpus.json",
+    "corpus_version": "2026-07-25.1",
+    "database_isolation": "fresh temporary SQLite database",
+    "model": "deepseek/deepseek-v4-flash",
+    "partial_case_filter": [],
+    "platform_reasoning_model": "configured-by-platform-env",
+    "platform_reasoning_provider": "configured-by-platform-env",
+    "provider_credentials_present": [
+      "DEEPSEEK_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY",
+      "GROQ_API_KEY",
+      "OPENROUTER_API_KEY"
+    ],
+    "registry_control": "empty at run start; explicit fresh-analysis setup only for the registry case",
+    "repetitions": 1,
+    "repositories": {
+      "intelligence_platform": {
+        "commit": "e7b3c537bbdf33055d3b6b8baba2fdb26fc31dae",
+        "dirty": true
+      },
+      "nano_claw": {
+        "commit": "e6bab86f37153fcede3c47952c927182d6ffbe0d",
+        "dirty": true
+      }
+    },
+    "scoreboard_file": "2026-07-25T070534Z.json",
+    "source_fingerprint": "09b1b9a78a01fe47b2c935126a37f253de54ef63520bb9b6747bf4b4a70418e3",
+    "source_provenance": {
+      "intelligence-platform-code": {
+        "collection_id": "intelligence-platform-code",
+        "files": [
+          {
+            "path": "apps/api/main.py",
+            "sha256": "42fad7f6b025b826943d5aba4e2b1b64185ceb95b8b7997cd2dcd501e1faba71"
+          },
+          {
+            "path": "src/intelligence_platform/analysis/scope.py",
+            "sha256": "898b98edea1c20b7ae05086ac32302fae18b8c736740642d8dfc04497a2556ec"
+          },
+          {
+            "path": "src/intelligence_platform/contracts/retrieval.py",
+            "sha256": "a7c1c9b8c05067c5383356564ba1505e95a27b1f3f53b3c5d17246cad8b6cf12"
+          },
+          {
+            "path": "src/intelligence_platform/contracts/tasks.py",
+            "sha256": "76c9eb541d8669e0ee43808721a4cbd38c31b1d4c4676dedc7f463a71c80f911"
+          },
+          {
+            "path": "src/intelligence_platform/knowledge/catalog.py",
+            "sha256": "102c79437309acb2e6f564e439a7d73135cc20f479f8ded0ff253c33f683511d"
+          },
+          {
+            "path": "src/intelligence_platform/retrieval/service.py",
+            "sha256": "0b0ec459166c838c6e296cdd7792bbb017938bd1474cac90ba9cea72fb9dc7ec"
+          },
+          {
+            "path": "src/intelligence_platform/tasks/coordinator.py",
+            "sha256": "56a32af2257aeb660fd199f600b72e8e4ce422ba36e7265896484a2ab1bc2642"
+          },
+          {
+            "path": "src/intelligence_platform/tasks/service.py",
+            "sha256": "95b0ff3aaf7a8fd050a163bb68513d3eda9fc0f293eb3ab44b0c88e6593734f2"
+          }
+        ],
+        "kind": "code"
+      },
+      "nano-claw-code": {
+        "collection_id": "nano-claw-code",
+        "files": [
+          {
+            "path": "src/api/server.ts",
+            "sha256": "2f5b09d5dd5fcbffd55c203dc551d12348a1ec97b02ebe6502c21f1399e30434"
+          },
+          {
+            "path": "src/agent/context.ts",
+            "sha256": "67e46cd5642bff11b9e2ad8e6c736c922ce8d44c73a62b757daca174264541ce"
+          },
+          {
+            "path": "src/agent/deep-reasoning.ts",
+            "sha256": "2e837cb9fded1854587eb847313614a13f306c0a5bc9c2e3b1ee1ed2e017ad5e"
+          },
+          {
+            "path": "src/agent/eval-trace.ts",
+            "sha256": "e6d4add99609f3aefb56aee604bb5c914631efeb40103bc85b2b1640a43effd8"
+          },
+          {
+            "path": "src/agent/intelligence.ts",
+            "sha256": "61695d3309e67daa287a261b4f7839e31d1a3018d2cb39b56454ed9a2dbb2503"
+          },
+          {
+            "path": "src/agent/knowledge-scope.ts",
+            "sha256": "eb38e08c52c851e94fea6aa37e3015c8f9fe573770643550dde6d059fcf75e40"
+          },
+          {
+            "path": "src/agent/memory.ts",
+            "sha256": "31cc043eaf0419900ac5e8d2dd66a6db49c1557c073fbbe7cc45986eec0016cb"
+          }
+        ],
+        "kind": "code"
+      },
+      "riff-design": {
+        "collection_id": "riff-design",
+        "files": [
+          {
+            "path": "riff-nanoqa-unified-knowledge.md",
+            "sha256": "ef7f08e4ad24be10b06d26fbda9c6ee6401bdb6e00af1c52487669e55a0746c0"
+          }
+        ],
+        "kind": "document"
+      }
+    },
+    "started_at": "2026-07-25T07:00:36.122065+00:00",
+    "tenant_id": "cross-source-eval-20260725070036-220f4b30",
+    "top_k": 5,
+    "trace_version": "cross-source-eval-v1"
+  },
+  "schema_version": 1,
+  "summary": {
+    "delivery_gate_passed": true,
+    "fault_injection": {
+      "error_code": "invalid_analysis_artifact",
+      "passed": true
+    },
+    "groups": {
+      "code": {
+        "failed": 0,
+        "infrastructure_errors": 0,
+        "known_failed": 2,
+        "metrics": {
+          "citation_presence": 0.98,
+          "coverage_disclaimer": 1.0,
+          "expected_evidence_hit_rate": 0.6,
+          "required_source_coverage": 1.0,
+          "routing_correctness": 1.0
+        },
+        "passed": 3,
+        "total": 5
+      },
+      "cross_source": {
+        "failed": 0,
+        "infrastructure_errors": 0,
+        "known_failed": 0,
+        "metrics": {
+          "citation_presence": 1.0,
+          "coverage_disclaimer": 1.0,
+          "expected_evidence_hit_rate": 1.0,
+          "required_source_coverage": 1.0,
+          "routing_correctness": 1.0
+        },
+        "passed": 3,
+        "total": 3
+      },
+      "document": {
+        "failed": 0,
+        "infrastructure_errors": 0,
+        "known_failed": 0,
+        "metrics": {
+          "citation_presence": 0.9603,
+          "coverage_disclaimer": 1.0,
+          "expected_evidence_hit_rate": 1.0,
+          "required_source_coverage": 1.0,
+          "routing_correctness": 1.0
+        },
+        "passed": 5,
+        "total": 5
+      }
+    },
+    "unexpected_failures": []
+  }
+}

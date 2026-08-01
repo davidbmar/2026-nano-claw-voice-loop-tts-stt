@@ -37,6 +37,12 @@ PCM16_MAX = 32767.0
 DEFAULT_PHONE_GAIN_TARGET_DBFS = -3.0
 MAX_PHONE_GAIN_DB = 12.0
 MAX_PHONE_GAIN_STEP_DB = 3.0
+DEFAULT_BARGE_VAD_ENTER = 0.7
+DEFAULT_BARGE_TRIGGER_MS = 350
+DEFAULT_ECHO_CORRELATION = 0.75
+DEFAULT_ECHO_WINDOW_MS = 1_200
+DEFAULT_ECHO_MAX_LAG_MS = 120
+DEFAULT_ECHO_ENVELOPE_HOP_MS = 10
 
 
 @dataclass(frozen=True)
@@ -523,6 +529,172 @@ def transcript_looks_incomplete(text: str) -> bool:
     return last in _INCOMPLETE_TAIL_WORDS
 
 
+class EchoReferenceGate:
+    """Identify outbound playback returning on the inbound phone leg.
+
+    The gate retains bounded rolling PCM for each direction, converts both to
+    10 ms RMS energy envelopes, and searches normalized envelope correlation
+    over the configured lag range. Correlation is gain-invariant, so an
+    attenuated speakerphone replay still matches the exact outbound reference.
+
+    ``feed_outbound`` and ``feed_inbound`` operate only on PCM samples and do
+    not use a clock or phone-call state. This keeps the primitive reusable by
+    other transports while ensuring neither audio buffer exceeds
+    ``window_ms``.
+    """
+
+    def __init__(
+        self,
+        *,
+        rate_hz: int = TELNYX_RATE,
+        window_ms: int = DEFAULT_ECHO_WINDOW_MS,
+        hop_ms: int = DEFAULT_ECHO_ENVELOPE_HOP_MS,
+        max_lag_ms: int = DEFAULT_ECHO_MAX_LAG_MS,
+        correlation_threshold: float = DEFAULT_ECHO_CORRELATION,
+        min_analysis_ms: int = 100,
+    ) -> None:
+        if rate_hz <= 0:
+            raise ValueError("rate_hz must be positive")
+        if window_ms <= 0 or hop_ms <= 0:
+            raise ValueError("window_ms and hop_ms must be positive")
+        if max_lag_ms < 0:
+            raise ValueError("max_lag_ms must be non-negative")
+        if not np.isfinite(correlation_threshold) or not (
+            0.0 <= correlation_threshold <= 1.0
+        ):
+            raise ValueError("correlation_threshold must be in [0, 1]")
+        if min_analysis_ms <= 0:
+            raise ValueError("min_analysis_ms must be positive")
+
+        self.rate_hz = int(rate_hz)
+        self.window_ms = int(window_ms)
+        self.hop_ms = int(hop_ms)
+        self.max_lag_ms = int(max_lag_ms)
+        self.correlation_threshold = float(correlation_threshold)
+        self._window_samples = max(1, self.rate_hz * self.window_ms // 1000)
+        self._hop_samples = max(1, self.rate_hz * self.hop_ms // 1000)
+        self._max_lag_hops = self.max_lag_ms // self.hop_ms
+        self._min_analysis_hops = max(3, min_analysis_ms // self.hop_ms)
+        self.reset()
+
+    @property
+    def last_correlation(self) -> float:
+        """Best normalized envelope correlation from the latest comparison."""
+        return self._last_correlation
+
+    @property
+    def is_echo(self) -> bool:
+        """Whether the latest inbound comparison meets the gate threshold."""
+        return self._last_correlation >= self.correlation_threshold
+
+    @property
+    def outbound_samples(self) -> int:
+        """Number of outbound PCM samples retained (diagnostic/test helper)."""
+        return len(self._outbound)
+
+    @property
+    def inbound_samples(self) -> int:
+        """Number of inbound PCM samples retained (diagnostic/test helper)."""
+        return len(self._inbound)
+
+    def reset(self) -> None:
+        """Discard both rolling directions and the previous decision."""
+        self._outbound = np.zeros(0, dtype=np.int16)
+        self._inbound = np.zeros(0, dtype=np.int16)
+        self._last_correlation = 0.0
+
+    def reset_inbound(self) -> None:
+        """Start a new comparison window while retaining recent playback.
+
+        Keeping the outbound side lets a processing cue sent immediately
+        before reply speech remain eligible as an echo reference.
+        """
+        self._inbound = np.zeros(0, dtype=np.int16)
+        self._last_correlation = 0.0
+
+    @staticmethod
+    def _as_pcm16(samples: np.ndarray | bytes) -> np.ndarray:
+        if isinstance(samples, (bytes, bytearray, memoryview)):
+            return np.frombuffer(samples, dtype=np.int16).copy()
+        return np.asarray(samples, dtype=np.int16).reshape(-1).copy()
+
+    def _append(self, current: np.ndarray, samples: np.ndarray | bytes) -> np.ndarray:
+        incoming = self._as_pcm16(samples)
+        if not len(incoming):
+            return current
+        combined = np.concatenate([current, incoming])
+        return combined[-self._window_samples :]
+
+    def feed_outbound(self, samples: np.ndarray | bytes) -> None:
+        """Append phone-rate PCM that was successfully sent to the caller."""
+        self._outbound = self._append(self._outbound, samples)
+
+    def feed_inbound(self, samples: np.ndarray | bytes) -> float:
+        """Append inbound phone-rate PCM and return its best reference match."""
+        self._inbound = self._append(self._inbound, samples)
+        self._last_correlation = self._best_correlation()
+        return self._last_correlation
+
+    def should_suppress(self, samples: np.ndarray | bytes) -> tuple[bool, float]:
+        """Append inbound PCM and return ``(is_echo, correlation)``."""
+        correlation = self.feed_inbound(samples)
+        return correlation >= self.correlation_threshold, correlation
+
+    def _energy_envelope(self, samples: np.ndarray) -> np.ndarray:
+        usable = len(samples) // self._hop_samples * self._hop_samples
+        if not usable:
+            return np.zeros(0, dtype=np.float64)
+        blocks = samples[-usable:].astype(np.float64).reshape(
+            -1, self._hop_samples
+        )
+        return np.sqrt(np.mean(blocks * blocks, axis=1))
+
+    @staticmethod
+    def _normalized_correlation(left: np.ndarray, right: np.ndarray) -> float:
+        left_centered = left - float(np.mean(left))
+        right_centered = right - float(np.mean(right))
+        denominator = float(
+            np.linalg.norm(left_centered) * np.linalg.norm(right_centered)
+        )
+        if denominator <= np.finfo(np.float64).eps:
+            return 0.0
+        return float(np.dot(left_centered, right_centered) / denominator)
+
+    def _best_correlation(self) -> float:
+        inbound = self._energy_envelope(self._inbound)
+        outbound = self._energy_envelope(self._outbound)
+        common_hops = min(len(inbound), len(outbound))
+        if common_hops < self._min_analysis_hops:
+            return 0.0
+        inbound = inbound[-common_hops:]
+        outbound = outbound[-common_hops:]
+
+        best = 0.0
+        for lag in range(-self._max_lag_hops, self._max_lag_hops + 1):
+            if lag < 0:
+                left = inbound[:lag]
+                right = outbound[-lag:]
+            elif lag > 0:
+                left = inbound[lag:]
+                right = outbound[:-lag]
+            else:
+                left = inbound
+                right = outbound
+            if len(left) < self._min_analysis_hops:
+                continue
+            best = max(best, self._normalized_correlation(left, right))
+        return float(np.clip(best, 0.0, 1.0))
+
+
+@dataclass(frozen=True)
+class BargeInCandidate:
+    """One barge vote that did not yet commit an interruption."""
+
+    reason: str
+    prob: float | None
+    corr: float
+
+
 class BargeInDetector:
     """Detects sustained caller speech while the agent is talking.
 
@@ -535,34 +707,98 @@ class BargeInDetector:
         self,
         *,
         rms_threshold: float = 550.0,
-        trigger_ms: int = 240,
+        trigger_ms: int = DEFAULT_BARGE_TRIGGER_MS,
         window_ms: int = 800,
         rate_hz: int = 8000,
+        vad_enter: float = DEFAULT_BARGE_VAD_ENTER,
+        echo_corr_threshold: float = DEFAULT_ECHO_CORRELATION,
     ) -> None:
+        if trigger_ms <= 0 or window_ms <= 0 or rate_hz <= 0:
+            raise ValueError("trigger_ms, window_ms, and rate_hz must be positive")
+        if not np.isfinite(vad_enter) or not 0.0 <= vad_enter <= 1.0:
+            raise ValueError("vad_enter must be in [0, 1]")
+        if not np.isfinite(echo_corr_threshold) or not (
+            0.0 <= echo_corr_threshold <= 1.0
+        ):
+            raise ValueError("echo_corr_threshold must be in [0, 1]")
         self.rms_threshold = rms_threshold
         self.trigger_ms = trigger_ms
         self.rate_hz = rate_hz
+        self.vad_enter = float(vad_enter)
+        self.echo_corr_threshold = float(echo_corr_threshold)
         self._window_frames = max(1, window_ms // FRAME_MS)
         self.reset()
 
     def reset(self) -> None:
         self._recent: list[tuple[np.ndarray, bool]] = []
+        self.last_candidate: BargeInCandidate | None = None
 
-    def feed(self, frame: np.ndarray, is_speech: bool | None = None) -> bool:
+    def feed(
+        self,
+        frame: np.ndarray,
+        is_speech: bool | None = None,
+        *,
+        speech_prob: float | None = None,
+        echo_correlation: float | None = None,
+    ) -> bool:
         """Returns True when the caller has clearly started talking over us.
 
-        is_speech: externally-decided flag (Silero); None = internal RMS.
-        Neural VAD matters most here — TTS echo and line noise cross energy
-        thresholds but don't classify as speech.
+        ``speech_prob`` selects the neural barge path and is compared directly
+        with ``vad_enter``. ``is_speech`` remains the endpointer's hysteresis
+        decision and is used only to identify low-confidence neural candidates.
+        With no probability, the existing external-boolean/RMS behavior is
+        preserved. A qualifying echo correlation suppresses the frame's vote.
         """
-        if is_speech is None:
-            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2))) if len(frame) else 0.0
-            is_speech = rms >= self.rms_threshold
-        self._recent.append((frame, is_speech))
+        self.last_candidate = None
+        correlation = (
+            float(echo_correlation)
+            if echo_correlation is not None and np.isfinite(echo_correlation)
+            else 0.0
+        )
+        probability: float | None = None
+        if speech_prob is not None:
+            probability = (
+                float(speech_prob) if np.isfinite(speech_prob) else 0.0
+            )
+            vote = probability >= self.vad_enter
+            if not vote and is_speech:
+                self.last_candidate = BargeInCandidate(
+                    reason="low_conf",
+                    prob=probability,
+                    corr=correlation,
+                )
+        elif is_speech is None:
+            rms = (
+                float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+                if len(frame)
+                else 0.0
+            )
+            vote = rms >= self.rms_threshold
+        else:
+            vote = bool(is_speech)
+
+        if vote and echo_correlation is not None and (
+            correlation >= self.echo_corr_threshold
+        ):
+            vote = False
+            self.last_candidate = BargeInCandidate(
+                reason="echo",
+                prob=probability,
+                corr=correlation,
+            )
+
+        self._recent.append((frame, vote))
         if len(self._recent) > self._window_frames:
             self._recent.pop(0)
         speech_ms = sum(len(f) for f, s in self._recent if s) * 1000 // self.rate_hz
-        return speech_ms >= self.trigger_ms
+        committed = speech_ms >= self.trigger_ms
+        if vote and not committed:
+            self.last_candidate = BargeInCandidate(
+                reason="short",
+                prob=probability,
+                corr=correlation,
+            )
+        return committed
 
     def take_frames(self) -> list[np.ndarray]:
         """The buffered window (the interruption itself), for endpointer priming."""
@@ -571,19 +807,34 @@ class BargeInDetector:
         return frames
 
 
+def _pad_to_frames(samples: np.ndarray, frame_samples: int) -> np.ndarray:
+    """Zero-pad so the transport never sends a sub-frame payload.
+
+    Chunk PCM lengths are arbitrary (speech + jittered pause), so the final
+    frame used to be a random partial — down to a few samples — which
+    carrier-side playout pads or glitches into an audible tick at every
+    chunk end. Chunk ends are declick-faded to silence, so padding with
+    zeros is inaudible by construction.
+    """
+    pad = (-len(samples)) % frame_samples
+    if pad:
+        samples = np.concatenate([samples, np.zeros(pad, dtype=samples.dtype)])
+    return samples
+
+
 def pcm48k_to_ulaw_frames(pcm48k_bytes: bytes) -> list[bytes]:
-    """48 kHz PCM16 bytes (TTS output) → list of 20 ms μ-law frames."""
+    """48 kHz PCM16 bytes (TTS output) → list of full 20 ms μ-law frames."""
     pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
-    pcm8k = resample_48k_to_8k(pcm48k)
+    pcm8k = _pad_to_frames(resample_48k_to_8k(pcm48k), FRAME_SAMPLES)
     ulaw = ulaw_encode(pcm8k)
     return [ulaw[i : i + FRAME_SAMPLES] for i in range(0, len(ulaw), FRAME_SAMPLES)]
 
 
 def pcm48k_to_l16_frames(pcm48k_bytes: bytes) -> list[bytes]:
-    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in 20 ms Telnyx frames."""
+    """48 kHz PCM16 bytes → raw 16 kHz PCM16 in full 20 ms Telnyx frames."""
     pcm48k = np.frombuffer(pcm48k_bytes, dtype=np.int16)
-    pcm16k = resample_48k_to_16k(pcm48k)
     frame_samples = 16000 * FRAME_MS // 1000
+    pcm16k = _pad_to_frames(resample_48k_to_16k(pcm48k), frame_samples)
     return [
         pcm16k[i : i + frame_samples].tobytes()
         for i in range(0, len(pcm16k), frame_samples)

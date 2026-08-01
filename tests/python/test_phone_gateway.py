@@ -259,6 +259,12 @@ def test_audio_during_running_turn_replays_as_next_turn():
 
 def test_tail_prime_merges_buffered_continuation(monkeypatch):
     monkeypatch.setenv("NANO_CLAW_PHONE_DYNAMIC_ENDPOINT", "1")
+    # This exercises tail-MERGING, not the endpoint threshold, but its audio
+    # fixture is built from silence(450) and so silently depended on dynamic
+    # mode forcing 450 ms. That default is now 700 ms (parity with the Gemini
+    # path — see phone_end_silence_ms), which left this waiting for an endpoint
+    # that never came. Pin the precondition the fixture actually needs.
+    monkeypatch.setenv("NANO_CLAW_PHONE_END_SILENCE_MS", "450")
     monkeypatch.setattr(phone.metrics_db, "bump_call_turns", lambda *args: None)
 
     async def _run():
@@ -334,7 +340,11 @@ def test_barge_in_clears_buffer_once_and_stops_playback(monkeypatch):
             playback = asyncio.create_task(call._speak_chunk("long answer"))
             await asyncio.wait_for(ws.media_sent.wait(), timeout=1)
 
-            feed_pcm(call, tone(300, 240))
+            # 400ms: task 086 raised the barge sustain default to 350ms so a
+            # cough can't cancel a reply. This test's subject is the
+            # clear-once/stop-playback behavior AFTER a commit, so it feeds a
+            # burst that clears the current threshold.
+            feed_pcm(call, tone(300, 400))
             await asyncio.wait_for(ws.clear_sent.wait(), timeout=1)
             await playback
             await call._flush_playback()  # one-shot even if requested again
@@ -455,6 +465,8 @@ def test_phone_config_get_reflects_env(monkeypatch):
     assert body["model"] == ""  # server default
     assert body["speed"] == 1.0
     assert body["active_calls"] == 0
+    assert body["speech_mode"] == "prepared"
+    assert body["speech_version"] == "nanoclaw-speech-v1"
 
 
 def test_phone_config_set_overrides_env_live(monkeypatch):
@@ -544,3 +556,714 @@ def test_flow_create_failure_falls_back_and_does_not_retry(monkeypatch):
             await asyncio.sleep(0)
 
     run(_run())
+
+
+def test_phone_session_id_is_valid_for_the_agent_api():
+    # Telnyx call ids carry a "v3:" prefix; the colon must not leak into the
+    # session id or the agent API rejects it with 400 and the caller hears only
+    # the fallback line. The id must match ^[A-Za-z0-9_-]{1,64}$.
+    import re as _re
+
+    async def _run():
+        call = phone.PhoneCall(object(), "v3:LzPQWbMd0r-Xp-CcMbKxk9CrBFyosMFapVcnD8GG")
+        try:
+            assert _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", call.session_id), call.session_id
+            assert ":" not in call.session_id
+        finally:
+            await call.close()
+
+    run(_run())
+
+
+def test_phone_chat_payload_carries_selected_mode_profile(monkeypatch):
+    # The console MODE selector sets the shared flow mode. The phone must send
+    # the matching profile per turn, or a switch to riff/nano-claw/intelligence
+    # is ignored and the agent answers with the default Space Channel persona.
+    from contextlib import asynccontextmanager
+    from voice.flow_session import set_flow_mode, get_flow_profile
+
+    captured = {}
+
+    class FakeResp:
+        headers = {"content-type": "application/json"}
+        async def aread(self):
+            return b'{"response": "ok"}'
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            captured["payload"] = json
+            yield FakeResp()
+
+    async def _run(mode, expected_profile):
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.session_id = "phone-test"
+        call.tap = None
+        call._http = FakeHttp()
+        # Minimal attributes _stream_reply touches before the reply returns.
+        call.barge = type("B", (), {"reset": lambda self: None})()
+        call.speaking = False
+        call.interrupted = False
+        call._playback_flush_sent = False
+        call.endpointer = type("E", (), {"reset": lambda self: None})()
+        assert set_flow_mode(mode) is True
+
+        async def fake_speak_sentences(units):
+            captured["spoke"] = True
+
+        call._speak_sentences = fake_speak_sentences
+        # We only need the outbound payload; the rest of _stream_reply touches
+        # far more call state than this unit builds, so ignore any later error.
+        try:
+            await call._stream_reply("hello")
+        except Exception:
+            pass
+        assert captured["payload"]["profile"] == expected_profile
+
+    run(_run("riff", get_flow_profile("riff")))
+    run(_run("intelligence", get_flow_profile("intelligence")))
+    set_flow_mode("spacechannel")
+
+
+def test_phone_config_toggles_speech_mode_live(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_PHONE_SPEECH_PREPARATION", raising=False)
+    monkeypatch.delenv("NANO_CLAW_SPEECH_PREPARATION", raising=False)
+    # Default is prepared.
+    _, body = _config_roundtrip("get")
+    assert body["speech_mode"] == "prepared"
+    # Flip to raw (whole sentences) live.
+    status, body = _config_roundtrip("post", payload={"speech_mode": "raw"})
+    assert status == 200
+    assert body["speech_mode"] == "raw"
+    # Batch keeps the pre-streaming compile-at-final behavior available.
+    status, body = _config_roundtrip("post", payload={"speech_mode": "batch"})
+    assert status == 200
+    assert body["speech_mode"] == "batch"
+    # And back.
+    _, body = _config_roundtrip("post", payload={"speech_mode": "prepared"})
+    assert body["speech_mode"] == "prepared"
+    # Reject nonsense.
+    status, _ = _config_roundtrip("post", payload={"speech_mode": "bogus"})
+    assert status == 400
+
+
+# ── Call review: event emission, greeting notice, header auth ─────────────────
+
+
+def _event_conn(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    monkeypatch.setattr(phone, "_metrics_conn", conn)
+    call_log._seq.clear()
+    return conn
+
+
+def test_telnyx_token_ok_accepts_header_token():
+    from aiohttp.test_utils import make_mocked_request
+
+    ok = make_mocked_request(
+        "POST", "/api/phone/incoming", headers={"X-NC-Phone-Token": "sekrit"}
+    )
+    bad = make_mocked_request(
+        "POST", "/api/phone/incoming", headers={"X-NC-Phone-Token": "wrong"}
+    )
+    assert phone._token_ok(ok) is True
+    assert phone._token_ok(bad) is False
+
+
+def test_compose_greeting_appends_notice_by_default(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_PHONE_RECORD_NOTICE", raising=False)
+    composed = phone._compose_greeting("Hello from Space Channel!")
+    assert composed == (
+        "Hello from Space Channel! " + phone.DEFAULT_RECORD_NOTICE
+    )
+
+
+def test_compose_greeting_off_restores_plain_greeting(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "off")
+    assert phone._compose_greeting("Hello!") == "Hello!"
+
+
+def test_compose_greeting_custom_notice(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_RECORD_NOTICE", "Calls are recorded.")
+    assert phone._compose_greeting("Hi.") == "Hi. Calls are recorded."
+
+
+def test_run_turn_emits_user_and_scheduler_assistant_events(
+    tmp_path, monkeypatch
+):
+    from voice import call_log
+    from voice.flow_session import FlowReply
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    class FakeFlow:
+        greeting = "Thanks for calling."
+
+        async def reply(self, text):
+            return FlowReply(
+                text="Monday at nine works.",
+                done=False,
+                outcome=None,
+                slots={"day": "monday"},
+                rejected=["tuesday"],
+                turns_used=2,
+                max_turns=12,
+                supervisor_ms=180.5,
+                event_id=None,
+            )
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-flow-events")
+        try:
+            call.flow = FakeFlow()
+
+            async def no_sync():
+                return None
+
+            async def no_speak(text):
+                return None
+
+            async def fake_transcribe(pcm):
+                return "book me monday"
+
+            call._sync_flow_mode_async = no_sync
+            call.speak = no_speak
+            call._transcribe = fake_transcribe
+            await call._run_turn(b"\x00\x00" * 200)
+        finally:
+            await call.close()
+
+    run(exercise())
+    events = call_log.read_timeline(conn, "cc-flow-events")
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["call_start", "user_turn", "assistant_turn", "call_end"]
+    assert events[0]["payload"]["mode"] == "scheduler" or events[0]["payload"]["mode"] == "persona"
+    assert events[0]["payload"]["sessionId"].startswith("phone-")
+    assert events[1]["payload"] == {"text": "book me monday"}
+    assistant = events[2]["payload"]
+    assert assistant["text"] == "Monday at nine works."
+    assert assistant["mode"] == "scheduler"
+    assert assistant["slots"] == {"day": "monday"}
+    assert assistant["rejected"] == ["tuesday"]
+    assert assistant["supervisorMs"] == 180.5
+    assert assistant["turnsUsed"] == 2
+
+
+def test_interrupt_emits_barge_in_and_close_emits_call_end_once(
+    tmp_path, monkeypatch
+):
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-interrupt")
+        call.speaking = True
+        call._interrupt()
+        call.speaking = False
+        await call.close()
+        await call.close()
+
+    run(exercise())
+    kinds = [e["kind"] for e in call_log.read_timeline(conn, "cc-interrupt")]
+    assert kinds.count("barge_in") == 1
+    assert kinds.count("call_end") == 1
+
+
+def test_persona_stream_emits_assistant_turn(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    sse_lines = [
+        "event: delta",
+        'data: {"text": "Hello there. General Kenobi."}',
+        "",
+        "event: final",
+        'data: {"response": "Hello there. General Kenobi."}',
+        "",
+    ]
+
+    class FakeResp:
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            yield FakeResp()
+
+    async def exercise():
+        call = phone.PhoneCall.__new__(phone.PhoneCall)
+        call.call_id = "cc-persona"
+        call.session_id = "phone-ccpersona"
+        call.tap = None
+        call._http = FakeHttp()
+        call.barge = type("B", (), {"reset": lambda self: None})()
+        call.closed = False
+        call.speaking = False
+        call.interrupted = False
+        call._playback_flush_sent = False
+        call.endpointer = type("E", (), {"reset": lambda self: None})()
+
+        async def consume(units):
+            async for _ in units:
+                pass
+
+        call._speak_sentences = consume
+        await call._stream_reply("hello")
+
+    run(exercise())
+    events = call_log.read_timeline(conn, "cc-persona")
+    assert [e["kind"] for e in events] == ["assistant_turn"]
+    payload = events[0]["payload"]
+    assert payload["mode"] == "persona"
+    assert payload["complete"] is True
+    assert payload["interrupted"] is False
+    assert "Hello there." in payload["text"]
+    assert "General Kenobi." in payload["text"]
+    assert payload["model"] is None  # stream carried no debug info
+    assert payload["modelFallback"] is False
+
+
+def _persona_stream_call(sse_lines):
+    from contextlib import asynccontextmanager
+
+    class FakeResp:
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class FakeHttp:
+        @asynccontextmanager
+        async def stream(self, method, url, json, headers):
+            yield FakeResp()
+
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "cc-served"
+    call.session_id = "phone-ccserved"
+    call.tap = None
+    call._http = FakeHttp()
+    call.barge = type("B", (), {"reset": lambda self: None})()
+    call.closed = False
+    call.speaking = False
+    call.interrupted = False
+    call._playback_flush_sent = False
+    call.endpointer = type("E", (), {"reset": lambda self: None})()
+
+    async def consume(units):
+        async for _ in units:
+            pass
+
+    call._speak_sentences = consume
+    return call
+
+
+def test_persona_stream_records_served_model_on_fallback(tmp_path, monkeypatch):
+    # The agent server reports the model that actually wrote the turn in
+    # debug.model (requestedModel present only when a fallback answered);
+    # the call timeline must record it so the panel can attribute turns.
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+
+    debug = (
+        '{"model": "gemini/gemini-flash-lite-latest",'
+        ' "requestedModel": "ollama/gemma4:e2b"}'
+    )
+    sse_lines = [
+        "event: delta",
+        'data: {"text": "Words by Gemini."}',
+        "",
+        "event: final",
+        'data: {"response": "Words by Gemini.", "debug": ' + debug + "}",
+        "",
+    ]
+
+    async def exercise():
+        await _persona_stream_call(sse_lines)._stream_reply("hello")
+
+    run(exercise())
+    payload = call_log.read_timeline(conn, "cc-served")[0]["payload"]
+    assert payload["model"] == "gemini/gemini-flash-lite-latest"
+    assert payload["modelRequested"] == "ollama/gemma4:e2b"
+    assert payload["modelFallback"] is True
+
+
+class CueWebSocket:
+    closed = False
+
+    def __init__(self):
+        self.frames = []
+
+    async def send_json(self, obj):
+        self.frames.append(obj)
+
+
+def _cue_call():
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "cc-cue"
+    call.tap = None
+    call.closed = False
+    call.speaking = False
+    call.ws = CueWebSocket()
+    call._thinking_cue_task = None
+    call._thinking_cue_stop = None
+    return call
+
+
+def test_thinking_cue_plays_ack_then_ticks_until_stopped(monkeypatch):
+    monkeypatch.setattr(phone, "THINKING_TICK_INTERVAL_S", 0.03)
+    call = _cue_call()
+
+    async def exercise():
+        call._start_thinking_cue()
+        assert call._thinking_cue_task is not None
+        await asyncio.sleep(0.7)  # paced ack chime (~0.36s) + at least one tick
+        assert len(call.ws.frames) > 0
+        call._stop_thinking_cue()
+        await asyncio.sleep(0.05)
+        after = len(call.ws.frames)
+        await asyncio.sleep(0.15)
+        assert len(call.ws.frames) == after  # nothing sent after stop
+
+    run(exercise())
+
+
+def test_thinking_cue_env_off_sends_nothing(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_THINKING_CUE", "off")
+    call = _cue_call()
+
+    async def exercise():
+        call._start_thinking_cue()
+        assert call._thinking_cue_task is None
+        await asyncio.sleep(0.05)
+        assert call.ws.frames == []
+        call._stop_thinking_cue()  # idempotent no-op
+
+    run(exercise())
+
+
+def test_speak_sentences_stops_thinking_cue_first():
+    call = _cue_call()
+    stopped = []
+    call._stop_thinking_cue = lambda: stopped.append(True)
+
+    async def empty():
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    run(call._speak_sentences(empty()))
+    assert stopped == [True]
+
+
+def test_interrupt_stops_thinking_cue(tmp_path, monkeypatch):
+    conn = _event_conn(tmp_path, monkeypatch)
+    call = _cue_call()
+    call.interrupted = False
+    call._active_tap_sentence_index = None
+    call._playback_flush_sent = True
+    call.barge = type("B", (), {"take_frames": lambda self: []})()
+    call.endpointer = type("E", (), {"prime": lambda self, f: None})()
+    call._mark_activity = lambda: None
+    stopped = []
+    call._stop_thinking_cue = lambda: stopped.append(True)
+
+    async def exercise():
+        call._interrupt()
+        await asyncio.sleep(0)
+
+    run(exercise())
+    assert stopped == [True]
+
+
+def test_call_start_event_is_self_describing(tmp_path, monkeypatch):
+    from voice import call_log
+
+    conn = _event_conn(tmp_path, monkeypatch)
+    monkeypatch.setenv("NANO_CLAW_PHONE_VOICE", "lux_george")
+    monkeypatch.setenv("NANO_CLAW_PHONE_STT_SIZE", "medium")
+    monkeypatch.setenv("NANO_CLAW_PHONE_SPEED", "1.2")
+
+    async def exercise():
+        call = phone.PhoneCall(object(), "cc-selfdesc")
+        await call.close()
+
+    run(exercise())
+    start = next(
+        e
+        for e in call_log.read_timeline(conn, "cc-selfdesc")
+        if e["kind"] == "call_start"
+    )
+    payload = start["payload"]
+    assert payload["voice"] == "lux_george"
+    assert payload["engine"] == "luxtts"
+    assert payload["sttSize"] == "medium"
+    assert payload["speed"] == "1.2"
+    assert payload["model"] is None  # unset → server default chain
+
+
+def test_media_start_records_call_row_and_greeting_event(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+    monkeypatch.delenv("NANO_CLAW_PHONE_GREETING", raising=False)
+    monkeypatch.delenv("NANO_CLAW_PHONE_RECORD_NOTICE", raising=False)
+
+    class StubCall:
+        default_greeting = "Hello from Space Channel!"
+
+        @property
+        def greeting_line(self):
+            # PhoneCall.greeting_line, minus the per-DID profile this stub has
+            # no route for — i.e. exactly the old inline expression.
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
+
+        @property
+        def recording_notice(self):
+            # Node-wide, as for any call with no delegate profile.
+            notice = phone._cfg("NANO_CLAW_PHONE_RECORD_NOTICE",
+                                phone.DEFAULT_RECORD_NOTICE)
+            return "" if notice.lower() in ("off", "0", "") else notice
+
+        async def speak(self, text):
+            return None
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(
+        phone.PhoneCall, "create_async", staticmethod(fake_create)
+    )
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-media-start"}}
+            )
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    calls = metrics_db.recent_calls(conn)
+    assert any(c["call_id"] == "cc-media-start" for c in calls)
+    events = call_log.read_timeline(conn, "cc-media-start")
+    greeting_events = [e for e in events if e["kind"] == "assistant_turn"]
+    assert len(greeting_events) == 1
+    payload = greeting_events[0]["payload"]
+    assert payload["mode"] == "greeting"
+    assert payload["text"] == (
+        "Hello from Space Channel! " + phone.DEFAULT_RECORD_NOTICE
+    )
+
+
+def test_retention_days_default_disable_and_fallback(monkeypatch):
+    monkeypatch.delenv("NANO_CLAW_CALL_RETENTION_DAYS", raising=False)
+    assert phone._retention_days() == 30.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "7")
+    assert phone._retention_days() == 7.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "0")
+    assert phone._retention_days() == 0.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "")
+    assert phone._retention_days() == 0.0
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "bogus")
+    assert phone._retention_days() == 30.0
+
+
+def test_retention_sweep_runs_once_at_startup(tmp_path, monkeypatch):
+    from voice import call_log
+
+    swept = []
+    monkeypatch.setattr(
+        call_log, "sweep", lambda conn, root, days: swept.append((str(root), days))
+    )
+    monkeypatch.setenv("NANO_CLAW_CALL_RETENTION_DAYS", "14")
+    monkeypatch.setenv("NANO_CLAW_PHONE_TAP_DIR", str(tmp_path / "taps"))
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+        finally:
+            await client.close()
+
+    run(_run())
+    assert swept == [(str(tmp_path / "taps"), 14.0)]
+
+
+def test_media_ws_close_fills_missing_call_end(tmp_path, monkeypatch):
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+
+    class StubCall:
+        default_greeting = "Hi."
+
+        @property
+        def greeting_line(self):
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
+
+        @property
+        def recording_notice(self):
+            notice = phone._cfg("NANO_CLAW_PHONE_RECORD_NOTICE",
+                                phone.DEFAULT_RECORD_NOTICE)
+            return "" if notice.lower() in ("off", "0", "") else notice
+
+        async def speak(self, text):
+            return None
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(phone.PhoneCall, "create_async", staticmethod(fake_create))
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-ws-end"}}
+            )
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    row = next(c for c in metrics_db.recent_calls(conn) if c["call_id"] == "cc-ws-end")
+    assert row["ended_at"]
+
+
+def test_phone_config_reports_display_number(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_PHONE_DISPLAY_NUMBER", "512-277-7311")
+    _, body = _config_roundtrip("get")
+    assert body["display_number"] == "512-277-7311"
+
+
+def test_degraded_stt_answer_apologizes_and_hangs_up(tmp_path, monkeypatch):
+    # The 07-26 incident: the node answered while the pipeline was dying and
+    # the caller talked into a line that couldn't hear. With STT unreachable
+    # at answer time, the line now speaks a canned apology (cached/piper —
+    # no service dependency) and hangs up instead.
+    from voice import call_log, metrics_db
+
+    conn = metrics_db.init_db(str(tmp_path / "metrics.db"))
+    assert conn is not None
+    assert call_log.ensure_schema(conn)
+    call_log._seq.clear()
+    monkeypatch.setattr(phone.metrics_db, "init_db", lambda *a, **k: conn)
+
+    class DeadHttp:
+        async def get(self, *a, **k):
+            raise OSError("connection refused")
+
+    spoken = []
+    hangups = []
+
+    class StubCall:
+        default_greeting = "Hello from Space Channel!"
+
+        @property
+        def greeting_line(self):
+            # PhoneCall.greeting_line, minus the per-DID profile this stub has
+            # no route for — i.e. exactly the old inline expression.
+            return phone._cfg("NANO_CLAW_PHONE_GREETING") or self.default_greeting
+
+        @property
+        def recording_notice(self):
+            # Node-wide, as for any call with no delegate profile.
+            notice = phone._cfg("NANO_CLAW_PHONE_RECORD_NOTICE",
+                                phone.DEFAULT_RECORD_NOTICE)
+            return "" if notice.lower() in ("off", "0", "") else notice
+        _http = DeadHttp()
+
+        async def speak(self, text):
+            spoken.append(text)
+
+        async def close(self):
+            return None
+
+        def feed_media(self, payload):
+            return None
+
+    async def fake_create(ws, cid):
+        return StubCall()
+
+    monkeypatch.setattr(phone.PhoneCall, "create_async", staticmethod(fake_create))
+
+    async def fake_telnyx(http, cid, cmd, payload):
+        hangups.append((cid, cmd))
+
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_telnyx)
+
+    async def _run():
+        client = TestClient(TestServer(make_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/ws/phone-media?token=sekrit")
+            await ws.send_json(
+                {"event": "start", "start": {"call_control_id": "cc-degraded"}}
+            )
+            await asyncio.sleep(0.1)  # let the apology task run
+            await ws.send_json({"event": "stop"})
+            await ws.close()
+        finally:
+            await client.close()
+
+    run(_run())
+    assert spoken == [phone.DEGRADED_ANSWER_LINE]
+    assert ("cc-degraded", "hangup") in hangups
+    kinds = [e["kind"] for e in call_log.read_timeline(conn, "cc-degraded")]
+    assert "degraded_answer" in kinds
+    turns = [
+        e["payload"]
+        for e in call_log.read_timeline(conn, "cc-degraded")
+        if e["kind"] == "assistant_turn"
+    ]
+    assert turns and turns[0]["mode"] == "error"
+
+
+def test_stt_reachable_fails_open_without_http():
+    async def exercise():
+        assert await phone._stt_reachable(None) is True
+
+    run(exercise())

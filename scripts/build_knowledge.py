@@ -95,6 +95,16 @@ def clean(text: str, limit: int = 220) -> str:
     return text[:limit].rsplit(" ", 1)[0] + "…"
 
 
+def clean_headline(text: object, limit: int = 160) -> str:
+    """Neutralize a third-party headline before it enters the prompt digest."""
+
+    # Feed headlines are untrusted prompt text: collapse newlines, strip the
+    # Markdown section/list openers '#' and '*', and enforce a short bound so a
+    # headline can never forge a heading or introduce a new prompt section.
+    without_markdown_openers = re.sub(r"[#*]", "", str(text or ""))
+    return clean(without_markdown_openers, limit)
+
+
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -261,7 +271,8 @@ def render_ufo_wire(feed: dict, crawled: datetime | None, limit: int) -> list[st
         return lines
     for it in items:
         lines.append(
-            f"- [{it.get('category', 'news')}] {it.get('title', 'Untitled')}"
+            f"- [{clean(str(it.get('category', 'news') or ''), 40)}] "
+            f"{clean_headline(it.get('title', 'Untitled'))}"
             f" ({fmt_utc(it.get('publishedAt'), day_only=True)}) — {clean(it.get('summary', ''), limit)}"
         )
     return lines
@@ -280,8 +291,10 @@ def render_articles(feed: dict, crawled: datetime | None, limit: int) -> list[st
         return lines
     for a in arts:
         lines.append(
-            f"- {fmt_utc(a.get('date'), day_only=True)} · {a.get('source', '?')}: "
-            f"{a.get('title', 'Untitled')} — {clean(a.get('summary', ''), max(150, limit - 50))}"
+            f"- {fmt_utc(a.get('date'), day_only=True)} · "
+            f"{clean(str(a.get('source', '?') or ''), 60)}: "
+            f"{clean_headline(a.get('title', 'Untitled'))} — "
+            f"{clean(a.get('summary', ''), max(150, limit - 50))}"
         )
     return lines
 

@@ -538,6 +538,12 @@ def test_all_completion_paths_and_partial_error_rules(monkeypatch, tmp_path):
         session._scheduler_flow_enabled = True
         session._scheduler_flow_attempted = True
         session._scheduler_flow = Flow()
+        # The handler re-reads the runtime mode per turn (live gate); this
+        # test wires the flow onto the session directly, so satisfy the gate
+        # without depending on the global flow-mode configuration.
+        monkeypatch.setattr(
+            server, "active_scheduling_domain", lambda mode: "test-domain"
+        )
         assert await server._handle_scheduler_request(
             ws, session, "scheduler user"
         )
@@ -604,6 +610,65 @@ def test_all_completion_paths_and_partial_error_rules(monkeypatch, tmp_path):
             "error": "message_too_long",
             "maxLength": MAX_TURN_TEXT_LENGTH,
         }
+
+    asyncio.run(exercise())
+
+
+def test_partially_delivered_reply_is_not_persisted_as_heard(tmp_path):
+    class PartialDeliverySession(CaptureSession):
+        def __init__(self, store, runtime):
+            super().__init__(store, runtime)
+            self.last_playback_receipt = None
+
+        def begin_stream(self):
+            return SimpleNamespace(utterance_id="utt-partial", generation=7)
+
+        async def speak_text(self, _text, _voice_id, _speed):
+            self.last_playback_receipt = {
+                "event_type": "utterance_delivery_receipt",
+                "conversation_id": self.conversation_id,
+                "utterance_id": "utt-partial",
+                "generation": 7,
+                "status": "partial",
+                "reason": "confirmed_barge_in",
+                "chunks": [
+                    {
+                        "chunk_id": "chunk_0",
+                        "sequence": 0,
+                        "status": "partial",
+                        "played_audio_ms": 240,
+                    }
+                ],
+                "acts": [],
+            }
+            return None
+
+    async def exercise():
+        store = make_store(tmp_path / "history.db")
+        add_user(store, "user-a")
+        session = PartialDeliverySession(store, server._HistoryRuntime())
+        ws = CaptureWebSocket()
+
+        assert await server._capture_user_utterance(
+            ws, session, "question interrupted during playback"
+        )
+        server._begin_agent_turn(session)
+        await server._process_api_response(
+            ws,
+            session,
+            {"type": "final", "response": "planned but only partly heard"},
+        )
+
+        _metadata, turns = read_turns(store, session.conversation_id)
+        assert [(turn["role"], turn["text"]) for turn in turns] == [
+            ("user", "question interrupted during playback")
+        ]
+        receipt = next(
+            message
+            for message in ws.messages
+            if message["type"] == "utterance_delivery_receipt"
+        )
+        assert receipt["status"] == "partial"
 
     asyncio.run(exercise())
 

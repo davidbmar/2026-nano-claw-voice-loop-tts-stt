@@ -1,6 +1,16 @@
 import numpy as np
+import pytest
 
 from voice import tts, kokoro_client, lux_client
+
+
+@pytest.fixture(autouse=True)
+def isolated_synth_cache():
+    # The engine-render cache is module-global; without clearing it, one
+    # test's successful render hides the next test's engine behavior.
+    tts.clear_synth_cache()
+    yield
+    tts.clear_synth_cache()
 
 
 def _pcm(n, rate):
@@ -65,13 +75,50 @@ def test_unknown_voice_uses_piper_default(monkeypatch):
     assert called["voice_id"] == tts.DEFAULT_VOICE
 
 
-def test_lux_voice_48k_passes_through(monkeypatch):
-    # LuxTTS already returns 48kHz — no resampling, byte length preserved.
-    monkeypatch.setattr(
-        lux_client, "synthesize", lambda text, voice, speed: (_pcm(4800, 48000), 48000)
-    )
-    out = tts.synthesize("hello", "lux_heart", 1.0)
-    assert len(out) // 2 == 4800
+def _burst_then_speech():
+    # A synthetic Lux-shaped signal: a loud leading burst, a silence dip, then
+    # sustained speech-level energy.
+    rate = tts.TARGET_RATE
+    # Real Lux bursts are brief (1-2 windows) then dip; that brevity is what
+    # lets the 30ms-sustained detector tell a burst from speech.
+    burst = (np.random.RandomState(1).randn(rate * 15 // 1000) * 900).astype(np.int16)
+    dip = np.zeros(rate * 55 // 1000, dtype=np.int16)
+    speech = (np.random.RandomState(2).randn(rate * 400 // 1000) * 4000).astype(np.int16)
+    return np.concatenate([burst, dip, speech]).tobytes()
+
+
+def test_lux_onset_trim_removes_leading_burst():
+    signal = _burst_then_speech()
+    trimmed = tts._trim_lux_onset(signal)
+    # The loud burst is removed (a ~20ms silent lead-in before speech is kept).
+    removed_ms = (len(signal) - len(trimmed)) // 2 * 1000 // tts.TARGET_RATE
+    assert 30 <= removed_ms <= 90, removed_ms
+    # The loud leading burst is gone from the retained head...
+    head = np.frombuffer(trimmed, dtype=np.int16)[: tts.TARGET_RATE * 20 // 1000]
+    assert np.sqrt((head.astype(float) ** 2).mean()) < 300, "burst removed from head"
+    # ...and the sustained speech survives further in.
+    body = np.frombuffer(trimmed, dtype=np.int16)[tts.TARGET_RATE * 40 // 1000:]
+    assert np.sqrt((body.astype(float) ** 2).mean()) > 1500, "speech preserved"
+
+
+def test_lux_onset_trim_keeps_immediate_speech():
+    # Speech from sample zero (no burst) must not be trimmed.
+    rate = tts.TARGET_RATE
+    speech = (np.random.RandomState(3).randn(rate * 400 // 1000) * 4000).astype(np.int16).tobytes()
+    assert tts._trim_lux_onset(speech) == speech
+
+
+def test_lux_onset_trim_disabled_is_a_noop(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_LUX_TRIM_MS", "0")
+    import importlib
+
+    importlib.reload(tts)
+    try:
+        signal = _burst_then_speech()
+        assert tts._trim_lux_onset(signal) == signal
+    finally:
+        monkeypatch.delenv("NANO_CLAW_LUX_TRIM_MS", raising=False)
+        importlib.reload(tts)
 
 
 def test_lux_failure_falls_back_to_piper(monkeypatch):
@@ -126,14 +173,16 @@ def test_kokoro_receives_normalized_scheduler_text(monkeypatch):
     )
 
 
-def test_sentence_final_chunk_has_160ms_silence_gap(monkeypatch):
+def test_sentence_final_chunk_has_configured_silence_gap(monkeypatch):
     speech = np.ones(4800, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
     out = tts.synthesize("A complete sentence.", "en_US-lessac-medium", 1.0)
     gap_bytes = tts.TARGET_RATE * tts.SENTENCE_GAP_MS // 1000 * 2
 
-    assert out[:-gap_bytes] == speech
+    # The speech portion keeps its length (edges are declicked, not trimmed) and
+    # the configured silence gap is appended as pure zeros.
+    assert len(out) == len(speech) + gap_bytes
     assert out[-gap_bytes:] == bytes(gap_bytes)
 
 
@@ -141,4 +190,91 @@ def test_unpunctuated_final_fragment_has_no_extra_gap(monkeypatch):
     speech = np.ones(4800, dtype=np.int16).tobytes()
     monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
 
-    assert tts.synthesize("final fragment", "en_US-lessac-medium", 1.0) == speech
+    out = tts.synthesize("final fragment", "en_US-lessac-medium", 1.0)
+    # No sentence gap is appended, so the length is unchanged; the edges are
+    # now declicked, so assert length rather than byte-identity.
+    assert len(out) == len(speech)
+
+
+def test_compiler_pause_overrides_legacy_sentence_gap(monkeypatch):
+    speech = np.ones(4800, dtype=np.int16).tobytes()
+    monkeypatch.setattr(tts, "_synthesize_piper", lambda text, voice_id: speech)
+
+    zero_pause = tts.synthesize(
+        "A final question?", "en_US-lessac-medium", 1.0, pause_after_ms=0
+    )
+    assert len(zero_pause) == len(speech)
+
+    out = tts.synthesize(
+        "A continuing phrase", "en_US-lessac-medium", 1.0, pause_after_ms=120
+    )
+    gap_bytes = tts.TARGET_RATE * 120 // 1000 * 2
+    assert len(out) == len(speech) + gap_bytes
+    assert out[-gap_bytes:] == bytes(gap_bytes)
+
+
+def _max_abs_step(pcm: bytes) -> int:
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.int32)
+    if samples.size < 2:
+        return 0
+    return int(np.abs(np.diff(samples)).max())
+
+
+def test_declick_ramps_onset_to_zero():
+    # The onset ramps up from ~0 (declicks a hard engine onset). The trailing
+    # edge is NOT faded by default — that fade is off (env-enableable), since a
+    # chunk ends near zero and the pop was a beginning-of-chunk artifact.
+    n = tts.TARGET_RATE // 10  # 100 ms
+    tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
+    declicked = tts._declick_edges(tone)
+    samples = np.frombuffer(declicked, dtype=np.int16)
+    assert abs(int(samples[0])) < 400, "leading edge must ramp up from ~0"
+    assert abs(int(samples[-1])) < 400, "trailing edge ramps down to ~0 (fade-out on)"
+    assert int(samples[n // 2]) == 12000
+
+
+def test_sentence_gap_is_appended_and_onset_declicked():
+    n = tts.TARGET_RATE // 10
+    tone = (np.full(n, 12000, dtype=np.int16)).tobytes()
+    with_gap = tts._with_sentence_gap("A full sentence.", tone)
+    s = np.frombuffer(with_gap, dtype=np.int16)
+    # The onset is declicked to ~0...
+    assert abs(int(s[0])) < 400
+    # ...and the configured silence gap is appended as pure zeros.
+    gap = tts.TARGET_RATE * tts.SENTENCE_GAP_MS // 1000
+    assert len(with_gap) > len(tone)
+    assert bytes(with_gap[-gap * 2:]) == bytes(gap * 2)
+
+
+def test_declick_leaves_short_pcm_untouched():
+    tiny = np.array([5000, -5000], dtype=np.int16).tobytes()
+    assert tts._declick_edges(tiny) == tiny
+
+
+def test_declick_onset_and_tail_ramp_gradually_by_default():
+    # Both edges fade by default: the onset ramp smooths Lux's hard attack, and
+    # the tail ramp settles each clause chunk into the following pause silence.
+    assert tts._DECLICK_OUT_SAMPLES > 0
+    assert tts._DECLICK_IN_SAMPLES > 0
+    n = tts.TARGET_RATE // 5  # 200 ms
+    tone = np.full(n, 10000, dtype=np.int16).tobytes()
+    s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16).astype(np.int32)
+    assert abs(int(s[0])) < 200, "onset starts at ~zero"
+    assert abs(int(s[-1])) < 200, "tail settles to ~zero"
+    fin = tts._DECLICK_IN_SAMPLES
+    assert int(np.abs(np.diff(s[:fin])).max()) < 60, "onset ramp has no hard step"
+
+
+def test_declick_tail_fade_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("NANO_CLAW_DECLICK_OUT_MS", "18")
+    import importlib
+
+    importlib.reload(tts)
+    try:
+        n = tts.TARGET_RATE // 5
+        tone = np.full(n, 10000, dtype=np.int16).tobytes()
+        s = np.frombuffer(tts._declick_edges(tone), dtype=np.int16)
+        assert abs(int(s[-1])) < 200, "enabling the env fades the tail to ~zero"
+    finally:
+        monkeypatch.delenv("NANO_CLAW_DECLICK_OUT_MS", raising=False)
+        importlib.reload(tts)

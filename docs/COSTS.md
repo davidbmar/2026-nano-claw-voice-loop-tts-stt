@@ -17,9 +17,21 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
   component TEXT,
   units REAL,
   unit_kind TEXT,
-  usd_per_unit_snapshot REAL
+  usd_per_unit_snapshot REAL,
+  model TEXT DEFAULT ''
 );
 ```
+
+`ensure_schema()` also migrates pre-`model` deployments in place (guarded
+`ALTER TABLE ... ADD COLUMN`); rows written before the migration read back
+with `model = ''` and render as "unattributed".
+
+`model` values by component: `stt` → `whisper/<size>`; `tts` →
+`<catalog engine>/<voice_id>` (e.g. `luxtts/lux_george` — this is the
+*configured* engine; an in-process piper degradation inside `voice/tts.py`
+is not distinguished); `scheduler_llm`/`conversation_llm` → the wire model
+that actually served (fallback-aware via the API's `debug.model`);
+`telephony`/`infra` → `''`.
 
 One completed call is written atomically as several rows. A repeated call-end
 event is idempotent: if that `call_id` already has receipts, it is not inserted

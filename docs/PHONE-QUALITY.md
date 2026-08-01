@@ -43,12 +43,70 @@ a monotonic `t` in seconds. It records call and utterance boundaries, STT and
 agent completion, synthesis, one aggregate frame-pacing record per sentence,
 and barge-in. `utterance_start` and `utterance_end` include the frame's current
 int16 RMS and the rolling noise `floor`. It intentionally does not write a JSON
-record per audio frame.
+record for every ordinary audio frame. While the agent is speaking, suppressed
+barge votes are the exception: each `barge_candidate` records its decision
+reason and scores so false interruptions can be tuned from real calls.
 
 Each played sentence also records `gain_applied`, with its `sentence_index`,
 source `measured_peak_dbfs`, and `applied_gain_db`. The `tts_48k.wav` tap stays
 before normalization, so the event explains the gain between that source and
 the resampler rather than hiding the original TTS level.
+
+Streaming prepared speech changes the expected ordering on multi-sentence
+turns: the first `synth_start` now precedes `agent_done`, because sentences
+compile and synthesize while the model is still writing. `thinking_cue_start`
+/ `thinking_cue_stop` (with `ticks`) bracket the acknowledgment-chime +
+clock-tick window between utterance accept and first speech. A rare
+`prepared_stream_mismatch` event means the server rewrote the reply after
+streamed sentences were already spoken; the rewritten tail was deliberately
+not spoken (never double-speak) and the assistant_turn payload carries
+`preparedStreamMismatch: true`.
+
+## Streaming STT (LocalAgreement-2)
+
+`NANO_CLAW_PHONE_STT_STREAM=1` opts phone calls into incremental Whisper
+decoding; it is `0`/off by default during live validation. The endpointer tees
+the same PCM it is already retaining into the STT service in roughly 500 ms
+batches. After about 700 ms of new audio, Whisper re-decodes the current
+uncommitted window. When two consecutive hypotheses start with the same token
+prefix, LocalAgreement-2 commits that prefix, carries it as Whisper's
+`initial_prompt`, and trims its audio from later windows. Transcription
+therefore happens mostly while the caller is speaking rather than entirely
+after endpoint silence.
+
+Dynamic-endpoint continuations keep the same session. A provisional transcript
+such as “tell me about” can be finalized for the semantic-tail check, then new
+audio continues with the already committed prefix instead of re-decoding the
+merged utterance. The session closes only once the semantic tail is complete.
+Any start, feed, or finish error logs one warning and falls back to the
+unchanged one-shot `/transcribe` request with the endpointer's full PCM, so the
+turn is not lost. Stream sessions expire after 60 seconds idle.
+
+The tap exposes the incremental timeline:
+
+- `stt_pass` records `pass_count`, the uncommitted `window_ms`, and decode
+  `ms`.
+- A successful streamed `stt_done` adds `streamed: true`,
+  `committed_chars`, and `finish_ms`; its existing `ms` remains the phone-side
+  wall time waiting at the endpoint.
+- One-shot and fail-open turns retain the original `stt_done` shape.
+
+## Real-voice loopback fixture (required for Silero validation)
+
+Synthetic TTS caller audio scores low on the neural VAD (Silero correctly
+doubts it's human — on one Kokoro question only ~0.9s of a 2.6s sentence
+crossed 0.5 probability), so a text-prompt loopback cannot validate
+`NANO_CLAW_PHONE_VAD=silero`. Use a real-speech recording instead:
+
+    scripts/phone_loopback_test.py path/to/voice.wav   # mono 8k/16k PCM
+
+To (re)build a fixture, extract a clean utterance from a recorded call tap
+(e.g. `/app/data/phone-taps/<call>/inbound.wav` on the data volume) and
+keep it OUT of git — it is a real caller's voice. The conventional local
+path is `.loopback-voice.wav` (gitignored). Validated 2026-07-27: silero
+on the live line captured a 3.8s real utterance fully with an exact
+transcript, after the v5 context-prefix fix; energy VAD remains the
+automatic fallback when the model is unavailable.
 
 ## Enable and report a tap
 
@@ -94,6 +152,11 @@ deployment's data policy.
   nominally 20 ms intervals. The summed surplus should stay near the configured
   prebuffer instead of growing with answer length; a negative surplus or high
   p95/max interval points to starvation or jitter.
+- **STT timeline** lists each incremental decode window and its cost, followed
+  by the final tail latency and how many transcript characters stabilized
+  before endpointing.
+- **Barge-in decisions** counts candidate votes, committed interruptions, and
+  suppressions by reason (`low_conf`, `echo`, or `short`) for this call.
 - **Barge-in to last outbound frame** is signed. A positive value means a
   frame crossed the send boundary after barge-in; a negative value means the
   final send preceded detection. This does not include audio already buffered
@@ -266,7 +329,48 @@ the result should remain near 0.200 s regardless of the reply's duration.
 Short zero intervals at the beginning or immediately after an injected delay
 are expected catch-up; steady-state p95 intervals should remain near 20 ms.
 
-## Barge-in buffer flush
+## Voice-selective barge-in and buffer flush
+
+Phone barge-in is a deliberately stricter decision than ordinary utterance
+acceptance. The endpointer still uses Silero's existing 0.5/0.35 enter/exit
+hysteresis so quiet caller turns start promptly. While the agent is speaking,
+the barge path instead requires the raw per-chunk Silero probability to reach
+`NANO_CLAW_PHONE_BARGE_VAD_ENTER` (default `0.7`, clamped to `0.5`–`0.95`).
+Energy VAD keeps its existing 550-RMS barge boundary.
+
+A qualifying vote must accumulate for
+`NANO_CLAW_PHONE_BARGE_TRIGGER_MS` (default `350`, clamped to
+`120`–`1500`) inside the existing 800 ms window. This prevents a sub-300 ms
+cough from committing while allowing a deliberate 400 ms interruption.
+
+`NANO_CLAW_PHONE_ECHO_GATE` controls the own-voice defense and defaults to `1`
+whenever phone barge-in is enabled. The gateway retains only about 1.2 seconds
+of outbound phone-rate PCM actually sent to Telnyx. It compares 10 ms inbound
+and outbound energy envelopes over a ±120 ms lag search; normalized correlation
+at or above `NANO_CLAW_PHONE_ECHO_CORR` (default `0.75`, clamped to `0`–`1`)
+suppresses that inbound vote as likely speakerphone echo. Set the gate to `0`
+only as a diagnostic rollback.
+
+The tap event vocabulary separates candidates from commits:
+
+- `barge_candidate` with `reason=low_conf` means the endpointer considered the
+  frame speech but its raw Silero probability missed the stricter barge level.
+- `barge_candidate` with `reason=echo` means the outbound-reference correlation
+  met the echo threshold.
+- `barge_candidate` with `reason=short` means the frame qualified but the
+  configured sustain has not yet been reached.
+- `barge_in` remains the commit event. It means playback was cancelled and the
+  captured interruption was promoted into the caller's next utterance.
+
+The voice-selectivity ladder is:
+
+1. **Level 1 — speech vs noise:** Silero supplies neural speech classification
+   while energy VAD remains the fallback.
+2. **Level 2 — caller intent vs our own voice:** the asymmetric raw-probability
+   threshold, longer sustain, and outbound-reference echo gate described here.
+3. **Level 3 — caller vs other human voices:** speaker-conditioned personal VAD
+   is proposed, not yet active, in
+   `.context/backlog/087-personal-vad-speaker-conditioned-barge.md`.
 
 Historically, outbound 20 ms frames were sent at about 18 ms to keep Telnyx's
 jitter buffer fed. During a long answer that 10% lead accumulated, so merely

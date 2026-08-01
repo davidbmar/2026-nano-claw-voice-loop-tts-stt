@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: Thinking Cue (Ack Chime + Clock Ticking)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, "Segoe UI", sans-serif; max-width: 860px;
+         margin: 2rem auto; padding: 0 1.25rem; color: #1f2933; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e4e7eb; background: #16211f; } }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #2f855a; padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; color: #2f855a; }
+  code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: rgba(47,133,90,.12); padding: .1em .35em; border-radius: 4px; }
+  .meta { color: #6b7a76; font-size: .9em; }
+  li { margin: .25em 0; }
+</style>
+</head>
+<body>
+<h1>Thinking Cue: Ack Chime + Clock Ticking During the STT/LLM Wait</h1>
+<p class="meta">2026-07-26 · branch <code>call-review-panel</code> · approved by David
+(sound: clock ticking; timing: ack blip + repeat) · markdown source:
+<a href="design.md">design.md</a></p>
+
+<h2>Problem</h2>
+<p>After the caller stops speaking, the line is silent for the whole thinking window —
+STT (~5s on whisper/medium) + LLM (~2.8s hedged) + first-sentence synthesis. In the
+2026-07-26 13:30 incident call the caller asked "are you there?" and hung up.
+Silence reads as a dead line.</p>
+
+<h2>Caller experience</h2>
+<ul>
+  <li>The instant an utterance is <strong>accepted</strong>, the existing soft two-note
+      chime plays — "I heard you."</li>
+  <li>While the turn thinks, a quiet clock tick (~35 ms damped 2 kHz sine, ≈ −28 dBFS)
+      plays every 0.5 s.</li>
+  <li>Ticking stops the moment any real speech starts, on barge-in, turn end, or
+      hangup.</li>
+</ul>
+
+<h2>Design</h2>
+<ol>
+  <li><code>voice/processing_audio.py</code> — <code>thinking_tick()</code>: lru-cached
+      48 kHz PCM16 tick, click-free attack/decay; <code>processing_chime()</code> reused
+      unchanged as the ack.</li>
+  <li><code>voice/phone.py</code> — per-turn cue task, independent of the sentence
+      pipeline: <code>_start_thinking_cue()</code> at the top of <code>_run_turn</code>;
+      <code>_stop_thinking_cue()</code> from <code>_speak_sentences</code>,
+      <code>_interrupt</code>, <code>_turn_finished</code>, <code>close()</code>.
+      <code>_play_cue()</code> converts via the existing codec frame helpers, paces with
+      its <em>own</em> <code>FramePacer</code>, tees <code>tap.outbound_frame</code>
+      (cues appear in recordings and <code>/calls</code>), never touches
+      <code>self.speaking</code>. Stop-event checked before every frame — cue audio can
+      never interleave with reply audio. Gate:
+      <code>NANO_CLAW_PHONE_THINKING_CUE=off</code> (console-overridable, persisted).
+      Tap events <code>thinking_cue_start/stop</code> with tick count.</li>
+  <li>Billing — none: cues bypass <code>_synthesize_sentence</code>, consistent with the
+      existing earcon rule. Scheduler-flow turns share <code>_run_turn</code> → same
+      cue.</li>
+</ol>
+
+<h2>Not doing</h2>
+<p>No volume/interval console controls; no per-phase sounds; no cue during greeting or
+idle prompts.</p>
+
+<h2>Tests &amp; verification</h2>
+<p>Tick waveform properties; cue loop vs a recording fake websocket (ack immediately,
+ticks accumulate, stop halts, <code>off</code> disables, idempotent stop);
+<code>_speak_sentences</code> stops the cue before speech. Then: pytest → rebuild →
+drain/undrain → loopback ("FIRST ANSWER AUDIO") → tap shows
+<code>thinking_cue_start</code>, ticks ≥ 1, <code>thinking_cue_stop</code> before
+sentence-1 playback → live call to 512-277-7311.</p>
+</body>
+</html>

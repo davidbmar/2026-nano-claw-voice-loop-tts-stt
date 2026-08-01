@@ -67,3 +67,36 @@ def test_barge_honors_external_speech_flag():
     quiet = np.full(FRAME_SAMPLES, 50, dtype=np.int16)
     # Quiet frames flagged as speech: fires after sustain
     assert any(det.feed(quiet, is_speech=True) for _ in range(60))
+
+
+def test_chunks_carry_silero_v5_context_prefix(monkeypatch):
+    # Silero v5's ONNX expects each chunk prefixed with the tail of the
+    # previous one (64 samples @16k, 32 @8k). Bare chunks score ~0 on real
+    # speech — measured on a live tap: bare-512 max prob 0.002 vs 0.999
+    # with the prefix (and 0.410 vs 0.993 at 8k).
+    captured = []
+
+    class FakeSession:
+        def run(self, _out, feeds):
+            captured.append(np.array(feeds["input"][0]))
+            return np.array([[0.7]], dtype=np.float32), feeds["state"]
+
+    monkeypatch.setattr(silero_vad, "_get_session", lambda: FakeSession())
+
+    vad16 = silero_vad.SileroVAD(sample_rate=16000)
+    frame16 = (np.arange(320) % 100).astype(np.int16)
+    for _ in range(4):
+        vad16.feed(frame16)
+    assert captured, "no inference ran"
+    assert all(len(x) == 512 + 64 for x in captured)
+    # First chunk: zero context. Later chunks: context == previous chunk tail.
+    assert np.all(captured[0][:64] == 0.0)
+    assert np.allclose(captured[1][:64], captured[0][64:][-64:])
+
+    captured.clear()
+    vad8 = silero_vad.SileroVAD(sample_rate=8000)
+    frame8 = (np.arange(160) % 100).astype(np.int16)
+    for _ in range(4):
+        vad8.feed(frame8)
+    assert all(len(x) == 256 + 32 for x in captured)
+    assert np.allclose(captured[1][:32], captured[0][32:][-32:])

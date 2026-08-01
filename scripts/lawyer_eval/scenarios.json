@@ -1,0 +1,113 @@
+[
+  {
+    "id": "all-in-one-initial",
+    "name": "Everything in one sentence (Thursday at 2)",
+    "expected_outcome": "booked",
+    "expected_service_type": "initial_consultation",
+    "required_day_offset": 4,
+    "required_time": "14:00",
+    "scripted_utterance_templates": [
+      "I need an initial consultation {day_4_name} at 2."
+    ],
+    "brief_template": "You need an initial consultation by video at exactly 2 PM on {day_4_label}. Your opening line already gave the service, day, and time in one sentence. Accept only that appointment if the scheduler accurately restates it. For the default Sunday-start fixture, the exact line is: I need an initial consultation Thursday at 2."
+  },
+  {
+    "id": "ambiguous-contract-service",
+    "name": "Ambiguous contract matter requires service clarification",
+    "expected_outcome": "booked",
+    "expected_service_type": "initial_consultation",
+    "required_clarification": true,
+    "scripted_utterance_templates": [
+      "It's about a contract."
+    ],
+    "brief": "You are a new client asking for advice before signing a contract; there is no active dispute and you have never met this lawyer. Do not volunteer those facts until the scheduler clarifies whether you need a general initial consultation or a contract-dispute consultation. Once asked, explain briefly and book a valid initial consultation."
+  },
+  {
+    "id": "flexible-follow-up",
+    "name": "Flexible 30-minute follow-up call",
+    "expected_outcome": "booked",
+    "expected_service_type": "follow_up_call",
+    "scripted_utterance_templates": [
+      "I need a follow-up call, and I'm flexible this week."
+    ],
+    "brief": "You are an existing client who needs a follow-up call. Any genuinely available day and time works. Accept the first concrete 30-minute phone opening that is offered."
+  },
+  {
+    "id": "dispute-cannot-fit-requested-day",
+    "name": "120-minute dispute cannot fit requested day",
+    "expected_outcomes": [
+      "booked",
+      "not_booked"
+    ],
+    "expected_service_type": "contract_dispute_consult",
+    "forbidden_day_offset": 2,
+    "scripted_utterance_templates": [
+      "I need a contract dispute consultation on {day_2_name}, around 10."
+    ],
+    "brief_template": "You need the full contract-dispute consultation and initially ask for {day_2_label}, whose fragmented windows cannot hold 120 minutes. Never accept a shortened appointment. If the scheduler explains the constraint, you may move to a valid 120-minute opening on {day_3_name}; otherwise politely end without a booking."
+  },
+  {
+    "id": "decline-confirm-then-rebook",
+    "name": "Decline scripted confirmation, then rebook another day",
+    "expected_outcome": "booked",
+    "expected_service_type": "initial_consultation",
+    "required_day_offset": 5,
+    "required_decline_then_rebook": true,
+    "scripted_utterance_templates": [
+      "I need an initial consultation {day_4_name} afternoon."
+    ],
+    "confirmation_response_templates": [
+      "No, don't book that. I need {day_5_name} instead.",
+      "Yes, please do."
+    ],
+    "brief_template": "You need an initial consultation. Start with {day_4_name} afternoon, but at the first explicit 'shall I book it?' question decline and switch to {day_5_label}. At the next confirmation, affirm only if the proposed appointment is on {day_5_name} and valid."
+  },
+  {
+    "id": "conflict-first-commit",
+    "name": "First commit conflicts, re-offer books elsewhere",
+    "expected_outcome": "booked",
+    "expected_service_type": "contract_dispute_consult",
+    "conflict_on_first_commit": true,
+    "required_conflict_reoffer": true,
+    "scripted_utterance_templates": [
+      "I need a contract dispute consultation {day_4_name} at 2."
+    ],
+    "confirmation_response_templates": [
+      "Yes, please do.",
+      "That works, confirm."
+    ],
+    "brief_template": "You need a contract-dispute consultation and initially prefer 2 PM on {day_4_label}. Confirm that first proposal. If told the slot was just taken, accept a different valid 120-minute opening, then explicitly confirm the re-offer."
+  },
+  {
+    "id": "human-escape",
+    "name": "Deterministic human escape",
+    "expected_outcome": "escape",
+    "scripted_utterance_templates": [
+      "Could I speak with a human operator?"
+    ],
+    "brief": "Ask for a human operator immediately and do not discuss appointment details."
+  },
+  {
+    "id": "impossible-blocked-day-only",
+    "name": "Impossible 120-minute ask stays not booked",
+    "expected_outcome": "not_booked",
+    "expected_service_type": "contract_dispute_consult",
+    "max_caller_turns": 14,
+    "scripted_utterance_templates": [
+      "I need a contract dispute consultation on {day_1_name}, and no other day works."
+    ],
+    "brief_template": "You need the full 120-minute contract-dispute consultation, but the fully blocked {day_1_label} is absolutely the only day you can attend. Refuse every alternate date and every shorter service. Do not affirm any confirmation for another day; remain polite until the scheduler ends the attempt."
+  },
+  {
+    "id": "early-ambiguous-yes",
+    "name": "Early yes cannot bypass the scripted confirm gate",
+    "expected_outcome": "booked",
+    "expected_service_type": "follow_up_call",
+    "early_affirmation_turn": 2,
+    "scripted_utterance_templates": [
+      "I'd like to schedule something.",
+      "Yes."
+    ],
+    "brief": "Your second utterance is an ambiguous early yes while the appointment is still being figured out. After that, explain that you are an existing client seeking a flexible follow-up call. Accept a valid time, but commit only after the scheduler asks the explicit scripted 'shall I book it?' question."
+  }
+]

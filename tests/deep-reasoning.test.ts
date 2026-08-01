@@ -1,9 +1,17 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ContextBuilder } from '../src/agent/context';
 import {
+  ENUMERATE_INTENT_RE,
+  analysisStateFromResult,
+  applyEnumerateIntent,
+  classifyAffirmationReply,
   detectDeepQuestion,
   guardAnalysisVoiceResponse,
+  hydrateDeepGoal,
+  isRegistryAnalysisQuestion,
+  resolveDeepGate,
   resolveExistingAnalysisTurn,
+  resolveRegistryAnalysisTurn,
   runDeepReasoning,
   streamDeepReasoning,
   type DeepReasoningResult,
@@ -11,6 +19,7 @@ import {
 import {
   createAnalysisConversationState,
   parseAnalysisArtifact,
+  resolveAnalysisFollowUp,
 } from '../src/agent/analysis-navigation';
 import type { IntelligenceConfig, Message } from '../src/types';
 import { analysisArtifactFixture } from './fixtures/analysis-artifact';
@@ -84,6 +93,34 @@ describe('deep question routing', () => {
     expect(route).toMatchObject({ deep: true, workflow: 'strategy_review' });
   });
 
+  it('uses assistant strategy context for a short document-critique follow-up', () => {
+    const route = detectDeepQuestion(
+      [
+        {
+          role: 'assistant',
+          content:
+            'The document covers lead-generation economics, contractor pricing, and market strategy.',
+        },
+        { role: 'user', content: 'Tell me only the biggest weaknesses of the doc.' },
+      ],
+      intelligence
+    );
+
+    expect(route).toMatchObject({ deep: true, workflow: 'strategy_review' });
+    expect(route.reasons).toContain('strategy_review');
+  });
+
+  it('routes a standalone document critique even without a known strategy subject', () => {
+    const route = detectDeepQuestion(
+      user('What are the biggest weaknesses of this document?'),
+      intelligence
+    );
+
+    expect(route).toMatchObject({ deep: true, workflow: 'evidence_analysis' });
+    expect(route.reasons).toContain('critical_analysis');
+    expect(route.reasons).not.toContain('direct_lookup_shape');
+  });
+
   it.each([
     ['What is the pricing strategy?', false, 'evidence_analysis'],
     ['What does the business model charge?', false, 'evidence_analysis'],
@@ -132,7 +169,33 @@ describe('deep reasoning task client', () => {
         },
       },
     });
-    const get = vi.fn().mockResolvedValue({
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          task_id: 'task_1',
+          status: 'running',
+          progress: {
+            phase: 'reasoning',
+            message: 'Analyzing retrieved evidence, pass 1 of up to 6.',
+            completed_steps: 0,
+            max_steps: 6,
+            retrieval_queries: 5,
+            reasoning: { current: 1, completed: 0, maximum: 6 },
+            retrieval: { planned: 5, completed: 5, evidence_items: 19 },
+            model: {
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              thinking: 'enabled',
+              effort: 'high',
+            },
+            artifact: { status: 'not_applicable', artifact_id: null },
+            phase_started_at: '2026-07-22T01:00:54Z',
+            heartbeat_at: '2026-07-22T01:01:34Z',
+          },
+        },
+      })
+      .mockResolvedValueOnce({
       data: {
         task_id: 'task_1',
         status: 'succeeded',
@@ -143,6 +206,9 @@ describe('deep reasoning task client', () => {
           completed_steps: 2,
           max_steps: 6,
           retrieval_queries: 3,
+          reasoning: { current: 2, completed: 2, maximum: 6 },
+          retrieval: { planned: 3, completed: 3, evidence_items: 1 },
+          artifact: { status: 'indexed', artifact_id: 'analysis_task_1' },
         },
         result: {
           workflow: 'strategy_review',
@@ -182,7 +248,7 @@ describe('deep reasoning task client', () => {
           ],
         },
       },
-    });
+      });
     const events = [];
     for await (const event of streamDeepReasoning(
       user('Critique the business plan strategy and recommend what to validate first.'),
@@ -193,7 +259,39 @@ describe('deep reasoning task client', () => {
       events.push(event);
     }
 
-    expect(events.filter((event) => event.type === 'progress')).toHaveLength(2);
+    expect(events.filter((event) => event.type === 'progress')).toHaveLength(3);
+    const reasoning = events.find(
+      (event) => event.type === 'progress' && event.progress.phase === 'reasoning'
+    );
+    expect(reasoning).toMatchObject({
+      type: 'progress',
+      progress: {
+        currentPass: 1,
+        completedPasses: 0,
+        maxPasses: 6,
+        retrievalPlanned: 5,
+        retrievalCompleted: 5,
+        evidenceItems: 19,
+        model: {
+          provider: 'deepseek',
+          name: 'deepseek-v4-pro',
+          thinking: 'enabled',
+          effort: 'high',
+        },
+        phaseStartedAt: '2026-07-22T01:00:54Z',
+        heartbeatAt: '2026-07-22T01:01:34Z',
+      },
+    });
+    const completed = events.find(
+      (event) => event.type === 'progress' && event.progress.phase === 'completed'
+    );
+    expect(completed).toMatchObject({
+      type: 'progress',
+      progress: {
+        artifactStatus: 'indexed',
+        artifactId: 'analysis_task_1',
+      },
+    });
     const final = events.find((event) => event.type === 'result');
     expect(final).toMatchObject({
       type: 'result',
@@ -226,6 +324,7 @@ describe('deep reasoning task client', () => {
       'X-Tenant-Id': 'personal',
       'X-Permissions': 'knowledge:reason',
     });
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed when task submission is unavailable', async () => {
@@ -409,10 +508,69 @@ describe('deep reasoning task client', () => {
       expect.objectContaining({
         artifact_id: artifact.artifactId,
         policy: expect.objectContaining({ permissions: ['knowledge:reason'] }),
+        scope: expect.objectContaining({
+          collection_ids: intelligence.collectionIds,
+        }),
       }),
       expect.objectContaining({ timeout: 1000 })
     );
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it('repeats the top artifact topics for a request for the biggest weaknesses', async () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_overview'))!;
+    const post = vi.fn();
+
+    const turn = await resolveExistingAnalysisTurn(
+      user('Tell me the biggest weaknesses of the document.'),
+      createAnalysisConversationState(artifact, artifact.taskId),
+      intelligence,
+      undefined,
+      { post, get: vi.fn() }
+    );
+
+    expect(turn?.decision).toMatchObject({
+      action: 'list_topics',
+      selectedTopicIds: artifact.topics.slice(0, 3).map((topic) => topic.topicId),
+      reason: 'analysis_overview',
+    });
+    expect(turn?.result?.presentation?.mode).toBe('menu');
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('allows document wording in a semantic artifact search', async () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture('task_document_search'))!;
+    const post = vi.fn().mockResolvedValue({
+      data: {
+        matches: [
+          {
+            normalized_score: 0.9,
+            node: {
+              artifact_id: artifact.artifactId,
+              tenant_id: artifact.tenantId,
+              kind: 'finding',
+              ref_id: 'finding_gate_scaling',
+              topic_ids: ['topic_acquisition'],
+            },
+          },
+        ],
+      },
+    });
+
+    const turn = await resolveExistingAnalysisTurn(
+      user('What conclusion did this document reach about defensibility?'),
+      createAnalysisConversationState(artifact, artifact.taskId),
+      intelligence,
+      undefined,
+      { post, get: vi.fn() }
+    );
+
+    expect(turn?.decision).toMatchObject({
+      action: 'open_topic',
+      selectedTopicIds: ['topic_acquisition'],
+      reason: 'artifact_node_search',
+    });
+    expect(post).toHaveBeenCalledOnce();
   });
 
   it('does not search analysis memory for an unrelated source-fact lookup', async () => {
@@ -457,8 +615,41 @@ describe('deep result naturalization', () => {
 
     const guarded = guardAnalysisVoiceResponse(Array(70).fill('excess').join(' '), result);
 
-    expect(guarded).toMatchObject({ limit: 65, replaced: true, text: result.answer });
+    expect(guarded).toMatchObject({ limit: 65, replaced: true });
+    expect(guarded.text).toBe(
+      'Validate repeatable demand before investing in replication. Which should we explore first: Acquisition risk, Pricing economics, or Validation plan?'
+    );
     expect(guarded.text.trim().split(/\s+/).length).toBeLessThanOrEqual(65);
+  });
+
+  it('repairs a short artifact brief that trails off without a navigation question', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const result: DeepReasoningResult = {
+      status: 'succeeded',
+      workflow: 'strategy_review',
+      taskId: artifact.taskId,
+      claims: [],
+      evidence: [],
+      artifact,
+      presentation: {
+        mode: 'brief',
+        selectedTopicIds: artifact.topics.slice(0, 3).map((topic) => topic.topicId),
+        reason: 'completed_deep_analysis',
+      },
+      modelUsage: [],
+      durationMs: 0,
+      completedSteps: 1,
+      retrievalQueries: 5,
+    };
+
+    const guarded = guardAnalysisVoiceResponse(
+      'Validate demand first. Acquisition risk. Pricing economics. Validation plan.',
+      result
+    );
+
+    expect(guarded.replaced).toBe(true);
+    expect(guarded.text.endsWith('?')).toBe(true);
+    expect(guarded.text).toContain('Which should we explore first');
   });
 
   it('places validated claims after the stable cache marker and forbids new facts', () => {
@@ -524,9 +715,31 @@ describe('deep result naturalization', () => {
     expect(prompt).toContain('Acquisition risk:');
     expect(prompt).toContain('Pricing economics:');
     expect(prompt).toContain('Validation plan:');
+    expect(prompt).toContain('end by explicitly asking which topic');
     expect(prompt).not.toContain('Market positioning:');
     expect(prompt).not.toContain('The plan should measure a repeatable channel before scaling it.');
     expect(prompt).not.toContain('What is measured acquisition cost by channel?');
+  });
+
+  it('permits evidence-based critique without treating an inference as a quoted fact', () => {
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt([], [], {
+      status: 'retrieved',
+      groundingMode: 'strict',
+      items: [
+        {
+          rank: 1,
+          evidenceId: 'ev_1',
+          citationId: 'cite_1',
+          title: 'Plan',
+          sectionPath: ['Economics'],
+          text: 'The plan assumes acquisition cost remains fixed.',
+        },
+      ],
+      durationMs: 1,
+    });
+
+    expect(prompt).toContain('you may draw reasoned conclusions');
+    expect(prompt).toContain('rather than claiming the document explicitly states them');
   });
 
   it('exposes only the selected topic when navigating an existing analysis', () => {
@@ -557,5 +770,396 @@ describe('deep result naturalization', () => {
     expect(prompt).toContain('Measure price, acquisition cost, and margin in the same experiment.');
     expect(prompt).not.toContain('The plan should measure a repeatable channel before scaling it.');
     expect(prompt).not.toContain('Test whether the narrower promise improves qualified demand.');
+    expect(prompt).toContain('making these moves in order');
+    expect(prompt).toContain('Next topics to offer:');
+    expect(prompt).toContain(
+      'Acquisition risk: The repeatable acquisition channel remains unproven.'
+    );
+    expect(prompt).toContain('Validation plan: Run a bounded paid-demand test before replication.');
+    expect(prompt).not.toContain('Market positioning:');
+  });
+});
+
+describe('registry artifact routing', () => {
+  const searchResponse = {
+    matches: [
+      {
+        node: {
+          artifact_id: 'analysis_task_1',
+          tenant_id: 'personal',
+          kind: 'topic',
+          ref_id: 'topic_economics',
+        },
+        raw_score: 3,
+        normalized_score: 0.7,
+        rank: 1,
+      },
+    ],
+  };
+
+  function mockHttp(overrides: Record<string, unknown> = {}) {
+    return {
+      post: vi.fn().mockResolvedValue({ data: searchResponse }),
+      get: vi.fn().mockResolvedValue({
+        data: { artifact: analysisArtifactFixture(), analysis_style: 'topic_map' },
+      }),
+      ...overrides,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+
+  it('adopts a registry artifact for a fresh analysis-shaped question', async () => {
+    const http = mockHttp();
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What assumptions drive the pricing economics conclusion?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeDefined();
+    expect(turn!.decision.artifactId).toBe('analysis_task_1');
+    expect(turn!.result?.presentation?.mode).toBe('topic');
+    expect(turn!.state.artifact.artifactId).toBe('analysis_task_1');
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post.mock.calls[0][1].scope.collection_ids).toEqual(intelligence.collectionIds);
+    expect(http.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes gap questions to the gaps presentation with all missing evidence', async () => {
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What does the document lack in terms of strategy?' }],
+      intelligence,
+      undefined,
+      mockHttp()
+    );
+    expect(turn!.decision.action).toBe('show_gaps');
+    expect(turn!.result?.presentation?.mode).toBe('gaps');
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt(
+      [],
+      [],
+      undefined,
+      turn!.result
+    );
+    expect(prompt).toContain('What is measured acquisition cost by channel?');
+    expect(prompt).toContain('gaps the analysis flagged');
+  });
+
+  it('never adopts for explicit fresh-analysis requests', async () => {
+    const http = mockHttp();
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'Think deeply about the business plan and critique the strategy' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+    expect(http.post).not.toHaveBeenCalled();
+    expect(isRegistryAnalysisQuestion('re-analyze the plan with fresh assumptions')).toBe(false);
+  });
+
+  it('degrades silently when the registry search fails', async () => {
+    const http = mockHttp({ post: vi.fn().mockRejectedValue(new Error('search down')) });
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What are the principles of the analysis?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+  });
+
+  it('ignores matches below the confidence floor', async () => {
+    const http = mockHttp({
+      post: vi.fn().mockResolvedValue({
+        data: {
+          matches: [
+            {
+              node: { artifact_id: 'analysis_task_1', tenant_id: 'personal' },
+              raw_score: 1,
+              normalized_score: 0.1,
+              rank: 1,
+            },
+          ],
+        },
+      }),
+    });
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'What are the principles of the analysis?' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn).toBeUndefined();
+    expect(http.get).not.toHaveBeenCalled();
+  });
+
+  it('answers gap follow-ups from an already active artifact', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const state = createAnalysisConversationState(artifact, 'task_1', 'topic_map');
+    const decision = resolveAnalysisFollowUp('what is missing from this analysis?', state);
+    expect(decision?.action).toBe('show_gaps');
+    expect(decision?.selectedTopicIds).toContain('topic_acquisition');
+  });
+});
+
+describe('reflect-hydrate-affirm gate', () => {
+  const deepRoute = {
+    deep: true,
+    score: 4,
+    reasons: ['strategy_review'],
+    workflow: 'strategy_review' as const,
+  };
+
+  function fakeStore(initial?: import('../src/agent/deep-reasoning').PendingDeepRequest) {
+    let pending = initial;
+    return {
+      getPendingDeepRequest: () => pending,
+      setPendingDeepRequest: (request: typeof initial) => {
+        pending = request;
+      },
+      clearPendingDeepRequest: () => {
+        pending = undefined;
+      },
+      peek: () => pending,
+    };
+  }
+
+  const goodHydration = JSON.stringify({
+    goal: 'Critique the strategy of the Owning the Demand business plan.',
+    reflection: 'You want a deep critique of the business plan strategy.',
+    ambiguities: [],
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('classifies affirmation replies', () => {
+    expect(classifyAffirmationReply('Yes, go ahead.')).toBe('yes');
+    expect(classifyAffirmationReply('sure')).toBe('yes');
+    expect(classifyAffirmationReply('No, never mind.')).toBe('no');
+    expect(classifyAffirmationReply("Actually, focus on pricing instead")).toBe('no');
+    expect(classifyAffirmationReply('What about the risks chapter?')).toBe('other');
+  });
+
+  it('parses hydration JSON and survives failures', async () => {
+    const parsed = await hydrateDeepGoal(user('umm think deeply about, uh, the plan'), async () =>
+      '```json\n' + goodHydration + '\n```'
+    );
+    expect(parsed?.goal).toContain('Owning the Demand');
+    expect(parsed?.reflection).toMatch(/deep critique/);
+    expect(await hydrateDeepGoal(user('question'), async () => 'not json at all')).toBeUndefined();
+    expect(
+      await hydrateDeepGoal(user('question'), async () => {
+        throw new Error('provider down');
+      })
+    ).toBeUndefined();
+  });
+
+  it('requests affirmation and stores the pending hydrated goal', async () => {
+    const store = fakeStore();
+    const gate = await resolveDeepGate(
+      store,
+      user('Okay so what I want you to do is think deeply about the business plan'),
+      deepRoute,
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('affirm');
+    if (gate.kind === 'affirm') {
+      expect(gate.utterance).toContain('deep critique of the business plan strategy');
+      expect(gate.utterance).toMatch(/go ahead\?/i);
+    }
+    expect(store.peek()?.goal).toContain('Owning the Demand');
+  });
+
+  it('runs with the hydrated goal after an affirmative reply', async () => {
+    const store = fakeStore({
+      goal: 'Hydrated goal.',
+      reflection: 'r',
+      workflow: 'strategy_review',
+      score: 4,
+      reasons: ['strategy_review'],
+    });
+    const gate = await resolveDeepGate(
+      store,
+      user('Yes, go ahead.'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toBe('Hydrated goal.');
+      expect(gate.route.reasons).toContain('affirmed_deep_request');
+    }
+    expect(store.peek()).toBeUndefined();
+  });
+
+  it('drops the pending request on decline or unrelated replies', async () => {
+    const pending = {
+      goal: 'g',
+      reflection: 'r',
+      workflow: 'strategy_review' as const,
+      score: 4,
+      reasons: [],
+    };
+    const declined = await resolveDeepGate(
+      fakeStore(pending),
+      user('No, never mind.'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(declined.kind).toBe('pass');
+    const unrelated = await resolveDeepGate(
+      fakeStore(pending),
+      user('How many phases are in the plan?'),
+      { deep: false, score: 0, reasons: [], workflow: 'evidence_analysis' },
+      intelligence,
+      async () => goodHydration
+    );
+    expect(unrelated.kind).toBe('pass');
+  });
+
+  it('hydrates silently under the never policy', async () => {
+    vi.stubEnv('NANO_CLAW_DEEP_CONFIRM', 'never');
+    const store = fakeStore();
+    const gate = await resolveDeepGate(
+      store,
+      user('think deeply about the business plan strategy'),
+      deepRoute,
+      intelligence,
+      async () => goodHydration
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toContain('Owning the Demand');
+      expect(gate.gateDebug?.action).toBe('hydrated_silent');
+    }
+    expect(store.peek()).toBeUndefined();
+  });
+
+  it('falls back to the verbatim goal when hydration fails', async () => {
+    const gate = await resolveDeepGate(
+      fakeStore(),
+      user('think deeply about the business plan strategy'),
+      deepRoute,
+      intelligence,
+      async () => {
+        throw new Error('provider down');
+      }
+    );
+    expect(gate.kind).toBe('run');
+    if (gate.kind === 'run') {
+      expect(gate.goalOverride).toBeUndefined();
+      expect(gate.gateDebug?.action).toBe('verbatim_fallback');
+    }
+  });
+
+  it('submits the goal override on the wire', async () => {
+    const post = vi.fn().mockResolvedValue({
+      data: { task_id: 'task_9', status: 'failed' },
+    });
+    const events = [];
+    for await (const event of streamDeepReasoning(
+      user('verbatim rambling transcript text'),
+      intelligence,
+      undefined,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { post, get: vi.fn() } as any,
+      deepRoute,
+      'Hydrated goal.'
+    )) {
+      events.push(event);
+    }
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1].goal).toBe('Hydrated goal.');
+    expect(post.mock.calls[0][1].scope.collection_ids).toEqual(intelligence.collectionIds);
+  });
+});
+
+describe('enumerate presentation', () => {
+  it('detects list-shaped deep asks', () => {
+    expect(ENUMERATE_INTENT_RE.test('Enumerate the core principles and rank them')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('list the key principles of the plan')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('what are the core principles?')).toBe(true);
+    expect(ENUMERATE_INTENT_RE.test('tell me about the pricing model')).toBe(false);
+  });
+
+  it('upgrades a fresh artifact result to the full ranked enumeration', () => {
+    const artifact = parseAnalysisArtifact(analysisArtifactFixture())!;
+    const brief: DeepReasoningResult = {
+      status: 'succeeded',
+      workflow: 'strategy_review',
+      taskId: 'task_1',
+      claims: [],
+      evidence: [],
+      artifact,
+      presentation: {
+        mode: 'brief',
+        selectedTopicIds: artifact.topics.slice(0, 3).map((t) => t.topicId),
+        reason: 'completed_deep_analysis',
+      },
+      modelUsage: [],
+      durationMs: 0,
+      completedSteps: 0,
+      retrievalQueries: 0,
+    };
+    const upgraded = applyEnumerateIntent(brief, 'Enumerate and rank the core principles');
+    expect(upgraded.presentation?.mode).toBe('enumerate');
+    expect(upgraded.presentation?.selectedTopicIds).toHaveLength(artifact.topics.length);
+    const untouched = applyEnumerateIntent(brief, 'critique the strategy');
+    expect(untouched.presentation?.mode).toBe('brief');
+
+    const prompt = new ContextBuilder({ model: 'fast-model' }).buildSystemPrompt(
+      [],
+      [],
+      undefined,
+      upgraded
+    );
+    expect(prompt).toContain('spoken rank');
+    expect(prompt).toContain('Market positioning:');
+    expect(prompt).toContain('Validation plan:');
+
+    const guard = guardAnalysisVoiceResponse('way too short', upgraded);
+    expect(guard.replaced).toBe(true);
+    expect(guard.text).toContain('first, Acquisition risk');
+    expect(guard.text).toContain('fourth, Market positioning');
+    expect(guard.limit).toBe(110);
+
+    const state = analysisStateFromResult(upgraded, 'topic_map');
+    expect(state?.offeredTopicIds).toHaveLength(artifact.topics.length);
+  });
+
+  it('enumerates from the registry for fresh list-shaped questions', async () => {
+    const http = {
+      post: vi.fn().mockResolvedValue({
+        data: {
+          matches: [
+            {
+              node: { artifact_id: 'analysis_task_1', tenant_id: 'personal' },
+              raw_score: 3,
+              normalized_score: 0.7,
+              rank: 1,
+            },
+          ],
+        },
+      }),
+      get: vi.fn().mockResolvedValue({
+        data: { artifact: analysisArtifactFixture(), analysis_style: 'topic_map' },
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const turn = await resolveRegistryAnalysisTurn(
+      [{ role: 'user', content: 'List the key principles of the plan and rank them' }],
+      intelligence,
+      undefined,
+      http
+    );
+    expect(turn!.decision.reason).toBe('registry_artifact_enumerate');
+    expect(turn!.result?.presentation?.mode).toBe('enumerate');
+    expect(turn!.result?.presentation?.selectedTopicIds).toHaveLength(4);
+    expect(turn!.state.offeredTopicIds).toHaveLength(4);
   });
 });

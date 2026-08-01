@@ -1,8 +1,26 @@
-"""Transport-agnostic goal-region runner with deterministic exit validation."""
+"""Transport-agnostic goal-region runner with deterministic exit validation.
+
+``RegionConfig.slots`` is a small declarative language.  Every entry has a
+``type`` and may set ``required`` (default true):
+
+* ``text`` is a non-empty string.
+* ``datetime`` is an ISO datetime; the appointment start slot is conventionally
+  named ``slot_start``.
+* ``minutes`` is a positive integer selected from ``values`` (``allowed`` is
+  retained as a legacy alias).
+* ``enum`` is a string selected from ``values``.
+* ``derived_minutes`` is never nominated by the model.  Its ``from`` key names
+  an enum slot and its ``map`` maps each enum value to a duration in minutes.
+
+Derived slots are omitted from the supervisor schema and populated
+deterministically when their source enum validates.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -11,6 +29,8 @@ from datetime import datetime, time as wall_time, timedelta
 from zoneinfo import ZoneInfo
 
 from voice.region_providers import AnthropicProvider, resolve_supervisor
+
+log = logging.getLogger("nano-claw.region")
 
 BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
 BUSINESS_START = wall_time(8, 0)
@@ -27,33 +47,87 @@ _PREMATURE_CONFIRMATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SUPERVISOR_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "reply": {"type": "string"},
-        "slot_candidates": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "job": {"type": ["string", "null"]},
-                "slot_start": {"type": ["string", "null"]},
-                "duration_minutes": {"type": ["integer", "null"]},
+
+def _slot_type(name: str, spec: dict) -> str:
+    """Return a declared slot type, with compatibility for legacy configs."""
+
+    declared = spec.get("type")
+    if isinstance(declared, str):
+        return declared
+    if name == "slot_start":
+        return "datetime"
+    if name == "duration_minutes":
+        return "minutes"
+    return "text"
+
+
+def build_supervisor_schema(slots: dict, *, exit_name: str = "booked") -> dict:
+    """Build the strict structured-output contract for a slot configuration.
+
+    `exit_name` is the ONE value the supervisor may propose as an exit. It
+    defaults to "booked" so every existing caller is unchanged, but it is a
+    parameter because "booked" is a scheduling word and this runner is not
+    inherently a scheduler: riff-builder authors intake regions whose exit is
+    "classified", and hardcoding the enum meant nano-claw could not run a single
+    one of them.
+    """
+
+    candidate_properties: dict[str, dict] = {}
+    for name, spec in slots.items():
+        slot_type = _slot_type(name, spec)
+        if slot_type == "derived_minutes":
+            continue
+        if slot_type in {"text", "datetime"}:
+            candidate_properties[name] = {"type": ["string", "null"]}
+        elif slot_type == "minutes":
+            candidate_properties[name] = {"type": ["integer", "null"]}
+        elif slot_type == "enum":
+            candidate_properties[name] = {
+                # Structured outputs reject enum paired with a union type.
+                "anyOf": [
+                    {"type": "string", "enum": list(spec.get("values", ()))},
+                    {"type": "null"},
+                ]
+            }
+        else:
+            raise ValueError(f"unsupported slot type for {name}: {slot_type}")
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "reply": {"type": "string"},
+            "slot_candidates": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": candidate_properties,
+                "required": list(candidate_properties),
             },
-            "required": ["job", "slot_start", "duration_minutes"],
+            "exit_candidate": {
+                # The structured-outputs validator rejects enum paired with a
+                # union type; anyOf is the supported spelling of "booked or null".
+                "anyOf": [
+                    {"type": "string", "enum": [exit_name]},
+                    {"type": "null"},
+                ],
+            },
+            "evidence": {"type": "string"},
         },
-        "exit_candidate": {
-            # The structured-outputs validator rejects enum paired with a
-            # union type; anyOf is the supported spelling of "booked or null".
-            "anyOf": [
-                {"type": "string", "enum": ["booked"]},
-                {"type": "null"},
-            ],
+        "required": ["reply", "slot_candidates", "exit_candidate", "evidence"],
+    }
+
+
+_SUPERVISOR_SCHEMA = build_supervisor_schema(
+    {
+        "job": {"type": "text", "required": True},
+        "slot_start": {"type": "datetime", "required": True},
+        "duration_minutes": {
+            "type": "minutes",
+            "values": [30, 60, 120, 240],
+            "required": True,
         },
-        "evidence": {"type": "string"},
-    },
-    "required": ["reply", "slot_candidates", "exit_candidate", "evidence"],
-}
+    }
+)
 
 
 @dataclass
@@ -75,6 +149,9 @@ class RegionConfig:
     deadline_s: float
     escape_on_provider_failure: bool = True
     suppress_premature_confirmation: bool = True
+    # The single exit this region may take. Defaults to the scheduling word so
+    # every existing domain is unchanged; riff-builder subgoals use "classified".
+    exit_name: str = "booked"
 
 
 @dataclass
@@ -97,6 +174,8 @@ class GoalRegionRunner:
         client=None,
     ) -> None:
         self.config = config
+        self._schema = build_supervisor_schema(
+            config.slots, exit_name=config.exit_name)
         self.free_windows = sorted(
             (
                 FreeWindow(_local_wall_time(window.start), _local_wall_time(window.end))
@@ -120,6 +199,7 @@ class GoalRegionRunner:
         self._slots: dict = {}
         self._transcript: list[dict[str, str]] = []
         self._consecutive_provider_failures = 0
+        self._grace_turns = 0
 
     @property
     def slots(self) -> dict:
@@ -137,6 +217,40 @@ class GoalRegionRunner:
     def max_turns(self) -> int:
         return self.config.max_turns
 
+    def remove_free_window_overlap(self, start: datetime, end: datetime) -> None:
+        """Remove the half-open interval from free windows, clipping as needed."""
+
+        start = _local_wall_time(start)
+        end = _local_wall_time(end)
+        if end <= start:
+            return
+
+        remaining: list[FreeWindow] = []
+        for window in self.free_windows:
+            if end <= window.start or start >= window.end:
+                remaining.append(window)
+                continue
+            if window.start < start:
+                remaining.append(FreeWindow(window.start, start))
+            if end < window.end:
+                remaining.append(FreeWindow(end, window.end))
+        self.free_windows = remaining
+
+    def clear_slot(self, name: str) -> None:
+        """Drop a validated slot, if present."""
+
+        self._slots.pop(name, None)
+
+    def grant_grace_turn(self) -> None:
+        """Exempt the next turn from budget/deadline enforcement.
+
+        A caller answering the scripted booking confirmation must never be
+        preempted by the session budget: the budget bounds open-ended
+        negotiation, not an imminent commit.
+        """
+
+        self._grace_turns += 1
+
     def turn(self, caller_text: str) -> RegionTurn:
         if self._matches_escape(caller_text):
             return self._short_circuit("escape")
@@ -144,7 +258,10 @@ class GoalRegionRunner:
             self.clock() - self._entered_at >= self.config.deadline_s
             or self._completed_turns >= self.config.max_turns
         ):
-            return self._short_circuit("budget")
+            if self._grace_turns > 0:
+                self._grace_turns -= 1
+            else:
+                return self._short_circuit("budget")
 
         messages = [*self._transcript, {"role": "user", "content": caller_text}]
         started = self.clock()
@@ -158,17 +275,31 @@ class GoalRegionRunner:
                 raw_text, stop_reason = self._supervisor.complete(
                     system=system,
                     messages=messages,
-                    schema=_SUPERVISOR_SCHEMA,
+                    schema=self._schema,
                     max_tokens=4096,
                 )
             except Exception as exc:
+                # Kept for outcome handling below, but log per attempt too:
+                # which provider call failed and why is exactly what booking
+                # post-mortems need and never had.
                 provider_failure = exc
+                log.warning(
+                    "Supervisor attempt %d/2 provider failure: %s: %s",
+                    _attempt + 1, type(exc).__name__, exc,
+                )
                 continue
             if stop_reason == "max_tokens":
+                log.warning(
+                    "Supervisor attempt %d/2 hit max_tokens; retrying", _attempt + 1
+                )
                 continue
             try:
                 payload = _structured_payload(raw_text)
             except ValueError:
+                log.warning(
+                    "Supervisor attempt %d/2 returned unparseable payload: %.120s",
+                    _attempt + 1, raw_text,
+                )
                 continue
             break
         supervisor_ms = max(0.0, (self.clock() - started) * 1000)
@@ -228,7 +359,11 @@ class GoalRegionRunner:
             {"role": "assistant", "content": reply},
         ])
         return RegionTurn(
-            reply="" if exit_name == "booked" else reply,
+            # Suppressed on a successful exit so the DETERMINISTIC tail speaks
+            # instead of the model's prose. That reasoning is about exiting, not
+            # about scheduling, so it follows the configured exit name — else a
+            # "classified" region would speak both its own prose AND the tail.
+            reply="" if exit_name == self.config.exit_name else reply,
             exit=exit_name,
             slots=dict(self._slots),
             supervisor_ms=supervisor_ms,
@@ -284,83 +419,284 @@ class GoalRegionRunner:
         updates: dict = {}
         rejected: list[str] = []
 
-        job = candidates.get("job")
-        if job is not None and "job" in self.config.slots:
-            if isinstance(job, str) and job.strip():
-                updates["job"] = job.strip()
-            else:
-                rejected.append(f"job {job}: expected non-empty text")
+        slot_specs = self.config.slots
+        derived_items = [
+            (name, spec)
+            for name, spec in slot_specs.items()
+            if _slot_type(name, spec) == "derived_minutes"
+        ]
+        derived_name, derived_spec = derived_items[0] if derived_items else (None, None)
+        derived_source = (
+            derived_spec.get("from") if derived_spec is not None else None
+        )
 
-        start_given = candidates.get("slot_start") is not None
-        duration_given = candidates.get("duration_minutes") is not None
-        parsed_start: datetime | None = None
-        duration: int | None = None
+        datetime_names = [
+            name
+            for name, spec in slot_specs.items()
+            if _slot_type(name, spec) == "datetime"
+        ]
+        start_name = (
+            "slot_start"
+            if "slot_start" in datetime_names
+            else (datetime_names[0] if datetime_names else None)
+        )
+        minutes_names = [
+            name
+            for name, spec in slot_specs.items()
+            if _slot_type(name, spec) == "minutes"
+        ]
+        direct_duration_name = (
+            "duration_minutes"
+            if "duration_minutes" in minutes_names
+            else (minutes_names[0] if minutes_names else None)
+        )
+        duration_name = derived_name or direct_duration_name
 
-        if start_given:
-            parsed_start = _parse_slot_start(candidates.get("slot_start"))
-            if parsed_start is None:
-                rejected.append(
-                    f"slot_start {candidates.get('slot_start')}: "
-                    "malformed ISO datetime"
+        given: set[str] = set()
+        invalid: set[str] = set()
+        validated: dict = {}
+        for name, spec in slot_specs.items():
+            slot_type = _slot_type(name, spec)
+            if slot_type == "derived_minutes":
+                continue
+            raw_value = candidates.get(name)
+            if raw_value is None:
+                continue
+            given.add(name)
+
+            if slot_type == "text":
+                if isinstance(raw_value, str) and raw_value.strip():
+                    validated[name] = raw_value.strip()
+                else:
+                    invalid.add(name)
+                    rejected.append(f"{name} {raw_value}: expected non-empty text")
+            elif slot_type == "enum":
+                values = list(spec.get("values", ()))
+                if isinstance(raw_value, str) and raw_value in values:
+                    validated[name] = raw_value
+                else:
+                    invalid.add(name)
+                    rejected.append(
+                        f"{name} {raw_value}: expected one of "
+                        + ", ".join(str(value) for value in values)
+                    )
+            elif slot_type == "datetime":
+                parsed = _parse_slot_start(raw_value)
+                if parsed is None:
+                    invalid.add(name)
+                    rejected.append(
+                        f"{name} {raw_value}: malformed ISO datetime"
+                    )
+                else:
+                    validated[name] = parsed
+            elif slot_type == "minutes":
+                values = spec.get(
+                    "values", spec.get("allowed", DEFAULT_DURATIONS)
                 )
+                allowed = {
+                    value
+                    for value in values
+                    if isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value > 0
+                }
+                if (
+                    isinstance(raw_value, int)
+                    and not isinstance(raw_value, bool)
+                    and raw_value in allowed
+                ):
+                    validated[name] = raw_value
+                else:
+                    invalid.add(name)
+                    rejected.append(
+                        f"{name} {raw_value}: expected one of "
+                        + ", ".join(str(value) for value in sorted(allowed))
+                    )
 
-        if duration_given:
-            raw_duration = candidates.get("duration_minutes")
-            allowed = self._allowed_durations()
+        derived_duration: int | None = None
+        if (
+            isinstance(derived_source, str)
+            and derived_source in validated
+            and derived_spec is not None
+        ):
+            duration_map = derived_spec.get("map", {})
+            derived_duration = duration_map.get(validated[derived_source])
             if (
-                isinstance(raw_duration, int)
-                and not isinstance(raw_duration, bool)
-                and raw_duration in allowed
+                not isinstance(derived_duration, int)
+                or isinstance(derived_duration, bool)
+                or derived_duration <= 0
             ):
-                duration = raw_duration
-            else:
+                invalid.add(derived_source)
                 rejected.append(
-                    f"duration_minutes {raw_duration}: expected one of "
-                    + ", ".join(str(value) for value in sorted(allowed))
+                    f"{derived_source} {candidates.get(derived_source)}: "
+                    "no derived duration configured"
                 )
+                derived_duration = None
+
+        appointment_names = {
+            name
+            for name in (
+                start_name,
+                duration_name,
+                direct_duration_name,
+                derived_source,
+            )
+            if isinstance(name, str)
+        }
+        for name, value in validated.items():
+            if name in appointment_names:
+                continue
+            updates[name] = value.isoformat() if isinstance(value, datetime) else value
+
+        start_given = start_name in given if start_name is not None else False
+        duration_given = (
+            direct_duration_name in given
+            if direct_duration_name is not None
+            else False
+        )
+        source_given = (
+            derived_source in given if isinstance(derived_source, str) else False
+        )
 
         # A nominated appointment is atomic: a bad start must not leave a new
-        # duration paired with an older time (or vice versa) on the next turn.
+        # duration or derived service paired with an older time (or vice versa).
         if start_given:
-            if parsed_start is None or (duration_given and duration is None):
+            if (
+                start_name in invalid
+                or (
+                    derived_name is not None
+                    and source_given
+                    and derived_source in invalid
+                )
+                or (
+                    derived_name is None
+                    and duration_given
+                    and direct_duration_name in invalid
+                )
+            ):
                 return updates, rejected
-            effective_duration = duration
+
+            parsed_start = validated[start_name]
+            if derived_name is not None:
+                # A fresh deterministic derivation wins.  Otherwise retain the
+                # held derived value before considering a legacy minutes slot.
+                effective_duration = derived_duration
+                if effective_duration is None:
+                    effective_duration = self._slots.get(derived_name)
+                if (
+                    effective_duration is None
+                    and direct_duration_name is not None
+                ):
+                    effective_duration = validated.get(direct_duration_name)
+            else:
+                # Preserve the plumber behavior: a nominated duration replaces
+                # a held duration when the start and duration arrive together.
+                effective_duration = validated.get(direct_duration_name)
+                if effective_duration is None and direct_duration_name is not None:
+                    effective_duration = self._slots.get(direct_duration_name)
+
             if effective_duration is None:
-                effective_duration = self._slots.get("duration_minutes")
-            if effective_duration is None:
+                required_name = (
+                    derived_source
+                    if derived_name is not None
+                    and isinstance(derived_source, str)
+                    else (duration_name or "duration_minutes")
+                )
                 rejected.append(
-                    f"slot_start {candidates.get('slot_start')}: "
-                    "duration_minutes is required"
+                    f"{start_name} {candidates.get(start_name)}: "
+                    f"{required_name} is required"
                 )
                 return updates, rejected
             interval_error = self._interval_error(parsed_start, effective_duration)
             if interval_error:
                 rejected.append(
-                    f"slot_start {candidates.get('slot_start')}: {interval_error}"
+                    f"{start_name} {candidates.get(start_name)}: {interval_error}"
                 )
                 return updates, rejected
-            updates["slot_start"] = parsed_start.isoformat()
-            if duration_given:
-                updates["duration_minutes"] = duration
+
+            updates[start_name] = parsed_start.isoformat()
+            if (
+                derived_duration is not None
+                and isinstance(derived_source, str)
+                and derived_name is not None
+            ):
+                updates[derived_source] = validated[derived_source]
+                updates[derived_name] = derived_duration
+            elif (
+                derived_name is None
+                and duration_given
+                and direct_duration_name in validated
+            ):
+                updates[direct_duration_name] = validated[direct_duration_name]
             return updates, rejected
 
-        if duration_given and duration is not None:
-            existing_start = _parse_slot_start(self._slots.get("slot_start"))
+        if derived_name is not None and source_given:
+            if derived_source in invalid or derived_duration is None:
+                return updates, rejected
+            existing_start = (
+                _parse_slot_start(self._slots.get(start_name))
+                if start_name is not None
+                else None
+            )
+            if existing_start is not None:
+                interval_error = self._interval_error(
+                    existing_start, derived_duration
+                )
+                if interval_error:
+                    rejected.append(
+                        f"{derived_source} {candidates.get(derived_source)}: "
+                        f"{interval_error}; propose a new time for this service"
+                    )
+                    return updates, rejected
+            updates[derived_source] = validated[derived_source]
+            updates[derived_name] = derived_duration
+            return updates, rejected
+
+        if (
+            direct_duration_name is not None
+            and duration_given
+            and direct_duration_name in validated
+        ):
+            duration = validated[direct_duration_name]
+            existing_start = (
+                _parse_slot_start(self._slots.get(start_name))
+                if start_name is not None
+                else None
+            )
             if existing_start is not None:
                 interval_error = self._interval_error(existing_start, duration)
                 if interval_error:
                     rejected.append(
-                        f"duration_minutes {candidates.get('duration_minutes')}: "
-                        f"{interval_error}"
+                        f"{direct_duration_name} "
+                        f"{candidates.get(direct_duration_name)}: {interval_error}"
                     )
                     return updates, rejected
-            updates["duration_minutes"] = duration
+            updates[direct_duration_name] = duration
 
         return updates, rejected
 
     def _allowed_durations(self) -> set[int]:
-        spec = self.config.slots.get("duration_minutes", {})
-        values = spec.get("values", spec.get("allowed", DEFAULT_DURATIONS))
+        spec = next(
+            (
+                candidate
+                for name, candidate in self.config.slots.items()
+                if _slot_type(name, candidate) == "derived_minutes"
+            ),
+            None,
+        )
+        if spec is not None:
+            duration_map = spec.get("map", {})
+            values = duration_map.values() if isinstance(duration_map, dict) else ()
+        else:
+            spec = next(
+                (
+                    candidate
+                    for name, candidate in self.config.slots.items()
+                    if _slot_type(name, candidate) == "minutes"
+                ),
+                {},
+            )
+            values = spec.get("values", spec.get("allowed", DEFAULT_DURATIONS))
         return {
             value
             for value in values
@@ -403,7 +739,7 @@ class GoalRegionRunner:
     def _validated_exit(self, candidate, rejected: list[str]) -> str | None:
         if candidate is None:
             return None
-        if candidate != "booked":
+        if candidate != self.config.exit_name:
             rejected.append(f"exit_candidate: unsupported value {candidate!r}")
             return None
         if rejected:
@@ -417,7 +753,7 @@ class GoalRegionRunner:
         if missing:
             rejected.append("exit_candidate: missing required slots: " + ", ".join(missing))
             return None
-        return "booked"
+        return self.config.exit_name
 
 
 def _local_wall_time(value: datetime) -> datetime:
@@ -440,12 +776,77 @@ def _parse_slot_start(value) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return None  # health-ok: pure parse guard; callers validate the None
     return _local_wall_time(parsed)
 
 
 def _structured_payload(raw_text: str) -> dict:
-    payload = json.loads(raw_text)
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        try:
+            payload = json.loads(_strip_json_fences(raw_text))
+            # Reached only when stripping succeeded where strict parsing
+            # failed — make the fencing habit visible, not silently absorbed.
+            log.debug("Supervisor payload was markdown-fenced; parsed after stripping")
+        except json.JSONDecodeError:
+            _capture_unparseable(raw_text)
+            payload = json.loads(_extract_json_object(raw_text))
+            log.debug("Supervisor payload had prose around JSON; extracted object")
     if isinstance(payload, dict):
         return payload
     raise ValueError("supervisor response did not contain a JSON object")
+
+
+def _capture_unparseable(text: str) -> None:
+    """Append raw not-yet-parsed payloads to NANO_CLAW_REGION_CAPTURE_UNPARSEABLE
+    (a file path) when set — the eval's forensic hook. No-op otherwise."""
+    path = os.environ.get("NANO_CLAW_REGION_CAPTURE_UNPARSEABLE", "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a") as sink:
+            sink.write(text + "\n===UNPARSEABLE-SEP===\n")
+    except OSError:
+        log.debug("unparseable-capture sink unavailable", exc_info=True)
+
+
+def _extract_json_object(text: str) -> str:
+    """Last-resort tolerance: the outermost brace-balanced block.
+
+    Handles prose-wrapped JSON ("Sure! Here's the plan: {...} Let me know").
+    Naive about braces inside strings — acceptable for a final fallback whose
+    failure mode is the same rejection we'd have issued anyway."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("supervisor response contained no JSON object")
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise ValueError("supervisor response contained an unterminated JSON object")
+
+
+def _strip_json_fences(text: str) -> str:
+    """Unwrap markdown-fenced JSON (```json ... ```).
+
+    Small local models habitually fence structured output even under
+    response_format json_object; the payload inside is typically valid
+    (measured on riff's eval: gemma4:e2b fenced ~93% of turns, every one
+    containing parseable JSON). Only consulted after a strict parse fails,
+    so well-behaved output never takes this path. Mirrors riff's
+    goal_region fix — keep the two in sync."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text
+    stripped = stripped[3:]
+    if stripped[:4].lower() == "json":
+        stripped = stripped[4:]
+    if stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[:-3]
+    return stripped.strip()

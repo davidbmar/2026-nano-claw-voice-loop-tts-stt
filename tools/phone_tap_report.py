@@ -192,6 +192,77 @@ def _print_barge_latency(
         )
 
 
+def _print_stt_timeline(events: list[dict[str, Any]]) -> None:
+    """Show incremental decode windows followed by each endpoint finish."""
+    stt_events = [
+        item
+        for item in events
+        if item.get("event") in ("stt_pass", "stt_done")
+    ]
+    print("\nSTT timeline")
+    if not stt_events:
+        print("  no stt events")
+        return
+    for item in stt_events:
+        if item.get("event") == "stt_pass":
+            print(
+                "  pass {pass_count}: window={window_ms:.0f} ms "
+                "decode={ms:.1f} ms".format(
+                    pass_count=int(item.get("pass_count", 0)),
+                    window_ms=float(item.get("window_ms", 0.0)),
+                    ms=float(item.get("ms", 0.0)),
+                )
+            )
+            continue
+        if item.get("streamed"):
+            print(
+                "  done: streamed committed={committed_chars} chars "
+                "finish={finish_ms:.1f} ms wall={ms:.1f} ms".format(
+                    committed_chars=int(item.get("committed_chars", 0)),
+                    finish_ms=float(item.get("finish_ms", 0.0)),
+                    ms=float(item.get("ms", 0.0)),
+                )
+            )
+        else:
+            print(
+                "  done: one-shot wall={:.1f} ms".format(
+                    float(item.get("ms", 0.0))
+                )
+            )
+
+
+def _barge_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count barge candidates, commits, and each suppression reason."""
+    candidates = [
+        item for item in events if item.get("event") == "barge_candidate"
+    ]
+    reasons = {
+        reason: sum(item.get("reason") == reason for item in candidates)
+        for reason in ("low_conf", "echo", "short")
+    }
+    return {
+        "candidates": len(candidates),
+        "commits": sum(item.get("event") == "barge_in" for item in events),
+        "suppressions": len(candidates),
+        "reasons": reasons,
+    }
+
+
+def _print_barge_summary(events: list[dict[str, Any]]) -> None:
+    counts = _barge_counts(events)
+    reasons = counts["reasons"]
+    print("\nBarge-in decisions")
+    print(
+        "  candidates={candidates} commits={commits} "
+        "suppressions={suppressions}".format(**counts)
+    )
+    print(
+        "  suppressed: low_conf={low_conf} echo={echo} short={short}".format(
+            **reasons
+        )
+    )
+
+
 def report(tap_dir: Path) -> int:
     print(f"Phone tap report: {tap_dir}")
     print("\nWAV summary")
@@ -226,8 +297,10 @@ def report(tap_dir: Path) -> int:
     frames_sent = [item for item in events if item.get("event") == "frames_sent"]
     barges = [item for item in events if item.get("event") == "barge_in"]
     print(f"\nTiming events: {len(events)}" + (f" ({malformed} malformed lines ignored)" if malformed else ""))
+    _print_stt_timeline(events)
     _print_gap_histogram(_inter_sentence_gaps(frames_sent))
     _print_pacing(frames_sent)
+    _print_barge_summary(events)
     _print_barge_latency(barges, frames_sent)
     return 0
 

@@ -61,6 +61,11 @@ class Float32RingBuffer {
     }
 }
 
+// ~1ms at 48kHz: long enough to declick an underrun edge, short enough to be
+// inaudible as a dip. The render quantum is 128 samples, so this never spans a
+// whole block.
+const FADE_SAMPLES = 48;
+
 class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
     constructor(options) {
         super();
@@ -77,6 +82,9 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             : Math.round(this.sourceSampleRate * 0.15);
         this.ring = new Float32RingBuffer(Math.max(2048, this.prebufferSamples + 128));
         this.started = false;
+        // Fade the very first block in from zero (a clean playback onset).
+        this._underran = true;
+        this._underrunCount = 0;
         this.sourcePosition = 0;
 
         this.port.onmessage = (event) => {
@@ -85,6 +93,10 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             if (message.type === "flush") {
                 this.ring.clear();
                 this.started = false;
+                // Fade the first block in after a (re)start, exactly as after an
+                // underrun, so playback onset ramps from zero instead of
+                // stepping — the tick heard right before speech begins.
+                this._underran = true;
                 this.sourcePosition = 0;
                 return;
             }
@@ -108,6 +120,7 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             output[index] = this.ring.peek(index);
         }
         this.ring.discard(rendered);
+        return rendered;
     }
 
     _renderResampled(output) {
@@ -129,6 +142,7 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
         const consumed = Math.min(Math.floor(this.sourcePosition), this.ring.length);
         this.ring.discard(consumed);
         this.sourcePosition -= consumed;
+        return outputIndex;
     }
 
     process(_inputs, outputs) {
@@ -145,11 +159,39 @@ class NanoClawPcmPlayerProcessor extends AudioWorkletProcessor {
             this.started = true;
         }
 
-        if (Math.abs(this.sourcePerOutput - 1) < 1e-12) {
-            this._renderAtContextRate(output);
-        } else {
-            this._renderResampled(output);
+        const rendered = Math.abs(this.sourcePerOutput - 1) < 1e-12
+            ? this._renderAtContextRate(output)
+            : this._renderResampled(output);
+
+        // Declick buffer underruns. When the ring drains mid-stream (the next
+        // synthesized chunk has not arrived), the block's unfilled remainder is
+        // hard zero — a step from speech to silence, and the next block resumes
+        // with an equal step back up. Both are heard as a tick right at a chunk
+        // boundary. Ramp across both edges so the gap is a soft dip, not a pop.
+        const fade = Math.min(FADE_SAMPLES, output.length);
+        if (this._underran && rendered > 0) {
+            const head = Math.min(fade, rendered);
+            for (let i = 0; i < head; i += 1) output[i] *= i / head;
+            this._underran = false;
         }
+        if (rendered < output.length) {
+            const tail = Math.min(fade, rendered);
+            for (let i = 0; i < tail; i += 1) {
+                output[rendered - tail + i] *= (tail - 1 - i) / tail;
+            }
+            if (!this._underran) {
+                // Count only the transition INTO an underrun (one event per gap,
+                // not per starved block). Reported to the main thread so the
+                // page can show that underruns are the tick source and that the
+                // declick is smoothing them.
+                this._underrunCount += 1;
+                if (this.port && typeof this.port.postMessage === "function") {
+                    this.port.postMessage({ type: "underrun", count: this._underrunCount });
+                }
+            }
+            this._underran = true;
+        }
+
         for (let channelIndex = 1; channelIndex < channels.length; channelIndex += 1) {
             channels[channelIndex].set(output);
         }

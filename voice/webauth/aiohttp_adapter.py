@@ -16,7 +16,10 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
+from ipaddress import ip_address
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from aiohttp import WSCloseCode, web
 
@@ -40,7 +43,8 @@ from .store import AuthStore, ResolvedSession
 
 log = logging.getLogger("webauth-aiohttp")
 
-SESSION_COOKIE_NAME = "nc_session"
+SESSION_COOKIE_NAME = "__Host-nc_session"
+LEGACY_SESSION_COOKIE_NAME = "nc_session"
 PRE_AUTH_COOKIE_NAME = "nc_pre_auth"
 
 AUTH_MODE_OFF = "off"
@@ -57,7 +61,38 @@ SENSITIVE_PATH_PREFIXES = (
     "/api/auth/",
     "/api/conversations",
     "/api/history",
+    # Operator controls.  Mutating any of these changes behaviour for EVERY
+    # caller on this deployment — phone-line voice/model/STT, assistant mode,
+    # scheduler model — so they get the same CSRF and no-store treatment as
+    # the auth routes.
+    #
+    # Listed as exact paths and NEVER as the "/api/phone/" prefix: that would
+    # also capture /api/phone/incoming, the Telnyx webhook, which carries its
+    # own token and can present neither a browser origin nor an operator
+    # secret.  Guarding it would silently kill every inbound call.
+    "/api/phone/config",
+    "/api/phone/vad",
+    "/api/voice/flow",
+    "/api/voice/region-model",
 )
+
+# Unsafe requests to these paths additionally require the operator secret.
+#
+# The same-origin check below is CSRF mitigation ONLY: it stops another site's
+# page from forging a request, because a browser will not let script set
+# Origin or Sec-Fetch-Site.  It stops nothing else — any direct HTTP client
+# can send those three headers verbatim.  Until this guard existed, these
+# routes were reachable anonymously from the public internet.
+OPERATOR_PATHS = frozenset(
+    {
+        "/api/phone/config",
+        "/api/phone/vad",
+        "/api/voice/delegate",
+        "/api/voice/flow",
+        "/api/voice/region-model",
+    }
+)
+OPERATOR_HEADER = "X-NC-Operator"
 
 # GIS documents these four browser origins.  No googleusercontent image origin
 # is allowed: the UI uses local initials and never renders Google's picture
@@ -82,6 +117,7 @@ CONTENT_SECURITY_POLICY = (
 SECURITY_HEADERS = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
     "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "X-Content-Type-Options": "nosniff",
 }
 
@@ -110,6 +146,40 @@ def _request_host(request: web.Request) -> str:
         closing = value.find("]")
         return value[1:closing].lower() if closing > 0 else ""
     return value.rsplit(":", 1)[0].lower() if ":" in value else value.lower()
+
+
+def _is_localhost(host: str) -> bool:
+    """Return whether a normalized request host is a loopback development host."""
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _with_legacy_session_alias(request: web.Request) -> web.Request:
+    """Expose the one-release legacy cookie under the canonical session name.
+
+    Most auth consumers live in this adapter and accept both names directly.
+    The history handlers import ``SESSION_COOKIE_NAME``, though, so normalize a
+    legacy-only request at the middleware boundary until the compatibility
+    window closes.
+    """
+
+    cookies = request.cookies
+    legacy_value = cookies.get(LEGACY_SESSION_COOKIE_NAME)
+    if SESSION_COOKIE_NAME in cookies or legacy_value is None:
+        return request
+
+    alias = SimpleCookie()
+    alias[SESSION_COOKIE_NAME] = legacy_value
+    alias_header = alias[SESSION_COOKIE_NAME].OutputString()
+    headers = request.headers.copy()
+    existing = headers.get("Cookie", "")
+    headers["Cookie"] = f"{existing}; {alias_header}" if existing else alias_header
+    return request.clone(headers=headers)
 
 
 def trusted_client_ip(request: object) -> str | None:
@@ -148,6 +218,32 @@ def _needs_mutation_guard(request: web.Request) -> bool:
     )
 
 
+def _operator_secret() -> str:
+    """The shared operator password, or "" when the deployment has not set one."""
+
+    return os.environ.get("NANO_CLAW_OPERATOR_PASSWORD", "").strip()
+
+
+def _needs_operator_auth(request: web.Request) -> bool:
+    return (
+        request.method.upper() not in SAFE_METHODS and request.path in OPERATOR_PATHS
+    )
+
+
+def _operator_authorized(request: web.Request) -> bool:
+    """Constant-time check of the operator header against the configured secret.
+
+    Fails CLOSED when no secret is configured: an unset password disables
+    operator mutations rather than leaving them open to anyone.  Reads (GET)
+    are untouched, so the console still renders its current configuration.
+    """
+
+    secret = _operator_secret()
+    if not secret:
+        return False
+    return secrets.compare_digest(request.headers.get(OPERATOR_HEADER, ""), secret)
+
+
 def _same_origin_request(request: web.Request) -> bool:
     return (
         _origin_matches_request(request)
@@ -165,7 +261,49 @@ def _origin_matches_request(request: web.Request) -> bool:
         return raw_host == "localhost:9090"
     if origin == PUBLIC_ORIGIN:
         return raw_host in PUBLIC_HOST_HEADERS
-    return False
+    if origin and origin in _embedding_origins():
+        return True
+    return _loopback_origin_matches_host(origin, raw_host)
+
+
+def _embedding_origins() -> frozenset[str]:
+    """Origins allowed to embed this gateway's voice, beyond its own console.
+
+    A product page that wants nano-claw to do its audio lives on its own origin,
+    so the same-origin rule that protects the console locks it out entirely
+    (riff-builder on :8790 gets a flat 403 from /ws).
+
+    Declared, never inferred: empty by default, and one exact origin per entry.
+    This is the same discipline as NANO_CLAW_DELEGATE_HOSTS — the operator names
+    who may speak through this node, rather than a wildcard deciding for them.
+    """
+    raw = os.environ.get("NANO_CLAW_EMBED_ORIGINS", "")
+    return frozenset(o.strip() for o in raw.split(",") if o.strip())
+
+
+def _loopback_origin_matches_host(origin: str | None, raw_host: str) -> bool:
+    """Allow a loopback console served on any port, same origin as itself.
+
+    `LOCAL_ORIGIN` pins port 9090, which is where this is deployed — but a second
+    node on another port (a test rig, a staging instance) had its operator
+    endpoints refused outright, so its console could not change a setting at all.
+    That is not a security property: the CSRF guarantee this function provides
+    comes from Origin MATCHING THE SERVER'S OWN HOST, which a cross-site page
+    cannot forge because a browser sets Origin itself. A page on
+    http://localhost:7777 calling this node still sends its own origin and still
+    fails to match. The port number was never what made it safe.
+
+    Loopback only. A non-loopback origin still has to be one of the two named
+    above, so this cannot admit a public host by accident.
+    """
+    if not origin or not raw_host:
+        return False
+    parsed = urlparse(origin)
+    if parsed.scheme != "http":
+        return False
+    if (parsed.hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    return parsed.netloc.lower() == raw_host
 
 
 def _strip_cors_headers(response: web.StreamResponse) -> None:
@@ -185,7 +323,44 @@ def _decorate_response(
     if _is_sensitive_path(request.path):
         response.headers["Cache-Control"] = "no-store"
         _strip_cors_headers(response)
+    _allow_embedded_read(request, response)
     return response
+
+
+# What an embedding page may READ over HTTP. Everything else it needs — setting
+# a voice, speaking, listening — goes over the socket, where a session exists.
+#
+# One path, because the panel needs one path. Declaring an origin should grant
+# what embedding requires and not a byte more; "allow every non-sensitive path
+# since it asked for one" is how an embed permission quietly becomes an API key.
+EMBED_READABLE_PATHS = frozenset({"/api/voices"})
+
+
+def _allow_embedded_read(
+    request: web.Request, response: web.StreamResponse
+) -> None:
+    """Let a declared origin read the voice list, and nothing else.
+
+    Admitting an origin to `/ws` was only half the permission. The settings
+    panel rendered with an EMPTY dropdown because `/api/voices` answered 200
+    with no Access-Control-Allow-Origin, so the browser discarded the body —
+    invisible to curl, which reads the status and is satisfied.
+
+    The origin is ECHOED, never `*`: the allowlist names who may embed, and a
+    wildcard would answer everyone. `Vary: Origin` because the response now
+    differs per caller and a shared cache must not reuse one origin's answer.
+    """
+    if request.method.upper() not in ("GET", "HEAD"):
+        return
+    if request.path not in EMBED_READABLE_PATHS:
+        return
+    if _is_sensitive_path(request.path):
+        return
+    origin = request.headers.get("Origin")
+    if not origin or origin not in _embedding_origins():
+        return
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Vary"] = "Origin"
 
 
 @web.middleware
@@ -194,10 +369,20 @@ async def request_security_middleware(
 ) -> web.StreamResponse:
     """Guard unsafe auth/history requests and add response security headers."""
 
+    request = _with_legacy_session_alias(request)
     if _needs_mutation_guard(request) and not _same_origin_request(request):
         response: web.StreamResponse = web.json_response(
             {"error": "request_rejected"}, status=403
         )
+        return _decorate_response(request, response)
+    if _needs_operator_auth(request) and not _operator_authorized(request):
+        if not _operator_secret():
+            log.error(
+                "operator mutation refused for %s: NANO_CLAW_OPERATOR_PASSWORD "
+                "is unset — set it to enable the console's configuration controls",
+                request.path,
+            )
+        response = web.json_response({"error": "operator_auth_required"}, status=403)
         return _decorate_response(request, response)
     try:
         response = await handler(request)
@@ -351,30 +536,86 @@ class AiohttpAuthAdapter:
 
     def _set_cookie(
         self,
+        request: web.Request,
         response: web.StreamResponse,
         name: str,
         value: str,
         *,
         max_age: int,
     ) -> None:
+        secure = self._cookie_secure(request)
+        if name.startswith("__Host-") and not secure:
+            raise RuntimeError("__Host- cookies require a secure request context")
         response.set_cookie(
             name,
             value,
             max_age=max_age,
             path="/",
-            secure=self.public_https,
+            secure=secure,
             httponly=True,
             samesite="Lax",
         )
 
-    def _clear_cookie(self, response: web.StreamResponse, name: str) -> None:
+    def _cookie_secure(self, request: web.Request) -> bool:
+        """Enforce Secure for every cookie outside loopback development.
+
+        The deployment flag remains an operator declaration, but cannot relax
+        this invariant. HTTPS loopback requests are secure; plain HTTP
+        localhost remains available for the development console.
+        """
+
+        host = _request_host(request)
+        return request.secure if _is_localhost(host) else True
+
+    def _session_cookie_name(self, request: web.Request) -> str:
+        return (
+            SESSION_COOKIE_NAME
+            if self._cookie_secure(request)
+            else LEGACY_SESSION_COOKIE_NAME
+        )
+
+    @staticmethod
+    def _session_cookie(request: web.Request) -> tuple[str | None, str | None]:
+        for name in (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME):
+            value = request.cookies.get(name)
+            if value:
+                return name, value
+        return None, None
+
+    def _delete_cookie(
+        self,
+        response: web.StreamResponse,
+        name: str,
+        *,
+        request: web.Request | None,
+    ) -> None:
+        secure = name.startswith("__Host-") or (
+            self._cookie_secure(request)
+            if request is not None
+            else self.public_https
+        )
         response.del_cookie(
             name,
             path="/",
-            secure=self.public_https,
+            secure=secure,
             httponly=True,
             samesite="Lax",
         )
+
+    def _clear_cookie(
+        self,
+        response: web.StreamResponse,
+        name: str,
+        *,
+        request: web.Request | None = None,
+    ) -> None:
+        names = (
+            (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)
+            if name in (SESSION_COOKIE_NAME, LEGACY_SESSION_COOKIE_NAME)
+            else (name,)
+        )
+        for cookie_name in names:
+            self._delete_cookie(response, cookie_name, request=request)
 
     async def config_handler(self, request: web.Request) -> web.Response:
         if not self.enabled:
@@ -408,6 +649,7 @@ class AiohttpAuthAdapter:
             1, int((challenge.expires_at - now).total_seconds())
         )
         self._set_cookie(
+            request,
             response,
             PRE_AUTH_COOKIE_NAME,
             challenge.pre_auth_value,
@@ -537,13 +779,21 @@ class AiohttpAuthAdapter:
                 }
             }
         )
+        session_cookie_name = self._session_cookie_name(request)
         self._set_cookie(
+            request,
             response,
-            SESSION_COOKIE_NAME,
+            session_cookie_name,
             raw_token,
             max_age=max(1, int(self.absolute_ttl.total_seconds())),
         )
-        self._clear_cookie(response, PRE_AUTH_COOKIE_NAME)
+        if session_cookie_name == SESSION_COOKIE_NAME:
+            self._delete_cookie(
+                response, LEGACY_SESSION_COOKIE_NAME, request=request
+            )
+        else:
+            self._delete_cookie(response, SESSION_COOKIE_NAME, request=request)
+        self._clear_cookie(response, PRE_AUTH_COOKIE_NAME, request=request)
         return response
 
     async def _resolve_raw_token(
@@ -564,7 +814,7 @@ class AiohttpAuthAdapter:
         return identity
 
     async def me_handler(self, request: web.Request) -> web.Response:
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         if not raw_token:
             return _json_error("unauthenticated", 401)
         try:
@@ -577,12 +827,12 @@ class AiohttpAuthAdapter:
         if identity is None:
             await self.close_bound_sockets(raw_token)
             response = _json_error("unauthenticated", 401)
-            self._clear_cookie(response, SESSION_COOKIE_NAME)
+            self._clear_cookie(response, SESSION_COOKIE_NAME, request=request)
             return response
         return web.json_response({"user": dict(identity)})
 
     async def logout_handler(self, request: web.Request) -> web.Response:
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         store_failed = False
         if raw_token and self.store is not None:
             try:
@@ -605,7 +855,7 @@ class AiohttpAuthAdapter:
             if store_failed
             else web.json_response({"ok": True})
         )
-        self._clear_cookie(response, SESSION_COOKIE_NAME)
+        self._clear_cookie(response, SESSION_COOKIE_NAME, request=request)
         return response
 
     async def bind_websocket(
@@ -626,7 +876,7 @@ class AiohttpAuthAdapter:
         if not _origin_matches_request(request):
             raise web.HTTPForbidden(text="WebSocket origin rejected")
 
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        _, raw_token = self._session_cookie(request)
         if not raw_token:
             identity = WebSocketIdentity(None, None, conversation_id)
             self._attach_websocket_identity(ws, identity)

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
 
 from voice import metrics_db, server
 
@@ -71,7 +72,13 @@ def test_metrics_writer_and_public_api_never_expose_transcripts(monkeypatch, tmp
         "tokens_out": None,
     }
 
-    response = run(server.metrics_handler(None))
+    # /api/metrics now takes the operator token (it publishes live session IDs
+    # and token counts); transcripts must stay absent either way.
+    monkeypatch.setenv("NANO_CLAW_OPERATOR_READ_TOKEN", "ops-token")
+    metrics_request = make_mocked_request(
+        "GET", "/api/metrics", headers={"X-NC-Operator-Read": "ops-token"}
+    )
+    response = run(server.metrics_handler(metrics_request))
     assert response.status == 200
     payload = json.loads(response.text)
     assert payload["recent"]
