@@ -225,6 +225,22 @@ class PlatformClient:
         # tens of seconds, so this timeout is far longer than a retrieval's.
         self.timeout = timeout
 
+    @staticmethod
+    def ingest_timeout(characters: int, floor: float = 120.0) -> float:
+        """How long to wait for a synchronous ingest of this much text.
+
+        A fixed timeout cannot work here. The IRS 1040 instructions are 630k
+        characters and took just over a minute to segment and index; a one-page
+        W-2 takes under a second. A flat 60s silently turned the first genuinely
+        large upload into a failure — and, because the platform finished the
+        work anyway, into an indexed document the registry had no handle to.
+
+        Measured at roughly 10k characters per second, then given a wide margin
+        because the platform shares its database with live retrieval.
+        """
+
+        return min(900.0, max(floor, characters / 5_000))
+
     def _policy(self, permission: str) -> dict[str, Any]:
         return {
             "tenant_id": self.tenant_id,
@@ -259,10 +275,26 @@ class PlatformClient:
             "source_kind": "upload",
             "metadata": metadata or {},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/v1/ingest/text", json=payload
-            )
+        timeout = self.ingest_timeout(len(text), floor=self.timeout)
+        try:
+            response = await self._post_ingest(payload, timeout)
+        except httpx.TimeoutException:
+            # The platform may well have finished after we stopped listening,
+            # which is how the first large upload left an indexed document the
+            # registry could not name. `document_key` is deterministic, so
+            # re-sending the identical body returns the same document_id
+            # without creating a second copy — the retry heals that case
+            # instead of compounding it.
+            log.warning("ingest timed out after %.0fs, retrying once", timeout)
+            try:
+                response = await self._post_ingest(payload, timeout * 2)
+            except httpx.TimeoutException as exc:
+                raise DocumentError(
+                    "This document is taking longer to index than we allow. "
+                    "It may still finish in the background — reload in a "
+                    "minute, and re-add it if it has not appeared.",
+                    status=504,
+                ) from exc
         if response.status_code >= 400:
             raise DocumentError(
                 f"The document service rejected this file "
@@ -276,6 +308,10 @@ class PlatformClient:
                 status=502,
             )
         return str(document_id)
+
+    async def _post_ingest(self, payload: dict[str, Any], timeout: float):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(f"{self.base_url}/v1/ingest/text", json=payload)
 
     async def delete_document(self, platform_document_id: str) -> bool:
         """Remove a document and everything derived from it.

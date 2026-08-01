@@ -315,8 +315,12 @@ async def document_upload_handler(request: web.Request) -> web.Response:
         return _error(exc.message, exc.status)
     except Exception as exc:  # noqa: BLE001 - the platform may be down entirely
         log.exception("ingest failed for %s", document_id)
-        store.mark_failed(document_id, error=str(exc)[:200])
-        return _error("the document service is unavailable", 502)
+        # Several httpx exceptions stringify to "", which showed up in the UI
+        # as a failed row with no reason at all. Fall back to the class name so
+        # there is always something to act on.
+        reason = str(exc).strip() or type(exc).__name__
+        store.mark_failed(document_id, error=reason[:200])
+        return _error(f"the document service could not index this ({reason})", 502)
 
     store.mark_ready(document_id, platform_document_id=platform_document_id)
     return _json(_public_document(store.get_document(document_id)), status=201)
