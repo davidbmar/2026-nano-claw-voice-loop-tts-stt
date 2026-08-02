@@ -109,6 +109,20 @@ export function createDocumentListItem(documentRef, doc, actions) {
     }
     label.appendChild(meta);
 
+    // Rename lives on the row because a title is the only thing that tells a
+    // reader what a document IS: "f8655" answers nothing, and the person who
+    // uploaded it is the one who knows. Trashed rows do not offer it; their
+    // one decision is Undo.
+    const rename = documentRef.createElement("button");
+    rename.type = "button";
+    rename.className = "document-item-rename";
+    rename.textContent = "Rename";
+    rename.setAttribute("aria-label", "Rename " + stringValue(doc.title));
+    if (doc.deletedAt) rename.setAttribute("hidden", "hidden");
+    rename.addEventListener("click", function () {
+        actions.onRename(doc, rename);
+    });
+
     const action = documentRef.createElement("button");
     action.type = "button";
     action.className = "document-item-delete";
@@ -124,6 +138,7 @@ export function createDocumentListItem(documentRef, doc, actions) {
 
     item.appendChild(checkbox);
     item.appendChild(label);
+    item.appendChild(rename);
     item.appendChild(action);
     return item;
 }
@@ -318,6 +333,7 @@ export class DocumentsUI {
                     onToggle: (target, checkbox) => this._toggle(target, checkbox),
                     onDelete: (target, button) => this._trash(target, button),
                     onRestore: (target, button) => this._restore(target, button),
+                    onRename: (target, button) => this._renameDocument(target, button),
                 }),
             );
         });
@@ -369,6 +385,25 @@ export class DocumentsUI {
             // scope the server does not have.
             checkbox.checked = !checkbox.checked;
             this._status("Could not change what the assistant sees.", true);
+            return;
+        }
+        await this.refresh();
+    }
+
+    async _renameDocument(doc, button) {
+        const proposed = this.window && this.window.prompt
+            ? this.window.prompt("Rename this document", doc.title)
+            : null;
+        const title = (proposed || "").trim();
+        if (!title || title === doc.title) return;
+        button.disabled = true;
+        const { response, data } = await this._json(
+            "/api/documents/" + encodeURIComponent(doc.id),
+            this._mutation("POST", { title: title }),
+        );
+        button.disabled = false;
+        if (!response.ok) {
+            this._status((data && data.error) || "Could not rename that document.", true);
             return;
         }
         await this.refresh();

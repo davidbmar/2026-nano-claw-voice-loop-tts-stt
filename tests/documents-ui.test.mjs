@@ -220,3 +220,24 @@ test("the active space says so in words, not just in colour", () => {
     assert.match(active.find("space-item-count").textContent, /answering from/);
     assert.doesNotMatch(idle.find("space-item-count").textContent, /answering from/);
 });
+
+test("every live row offers Rename, because the title is what tells a reader what it is", () => {
+    const calls = [];
+    const item = createDocumentListItem(fakeDocument, READY, {
+        ...noopActions,
+        onRename: (doc) => calls.push(doc.id),
+    });
+    const rename = item.find("document-item-rename");
+    assert.equal(rename.textContent, "Rename");
+    rename.dispatch("click");
+    assert.deepEqual(calls, ["doc_1"]);
+});
+
+test("a trashed row hides Rename — its one decision is Undo", () => {
+    const item = createDocumentListItem(
+        fakeDocument,
+        { ...READY, deletedAt: 1750000000 },
+        noopActions,
+    );
+    assert.equal(item.find("document-item-rename").getAttribute("hidden"), "hidden");
+});
