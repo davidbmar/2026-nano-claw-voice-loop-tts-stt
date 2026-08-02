@@ -187,6 +187,48 @@ def extract(filename: str, data: bytes) -> tuple[str, str]:
     return kind, text
 
 
+def derive_title(filename: str, data: bytes) -> str:
+    """A human-readable title for the document list.
+
+    A drag-dropped IRS form arrives named f8655.pdf, which tells the reader
+    nothing. The PDF's own metadata usually says "Form 8655 (Rev. ...)", so
+    prefer that when it looks like a real title, and fall back to the filename
+    stem otherwise. Best effort by design: a title must never be the reason an
+    upload fails.
+    """
+
+    stem = os.path.splitext(os.path.basename(filename or ""))[0][:200] or "document"
+    if classify_or_none(filename) != "pdf":
+        return stem
+    try:
+        from pypdf import PdfReader
+
+        meta = PdfReader(io.BytesIO(data)).metadata
+        title = str(meta.title).strip() if meta and meta.title else ""
+    except Exception:  # noqa: BLE001 - metadata is a nicety, never a gate
+        return stem
+    # Reject junk metadata: empty, generic, suspiciously short, or the
+    # authoring tool's filename echoed back.
+    if (
+        not title
+        or len(title) < 6
+        or title.lower() in {"untitled", "document", "pdf"}
+        or title.lower() == stem.lower()
+        or title.lower().endswith(".indd")
+    ):
+        return stem
+    return title[:200]
+
+
+def classify_or_none(filename: str) -> str | None:
+    """`classify`, but None instead of an exception, for callers that probe."""
+
+    try:
+        return classify(filename)
+    except UnsupportedDocument:
+        return None
+
+
 # ---- platform ingestion --------------------------------------------------
 
 

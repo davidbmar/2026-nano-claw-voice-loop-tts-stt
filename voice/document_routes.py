@@ -278,7 +278,7 @@ async def document_upload_handler(request: web.Request) -> web.Response:
     except documents_module.DocumentError as exc:
         return _error(exc.message, exc.status)
 
-    title = os.path.splitext(os.path.basename(filename))[0][:200] or filename
+    title = documents_module.derive_title(filename, data)
     document_id = store.create_document(
         space_id,
         filename=os.path.basename(filename),

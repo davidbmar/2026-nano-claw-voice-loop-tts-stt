@@ -178,3 +178,48 @@ def test_docx_paragraphs_and_table_cells_are_both_extracted():
     # Tables carry the numbers in a tax document — dropping them would lose
     # exactly the part a customer asks about.
     assert "Mortgage interest | 4210.00" in text
+
+
+def test_a_pdf_with_real_metadata_gets_its_own_title():
+    # An IRS form arrives named f8655.pdf, which tells the list's reader
+    # nothing. The PDF metadata says what it is; prefer it.
+    pytest.importorskip("pypdf")
+    import io
+
+    from pypdf import PdfWriter
+
+    from voice.documents import derive_title
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.add_metadata({"/Title": "Form 8655 (Rev. September 2024)"})
+    buffer = io.BytesIO()
+    writer.write(buffer)
+
+    assert derive_title("f8655.pdf", buffer.getvalue()) == "Form 8655 (Rev. September 2024)"
+
+
+def test_junk_or_missing_metadata_falls_back_to_the_filename():
+    pytest.importorskip("pypdf")
+    import io
+
+    from pypdf import PdfWriter
+
+    from voice.documents import derive_title
+
+    for junk in (None, "untitled", "pdf", "x", "w2-final.indd"):
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        if junk is not None:
+            writer.add_metadata({"/Title": junk})
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        assert derive_title("w2-final.pdf", buffer.getvalue()) == "w2-final", junk
+
+
+def test_non_pdfs_and_broken_pdfs_never_fail_titling():
+    from voice.documents import derive_title
+
+    assert derive_title("notes.txt", b"hello") == "notes"
+    assert derive_title("broken.pdf", b"%PDF-not really") == "broken"
+    assert derive_title("", b"") == "document"

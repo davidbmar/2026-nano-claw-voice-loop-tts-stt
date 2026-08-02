@@ -89,7 +89,7 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         ),
     },
     "riff": {
-        "label": "Riff",
+        "label": "Code: Riff",
         "profile": "riff",
         "scheduler": False,
         "abstract": (
@@ -98,7 +98,7 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         ),
     },
     "nanoclaw": {
-        "label": "nano-claw",
+        "label": "Code: nano-claw",
         "profile": "nanoclaw",
         "scheduler": False,
         "abstract": (
@@ -107,7 +107,7 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
         ),
     },
     "intelligence-platform": {
-        "label": "intelligence-platform",
+        "label": "Code: intelligence-platform",
         "profile": "intelligence-platform",
         "scheduler": False,
         "abstract": (
