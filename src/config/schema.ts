@@ -49,6 +49,9 @@ export const IntelligenceConfigSchema = z
     tenantId: z.string().min(1).default('personal'),
     principalId: z.string().min(1).default('nano-claw'),
     collectionIds: z.array(z.string().min(1)).default([]),
+    // Security boundary for profiles that share a tenant. Unlike collectionIds,
+    // this is a deployment allowlist and is never widened by session commands.
+    allowedCollectionIds: z.array(z.string().min(1)).optional(),
     // Narrows retrieval to specific documents inside those collections. Empty
     // means "the whole collection"; the platform ANDs the two filters, so this
     // is what lets a customer tick two of five uploaded files.

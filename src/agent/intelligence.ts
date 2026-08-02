@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import type { IntelligenceConfig as ParsedIntelligenceConfig } from '../config/schema';
 import { AgentConfig, Message } from '../types';
 import { logger } from '../utils/logger';
 
@@ -117,6 +118,27 @@ export async function retrieveTurnEvidence(
   if (!question) return undefined;
 
   const started = Date.now();
+  const { allowedCollectionIds } = intelligence as typeof intelligence &
+    Pick<ParsedIntelligenceConfig, 'allowedCollectionIds'>;
+  const collectionIds =
+    allowedCollectionIds === undefined
+      ? intelligence.collectionIds
+      : intelligence.collectionIds.length === 0
+        ? [...new Set(allowedCollectionIds)]
+        : intelligence.collectionIds.filter((collectionId) =>
+            allowedCollectionIds.includes(collectionId)
+          );
+  // The platform interprets an empty collection filter as tenant-wide. Once a
+  // profile has an allowlist, an empty intersection therefore has to stop here.
+  if (allowedCollectionIds !== undefined && collectionIds.length === 0) {
+    return {
+      status: 'no_match',
+      items: [],
+      durationMs: Date.now() - started,
+      groundingMode: intelligence.groundingMode,
+    };
+  }
+
   try {
     const response = await http.post<EvidenceResponse>(
       `${intelligence.apiUrl.replace(/\/$/, '')}/v1/retrieve`,
@@ -129,7 +151,7 @@ export async function retrieveTurnEvidence(
         },
         scope: {
           tenant_id: intelligence.tenantId,
-          collection_ids: intelligence.collectionIds,
+          collection_ids: collectionIds,
           // Omitted entirely when empty rather than sent as []: an empty
           // document filter and an absent one mean the same thing to the
           // platform, and sending the key only when it narrows something
@@ -155,7 +177,7 @@ export async function retrieveTurnEvidence(
         status: result.status,
         evidenceCount: items.length,
         durationMs: result.durationMs,
-        collectionIds: intelligence.collectionIds,
+        collectionIds,
       },
       'Turn evidence retrieval complete'
     );

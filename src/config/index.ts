@@ -267,7 +267,10 @@ export function mergeEnvConfig(config: Config): Config {
           ...existingProfiles,
           [intelligenceProfileId]: {
             ...existingProfiles[intelligenceProfileId],
-            intelligence,
+            // Environment intelligence config supplies the default for the
+            // selected profile; an explicit profile block owns its tenant and
+            // must not be replaced by process-wide settings.
+            intelligence: existingProfiles[intelligenceProfileId].intelligence ?? intelligence,
           },
         }
       : existingProfiles;

@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import type { IntelligenceConfig as ParsedIntelligenceConfig } from '../config/schema';
 import type { AgentConfig, IntelligenceConfig, Message } from '../types';
 import type { CollectionScopeState, Memory } from './memory';
 
@@ -123,7 +124,16 @@ async function fetchCatalog(
         'X-Permissions': 'knowledge:retrieve',
       },
     });
-    return parseCatalog(response.data);
+    const catalog = parseCatalog(response.data);
+    const { allowedCollectionIds } = intelligence as IntelligenceConfig &
+      Pick<ParsedIntelligenceConfig, 'allowedCollectionIds'>;
+    if (!catalog || allowedCollectionIds === undefined) return catalog;
+
+    const allowed = new Set(allowedCollectionIds);
+    return {
+      ...catalog,
+      collections: catalog.collections.filter((item) => allowed.has(item.collectionId)),
+    };
   } catch {
     return undefined;
   }

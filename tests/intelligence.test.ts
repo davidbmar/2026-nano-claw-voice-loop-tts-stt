@@ -127,6 +127,39 @@ describe('retrieveTurnEvidence', () => {
       'What are the first three phases?\nFollow-up: What about the next one?'
     );
   });
+
+  it('uses the allowlist when no narrower collection scope is selected', async () => {
+    const post = vi.fn().mockResolvedValue({ data: { evidence: [] } });
+
+    await retrieveTurnEvidence(
+      messages,
+      {
+        ...config,
+        collectionIds: [],
+        allowedCollectionIds: ['business-a-documents'],
+      },
+      { post } as any
+    );
+
+    expect(post.mock.calls[0][1].scope.collection_ids).toEqual(['business-a-documents']);
+  });
+
+  it('does not retrieve when the requested scope is outside the allowlist', async () => {
+    const post = vi.fn();
+
+    const result = await retrieveTurnEvidence(
+      messages,
+      {
+        ...config,
+        collectionIds: ['business-b-documents'],
+        allowedCollectionIds: ['business-a-documents'],
+      },
+      { post } as any
+    );
+
+    expect(result).toMatchObject({ status: 'no_match', items: [] });
+    expect(post).not.toHaveBeenCalled();
+  });
 });
 
 describe('ContextBuilder turn evidence', () => {
@@ -270,5 +303,35 @@ describe('intelligence environment configuration', () => {
       collectionIds: ['owning-the-demand'],
     });
     expect(merged.agents.profiles.spacechannel.intelligence).toBeUndefined();
+  });
+
+  it('uses the environment tenant only as a default and preserves a profile tenant', () => {
+    process.env.NANO_CLAW_INTELLIGENCE_URL = 'http://127.0.0.1:8000';
+    process.env.NANO_CLAW_INTELLIGENCE_TENANT = 'personal';
+    process.env.NANO_CLAW_INTELLIGENCE_PROFILE = 'business';
+
+    const base = createDefaultConfig();
+    base.agents.profiles = {
+      business: {
+        label: 'Business',
+        systemPrompt: 'Business documents only',
+        knowledgeFiles: [],
+        intelligence: {
+          ...config,
+          tenantId: 'business-tenant',
+          collectionIds: ['business-documents'],
+          allowedCollectionIds: ['business-documents'],
+        },
+      },
+    };
+
+    const merged = mergeEnvConfig(base);
+
+    expect(merged.agents.defaults?.intelligence?.tenantId).toBe('personal');
+    expect(merged.agents.profiles.business.intelligence).toMatchObject({
+      tenantId: 'business-tenant',
+      collectionIds: ['business-documents'],
+      allowedCollectionIds: ['business-documents'],
+    });
   });
 });

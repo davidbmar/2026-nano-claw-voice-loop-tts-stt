@@ -203,6 +203,42 @@ describe('session-scoped collection selection', () => {
     });
   });
 
+  it('filters the tenant catalog before listing or resolving collections', async () => {
+    const allowedIntelligence: IntelligenceConfig = {
+      ...intelligence,
+      collectionIds: [],
+      allowedCollectionIds: ['owning-the-demand'],
+    };
+    const agentConfig: AgentConfig = {
+      model: 'test-model',
+      intelligence: allowedIntelligence,
+      intelligenceScopeKey: collectionScopeKey(allowedIntelligence, 'business-a'),
+    };
+    const memory = new Memory('scope-allowlist');
+    const http = { get: vi.fn().mockResolvedValue({ data: catalog }) } as any;
+
+    const available = await prepareCollectionScopeTurn(
+      user("what's available"),
+      memory,
+      agentConfig,
+      undefined,
+      http
+    );
+    expect(available?.reply).toBe('Available: Owning the Demand.');
+
+    const blocked = await prepareCollectionScopeTurn(
+      user('load nano claw code'),
+      memory,
+      agentConfig,
+      undefined,
+      http
+    );
+    expect(blocked?.reply).toBe(
+      "I don't have “nano claw code” loaded. Available: Owning the Demand."
+    );
+    expect(blocked?.scope).toEqual({ mode: 'default', collectionIds: [] });
+  });
+
   it('plumbs the active set into retrieval without mutating deployment config', async () => {
     const memory = new Memory('scope-retrieval');
     const agentConfig = config();
