@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -200,6 +201,52 @@ def test_flow_reply_preserves_booking_event_id():
     assert reply.event_id == "event-123"
     assert reply.outcome == "booked"
     assert reply.done is True
+
+
+def test_second_file_based_domain_uses_its_own_runner_config(monkeypatch):
+    plumber = DOMAINS["plumber"]
+    second_slots = {
+        "project": {"type": "text", "required": True},
+        "slot_start": {"type": "datetime", "required": True},
+        "duration_minutes": {
+            "type": "minutes",
+            "values": [45, 90],
+            "required": True,
+        },
+    }
+    second_domain = replace(
+        plumber,
+        id="electrician",
+        goal="Schedule one electrical service visit.",
+        persona="You are a concise electrical service scheduler.",
+        slots=second_slots,
+    )
+    assert second_domain.uses_live_calendar is False
+    assert second_domain.goal != plumber.goal
+    assert second_domain.persona != plumber.persona
+    assert second_domain.slots != plumber.slots
+
+    runner_args = {}
+
+    class FakeRunner:
+        def __init__(self, config, windows, client=None):
+            runner_args.update(config=config, windows=windows, client=client)
+            self.config = config
+            self.slots = {}
+            self.turns_used = 0
+            self.max_turns = config.max_turns
+
+    monkeypatch.setitem(DOMAINS, second_domain.id, second_domain)
+    monkeypatch.setattr(flow_session, "GoalRegionRunner", FakeRunner)
+
+    session = FlowSession.create(domain_id=second_domain.id)
+
+    assert isinstance(session, FlowSession)
+    assert session._booking._domain is second_domain
+    config = runner_args["config"]
+    assert config.goal == second_domain.goal
+    assert config.persona == second_domain.persona
+    assert config.slots == second_domain.slots
 
 
 def test_lawyer_create_async_wires_live_calendar_off_event_loop(monkeypatch):

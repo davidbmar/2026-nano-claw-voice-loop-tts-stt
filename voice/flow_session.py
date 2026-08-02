@@ -412,10 +412,13 @@ def scheduler_flow_enabled() -> bool:
     return active_scheduling_domain() is not None
 
 
-def scheduler_region_config(digest: str) -> RegionConfig:
+def scheduler_region_config(
+    digest: str, *, domain: SchedulingDomain | None = None
+) -> RegionConfig:
     """Return the scheduler configuration shared by live voice and evals."""
 
-    return region_config_for(DOMAINS["plumber"], digest)
+    selected_domain = DOMAINS["plumber"] if domain is None else domain
+    return region_config_for(selected_domain, digest)
 
 
 def load_free_windows(availability: dict) -> list[FreeWindow]:
@@ -621,7 +624,7 @@ class FlowSession:
             return load_calendar_settings() is not None
 
         try:
-            _load_scheduler_inputs()
+            _load_scheduler_inputs(domain)
         except _AVAILABILITY_ERRORS:
             # Debug level: this runs on every /flow poll, but the REASON the
             # availability badge is red should be one log-grep away.
@@ -677,7 +680,7 @@ class FlowSession:
                 return RefusalSession(domain)
         else:
             try:
-                path, config, windows = _load_scheduler_inputs()
+                path, config, windows = _load_scheduler_inputs(domain)
             except _AVAILABILITY_ERRORS as exc:
                 path = _availability_path()
                 log.error("Scheduler flow unavailable; cannot load %s: %s", path, exc)
@@ -776,7 +779,9 @@ def _availability_path() -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _load_scheduler_inputs() -> tuple[Path, RegionConfig, list[FreeWindow]]:
+def _load_scheduler_inputs(
+    domain: SchedulingDomain,
+) -> tuple[Path, RegionConfig, list[FreeWindow]]:
     path = _availability_path()
     availability = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(availability, dict):
@@ -785,7 +790,9 @@ def _load_scheduler_inputs() -> tuple[Path, RegionConfig, list[FreeWindow]]:
     # must not offer last week's days (2026-07-27 regression).
     availability = anchor_availability(availability)
     windows = load_free_windows(availability)
-    config = scheduler_region_config(availability_digest(availability))
+    config = scheduler_region_config(
+        availability_digest(availability), domain=domain
+    )
     return path, config, windows
 
 
