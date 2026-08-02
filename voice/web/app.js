@@ -12,7 +12,7 @@ import {
   inferInboundEmotion,
 } from './emotion-layer.js';
 import { createAuthHistoryUI } from './auth.js';
-import { DocumentsUI } from './documents.js?v=0.4.29';
+import { DocumentsUI } from './documents.js?v=0.4.30';
 import { Pcm16AudioPlayer } from './ws-audio-player.js';
 
 ('use strict');
@@ -538,11 +538,11 @@ async function switchRenderer(id) {
     // Versioned like every other asset in index.html. A dynamic import is
     // cached by URL independently of app.js, so without this the browser keeps
     // serving a stale mascot module after a deploy.
-    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.29');
+    const { createMascotRenderer } = await import('./mascot-renderer.js?v=0.4.30');
     replacement = await createMascotRenderer(talkingCubeStage || talkingCubeCanvas.parentElement);
     talkingCubeCanvas.hidden = true;
   } else if (next.startsWith('robot-')) {
-    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.29');
+    const { createRobotRenderer } = await import('./robot-renderer.js?v=0.4.30');
     replacement = await createRobotRenderer(
       talkingCubeStage || talkingCubeCanvas.parentElement,
       next.slice('robot-'.length),
