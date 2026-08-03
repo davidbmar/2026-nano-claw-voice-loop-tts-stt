@@ -275,6 +275,13 @@ export function mergeEnvConfig(config: Config): Config {
         }
       : existingProfiles;
 
+  // Decision Core shadow mode: positive enable, mirroring the tools gate.
+  const decisionShadowValue = process.env.NANO_CLAW_DECISION_SHADOW?.trim().toLowerCase();
+  const decisionShadowEnabled = decisionShadowValue
+    ? ['1', 'true', 'yes'].includes(decisionShadowValue)
+    : undefined;
+  const decisionCoreRoot = process.env.DECISION_CORE_ROOT?.trim() || undefined;
+
   const merged = ConfigSchema.parse({
     ...config,
     providers: mergedProviders,
@@ -290,6 +297,11 @@ export function mergeEnvConfig(config: Config): Config {
       ...config.tools,
       enabled: toolsEnabled,
     },
+    decisionCore: {
+      ...config.decisionCore,
+      ...(decisionShadowEnabled !== undefined && { shadowEnabled: decisionShadowEnabled }),
+      ...(decisionCoreRoot && { root: decisionCoreRoot }),
+    },
   });
 
   logger.info(
@@ -299,6 +311,13 @@ export function mergeEnvConfig(config: Config): Config {
     },
     'Tool gate resolved'
   );
+
+  if (merged.decisionCore.shadowEnabled) {
+    logger.info(
+      { root: merged.decisionCore.root ?? '(default)' },
+      'Decision Core shadow mode enabled'
+    );
+  }
 
   return merged;
 }

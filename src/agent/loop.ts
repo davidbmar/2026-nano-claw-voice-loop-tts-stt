@@ -9,6 +9,7 @@ import { ShellTool } from './tools/shell';
 import { ReadFileTool, WriteFileTool } from './tools/file';
 import { Config } from '../config/schema';
 import { logger } from '../utils/logger';
+import { configureDecisionShadow, shadowDecide } from './decision-shadow';
 import { retrieveTurnEvidence } from './intelligence';
 import { collectionScopeKey, prepareCollectionScopeTurn } from './knowledge-scope';
 import {
@@ -39,6 +40,7 @@ export class AgentLoop {
   private skillsLoader: SkillsLoader;
   private toolRegistry: ToolRegistry;
   private maxIterations: number;
+  private sessionId: string;
 
   constructor(
     sessionId: string,
@@ -60,6 +62,8 @@ export class AgentLoop {
       this.config.intelligenceScopeKey = collectionScopeKey(this.config.intelligence);
     }
 
+    this.sessionId = sessionId;
+    configureDecisionShadow(config.decisionCore);
     this.providerManager = new ProviderManager(config);
     this.memory = new Memory(sessionId);
     this.skillsLoader = new SkillsLoader();
@@ -99,6 +103,10 @@ export class AgentLoop {
       role: 'user',
       content: userMessage,
     });
+
+    // Decision Core shadow mode: fire-and-forget classification logging.
+    // No-op unless decisionCore.shadowEnabled; never affects this turn.
+    shadowDecide(this.sessionId, userMessage);
 
     // Start agent loop
     let iteration = 0;
