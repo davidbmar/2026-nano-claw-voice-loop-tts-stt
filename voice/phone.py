@@ -1758,6 +1758,21 @@ class PhoneCall:
                     # caller hears ticking forever for a turn that is over.
                     self._stop_thinking_cue()
                     reply_complete = True
+                if reply.terminal and not self.interrupted:
+                    # The app said this reply was the conversation's LAST
+                    # (riff sends done=true once its flow rests terminal).
+                    # Same idiom as the native flow path above: let the last
+                    # words finish, then end the call from OUR side. Before
+                    # this, "Goodbye" was only text and the caller sat on a
+                    # live leg re-hearing "your session is complete" until
+                    # they gave up (real calls, 2026-08-03). An interrupted
+                    # goodbye skips the hangup on purpose: the delegate
+                    # repeats done on every post-terminal turn, so the next
+                    # turn ends the call instead of stranding it.
+                    log.info("[phone %s] delegate says done — hanging up",
+                             self.call_id[:8])
+                    await self.hangup_after_playback(self._http)
+                    self.closed = True
                 return
 
             payload: dict = {

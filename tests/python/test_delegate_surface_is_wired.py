@@ -38,6 +38,9 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "validate_delegate_url",    # SSRF guard at set time
         "resolve_returned_url",     # same-origin rule for a returned URL
         "safe_url_for_log",         # keeps session ids out of logs
+        "terminal",                 # the end-of-call signal — parsed and then
+                                    # ignored is exactly how "Goodbye" strands
+                                    # a caller on a live leg (2026-08-03)
     ),
     "voice/phone.py": (
         "hangup_after_playback",    # ends a call without clipping it
@@ -113,6 +116,9 @@ def test_every_listed_capability_still_exists():
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 defined.add(node.name)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                # Dataclass fields are capabilities too (DelegateReply.terminal).
+                defined.add(node.target.id)
 
     listed = {name for names in SURFACE.values() for name in names}
     missing = sorted(listed - defined)

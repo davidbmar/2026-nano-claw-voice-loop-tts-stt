@@ -95,6 +95,62 @@ def test_an_empty_reply_is_permitted_and_speaks_nothing():
 
     asyncio.run(exercise())
 
+# ── the end-of-call signal ───────────────────────────────────────────────────
+
+def test_done_true_marks_the_reply_terminal():
+    """riff sends done=true once its flow rests terminal: this reply is the
+    conversation's LAST and the phone gateway hangs up after speaking it.
+    Before this field existed, "Goodbye" was only text — real callers
+    (2026-08-03) sat on a live leg re-hearing "your session is complete"
+    for as long as they kept talking."""
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "Goodbye.", "done": True}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "thanks", who="caller")
+
+        assert result.ok is True
+        assert result.terminal is True
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("done", ["true", 1, "yes", None, {}, [True]])
+def test_done_is_a_strict_boolean_from_an_untrusted_party(done):
+    """Only the literal JSON `true` ends a call. Truthy look-alikes from a
+    buggy or hostile delegate read as False — the failure mode of ignoring
+    them is a caller who hangs up themselves, not a dropped call."""
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "ok", "done": done}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.terminal is False
+
+    asyncio.run(exercise())
+
+
+def test_a_missing_done_field_means_not_terminal():
+    """Apps that predate the field keep exactly the old behaviour."""
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "ok"}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.terminal is False
+
+    asyncio.run(exercise())
+
+
+def test_failures_are_never_terminal():
+    """An apology must never hang the call up — only a contract `done` on a
+    successful reply can, or an outage would end calls instead of apologising."""
+    async def exercise():
+        client = FakeClient(FakeResponse(status_code=502, body={"reply": "x", "done": True}))
+        result = await call_delegate(client, "http://127.0.0.1:8790/t", "hi", who="caller")
+
+        assert result.ok is False
+        assert result.terminal is False
+
+    asyncio.run(exercise())
+
+
 # ── every failure the review named ───────────────────────────────────────────
 
 @pytest.mark.parametrize("status", [400, 404, 500, 502, 503])

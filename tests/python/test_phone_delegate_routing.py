@@ -1441,3 +1441,114 @@ def test_the_app_opening_can_stand_alone():
 
     assert call.greeting_line == (
         "Thanks for calling Property Maintenance Desk. Unit B?")
+
+
+# ── the end-of-call signal, wired ────────────────────────────────────────────
+#
+# riff sends done=true once its flow rests terminal (the reply is the
+# conversation's last). Before this wiring, "Goodbye" was only text: the
+# gateway spoke it and nobody hung up, so real callers (2026-08-03) sat on a
+# live leg re-hearing "your session is complete" for as long as they kept
+# talking — every utterance reset the idle watchdog, which only fires on ~60s
+# of total dead air.
+
+
+def _delegated_call(monkeypatch, reply, interrupted=False):
+    """A minimal PhoneCall whose next turn is delegated and returns `reply`."""
+    from voice.turn_delegate import DelegateReply  # noqa: F401 — reply built by caller
+
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "call-done-1"
+    call.telnyx_call_id = "v3:done-1"
+    call.session_id = "phone-done-1"
+    call.tap = None
+    call._http = object()
+    call.speaking = False
+    call.interrupted = interrupted
+    call.closed = False
+    call._playback_flush_sent = False
+    call._reset_barge_in = lambda: None
+    call._stop_thinking_cue = lambda: None
+
+    async def consume(units):
+        async for _ in units:
+            pass
+
+    call._speak_sentences = consume
+
+    seen = {"hangups": 0}
+
+    async def fake_hangup(client, **kwargs):
+        seen["hangups"] += 1
+        return True
+
+    call.hangup_after_playback = fake_hangup
+
+    monkeypatch.setattr(phone, "routing_for", lambda cid: "http://127.0.0.1:8790/t")
+
+    async def fake_delegate(client, url, text, *, who):
+        return reply
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+    return call, seen
+
+
+def test_a_terminal_delegate_reply_hangs_up_after_speaking(monkeypatch):
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("Done — Goodbye.", ok=True, terminal=True))
+    try:
+        asyncio.run(call._stream_reply("thanks, that's all"))
+    except Exception:
+        pass  # the harness builds only what the delegate branch touches
+
+    assert seen["hangups"] == 1
+    assert call.closed is True
+
+
+def test_a_mid_conversation_reply_never_hangs_up(monkeypatch):
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("What unit are you in?", ok=True))
+    try:
+        asyncio.run(call._stream_reply("the door sticks"))
+    except Exception:
+        pass
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
+
+
+def test_an_interrupted_goodbye_defers_the_hangup_to_the_next_turn(monkeypatch):
+    """Barging into the goodbye means the caller wants something. The delegate
+    repeats done on every post-terminal turn, so deferring costs one turn,
+    never the call."""
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("Goodbye.", ok=True, terminal=True),
+        interrupted=True)
+    try:
+        asyncio.run(call._stream_reply("wait actually"))
+    except Exception:
+        pass
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
+
+
+def test_a_failed_delegate_turn_never_hangs_up(monkeypatch):
+    """The apology path must keep the caller, whatever a broken delegate sent."""
+    from voice.turn_delegate import DELEGATE_APOLOGY, DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply(DELEGATE_APOLOGY, ok=False, failure="status 502"))
+    try:
+        asyncio.run(call._stream_reply("hello?"))
+    except Exception:
+        pass
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
