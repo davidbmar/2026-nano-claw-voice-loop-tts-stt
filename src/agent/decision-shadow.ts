@@ -34,8 +34,15 @@ const SHADOW_AVAILABLE_ACTIONS = [
   'escalate_to_human',
 ];
 
-let client: DecisionCoreClient | null = null;
-let starting: Promise<void> | null = null;
+interface SidecarSlot {
+  client: DecisionCoreClient | null;
+  starting: Promise<void> | null;
+}
+
+/** One sidecar per domain ('' = the engine's default bundle). Domain pins map
+ * sessionId prefixes to domains — the config-level form of the per-line
+ * domain dropdown (same shape as phone-mode pins). */
+const sidecars = new Map<string, SidecarSlot>();
 let disabled = false;
 let requestCounter = 0;
 let shadowConfig: DecisionCoreConfig | null = null;
@@ -92,31 +99,59 @@ export function decisionShadowEnabled(): boolean {
   return !disabled && shadowConfig?.shadowEnabled === true;
 }
 
-async function ensureClient(): Promise<DecisionCoreClient | null> {
+/** Longest-matching sessionId prefix among the domain pins; '' = default. */
+export function resolveDomain(sessionId: string): string {
+  const pins = shadowConfig?.domainPins ?? {};
+  let best = '';
+  let bestLength = -1;
+  for (const [prefix, domain] of Object.entries(pins)) {
+    if (sessionId.startsWith(prefix) && prefix.length > bestLength) {
+      best = domain;
+      bestLength = prefix.length;
+    }
+  }
+  return bestLength >= 0 ? best : '';
+}
+
+async function ensureClient(domain: string): Promise<DecisionCoreClient | null> {
   if (!decisionShadowEnabled()) return null;
-  if (client) return client;
-  if (!starting) {
-    const candidate = new DecisionCoreClient(resolveRoot());
-    starting = candidate
+  let slot = sidecars.get(domain);
+  if (slot?.client) return slot.client;
+  if (!slot) {
+    slot = { client: null, starting: null };
+    sidecars.set(domain, slot);
+  }
+  if (!slot.starting) {
+    const root = resolveRoot();
+    const extraEnv = domain
+      ? { DECISION_CORE_DOMAIN_DIR: join(root, 'policies', domain) }
+      : {};
+    const candidate = new DecisionCoreClient(root, 250, extraEnv);
+    const currentSlot = slot;
+    currentSlot.starting = candidate
       .start()
       .then(() => {
-        client = candidate;
+        currentSlot.client = candidate;
         writeMetric({
           event: 'spawn',
           eligible: true,
+          domain: domain || '(default)',
           bundle_id: candidate.bundleId,
           sidecar_instance: candidate.instanceId,
         });
-        logger.info({ bundleId: candidate.bundleId }, 'decision-core shadow sidecar started');
+        logger.info(
+          { bundleId: candidate.bundleId, domain: domain || '(default)' },
+          'decision-core shadow sidecar started'
+        );
       })
       .catch((error: unknown) => {
         disabled = true; // one failed spawn disables shadow for this process
         writeMetric({ event: 'protocol_error', eligible: true, detail: 'spawn_failed' });
-        logger.warn({ error }, 'decision-core shadow disabled (sidecar failed to start)');
+        logger.warn({ error, domain }, 'decision-core shadow disabled (sidecar failed to start)');
       });
   }
-  await starting;
-  return client;
+  await slot.starting;
+  return slot.client;
 }
 
 /**
@@ -127,7 +162,8 @@ export function shadowDecide(sessionId: string, userMessage: string): void {
   if (!decisionShadowEnabled()) return;
   void (async () => {
     try {
-      const sidecar = await ensureClient();
+      const domain = resolveDomain(sessionId);
+      const sidecar = await ensureClient(domain);
       if (!sidecar) return;
       const carried = urgencyBySession.get(sessionId);
       const turnSeq = (turnSeqBySession.get(sessionId) ?? 0) + 1;
@@ -155,6 +191,7 @@ export function shadowDecide(sessionId: string, userMessage: string): void {
       writeMetric({
         event: failOpen ? 'fail_open' : 'decision',
         eligible: true,
+        domain: domain || '(default)',
         request_id: requestId,
         conversation_hash: hash(sessionId),
         caller_key: hash(sessionId),
@@ -192,9 +229,10 @@ export function shadowDecide(sessionId: string, userMessage: string): void {
 
 /** For tests and graceful shutdown. */
 export function stopDecisionShadow(): void {
-  client?.stop();
-  client = null;
-  starting = null;
+  for (const slot of sidecars.values()) {
+    slot.client?.stop();
+  }
+  sidecars.clear();
   disabled = false;
   shadowConfig = null;
   urgencyBySession.clear();

@@ -13,6 +13,7 @@ import { emergencyBackstop } from '../src/agent/emergency-backstop';
 import {
   configureDecisionShadow,
   decisionShadowEnabled,
+  resolveDomain,
   stopDecisionShadow,
 } from '../src/agent/decision-shadow';
 import { mergeEnvConfig } from '../src/config/index';
@@ -115,6 +116,64 @@ describe('decision shadow mode gating (fail-closed)', () => {
     if (savedFlag !== undefined) process.env.NANO_CLAW_DECISION_SHADOW = savedFlag;
     if (savedRoot !== undefined) process.env.DECISION_CORE_ROOT = savedRoot;
   });
+});
+
+describe('domain pins (per-line "dropdown", config level)', () => {
+  it('resolves the longest matching sessionId prefix', () => {
+    stopDecisionShadow();
+    configureDecisionShadow({
+      shadowEnabled: true,
+      root: ENGINE_ROOT,
+      domainPins: { 'phone:+1512': 'plumbing', 'phone:+15125550300': 'returns', 'web:': 'returns' },
+    });
+    expect(resolveDomain('phone:+15125550300:call77')).toBe('returns'); // longest prefix wins
+    expect(resolveDomain('phone:+15125559999:call1')).toBe('plumbing');
+    expect(resolveDomain('web:session-abc')).toBe('returns');
+    expect(resolveDomain('telegram:12345')).toBe(''); // unpinned -> default bundle
+    stopDecisionShadow();
+  });
+
+  it('parses NANO_CLAW_DECISION_DOMAIN_PINS and drops bad JSON safely', async () => {
+    const { mergeEnvConfig } = await import('../src/config/index');
+    const { ConfigSchema } = await import('../src/config/schema');
+    const saved = process.env.NANO_CLAW_DECISION_DOMAIN_PINS;
+    process.env.NANO_CLAW_DECISION_DOMAIN_PINS = '{"phone:+1512": "plumbing"}';
+    expect(mergeEnvConfig(ConfigSchema.parse({})).decisionCore.domainPins).toEqual({
+      'phone:+1512': 'plumbing',
+    });
+    process.env.NANO_CLAW_DECISION_DOMAIN_PINS = 'not json {{';
+    expect(mergeEnvConfig(ConfigSchema.parse({})).decisionCore.domainPins).toEqual({});
+    if (saved !== undefined) process.env.NANO_CLAW_DECISION_DOMAIN_PINS = saved;
+    else delete process.env.NANO_CLAW_DECISION_DOMAIN_PINS;
+  });
+});
+
+describe.skipIf(!engineAvailable)('per-domain sidecars against the real engine', () => {
+  it('a returns-pinned sidecar classifies with the returns bundle', async () => {
+    const client = new DecisionCoreClient(ENGINE_ROOT, 250, {
+      DECISION_CORE_DOMAIN_DIR: join(ENGINE_ROOT, 'policies', 'returns'),
+    });
+    await client.start();
+    try {
+      const decision = await client.decide({
+        request_id: 'req_dom1',
+        conversation_id: 'conv_dom1',
+        current_message: 'I was charged twice and my bank says it is fraud!',
+        available_actions: ['escalate_to_human', 'ask_clarifying_question'],
+      });
+      expect(decision.policy_id).toBe('returns.escalation');
+      const plumbingProbe = await client.decide({
+        request_id: 'req_dom2',
+        conversation_id: 'conv_dom2',
+        current_message: 'A pipe burst in my basement!',
+        available_actions: ['escalate_to_human', 'ask_clarifying_question'],
+      });
+      // The returns bundle has no plumbing lexicon: burst pipe is not critical here.
+      expect(plumbingProbe.policy_id).not.toBe('plumbing.emergency');
+    } finally {
+      client.stop();
+    }
+  }, 20000);
 });
 
 describe.skipIf(!engineAvailable)('DecisionCoreClient against the real sidecar', () => {

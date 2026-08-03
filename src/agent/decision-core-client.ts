@@ -99,12 +99,15 @@ export class DecisionCoreClient {
   constructor(
     private readonly repoRoot: string, // path to ai_constitution_engine checkout
     private readonly latencyBudgetMs = 250, // §9B: caller enforces the budget
+    /** Extra env for the sidecar — e.g. DECISION_CORE_DOMAIN_DIR to run this
+     * sidecar on a specific domain bundle (one sidecar per domain). */
+    private readonly extraEnv: Record<string, string> = {},
   ) {}
 
   async start(): Promise<void> {
     this.proc = spawn('python3', ['-m', 'decision_core.mcp_server'], {
       cwd: this.repoRoot,
-      env: { ...process.env, PYTHONPATH: `${this.repoRoot}/src` },
+      env: { ...process.env, PYTHONPATH: `${this.repoRoot}/src`, ...this.extraEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.reader = createInterface({ input: this.proc.stdout });

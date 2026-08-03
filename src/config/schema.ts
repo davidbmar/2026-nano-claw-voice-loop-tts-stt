@@ -260,6 +260,12 @@ export const DecisionCoreConfigSchema = z.object({
   /** Path to the ai_constitution_engine checkout (spawned as an MCP stdio
    * sidecar). Defaults to $DECISION_CORE_ROOT, then ~/src/ai_constitution_engine. */
   root: z.string().optional(),
+  /** Per-line domain pins: sessionId prefix -> domain bundle name (a
+   * directory under <root>/policies/). Longest matching prefix wins; no match
+   * uses the engine's default domain. One sidecar is spawned per distinct
+   * domain. NANO_CLAW_DECISION_DOMAIN_PINS (JSON) overrides at the process
+   * boundary — same shape as NANO_CLAW_PHONE_MODE_PINS. */
+  domainPins: z.record(z.string()).optional().default({}),
 });
 
 /**
