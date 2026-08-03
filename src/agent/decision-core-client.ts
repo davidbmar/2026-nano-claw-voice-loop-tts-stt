@@ -33,6 +33,10 @@ export interface Situation {
   known_constraints?: Record<string, unknown>;
   previous_urgency?: 'none' | 'elevated' | 'critical' | null;
   previous_urgency_seq?: number | null;
+  /** Per-conversation turn counter owned by the client (evaluation.md §2.2). */
+  turn_seq?: number | null;
+  /** Salted caller-identity hash — the clustering unit for M3 inference. */
+  caller_key?: string | null;
 }
 
 export interface Decision {
@@ -87,6 +91,10 @@ export class DecisionCoreClient {
   private reader: Interface | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
+  /** Bundle identity reported by the sidecar at initialize (evaluation.md §2.1). */
+  public bundleId: string | null = null;
+  /** pid@spawn-time — the sidecar-instance join field for client metrics. */
+  public instanceId: string | null = null;
 
   constructor(
     private readonly repoRoot: string, // path to ai_constitution_engine checkout
@@ -109,9 +117,10 @@ export class DecisionCoreClient {
       this.failAllPending(error instanceof Error ? error : new Error(String(error)));
     });
     this.proc.stdin.on('error', () => this.failAllPending(new Error('decision-core stdin closed')));
+    this.instanceId = `pid:${this.proc.pid}@${new Date().toISOString()}`;
     // Startup gets its own generous budget: a cold python3 spawn can take
     // longer than the per-decision latency budget and must not fail start().
-    await this.request(
+    const initResult = (await this.request(
       'initialize',
       {
         protocolVersion: '2025-06-18',
@@ -119,7 +128,8 @@ export class DecisionCoreClient {
         clientInfo: { name: 'nano-claw', version: '0.4.x' },
       },
       5000,
-    );
+    )) as { serverInfo?: { bundle_id?: string } } | undefined;
+    this.bundleId = initResult?.serverInfo?.bundle_id ?? null;
     this.notify('notifications/initialized');
   }
 

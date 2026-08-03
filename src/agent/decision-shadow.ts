@@ -15,8 +15,10 @@
  * training data for the Phase-2 Tier-2 classifier.
  */
 
+import { createHash } from 'node:crypto';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DecisionCoreClient, type Decision } from './decision-core-client';
 import { logger } from '../utils/logger';
 import type { DecisionCoreConfig } from '../config/schema';
@@ -40,6 +42,34 @@ let shadowConfig: DecisionCoreConfig | null = null;
 
 /** Shadow-internal urgency carry (§9C): never touches nano-claw session state. */
 const urgencyBySession = new Map<string, { urgency: Decision['dimensions']['urgency']; seq: number }>();
+/** Client-owned per-conversation turn counter (evaluation.md §2.2 invariant). */
+const turnSeqBySession = new Map<string, number>();
+
+/**
+ * Client metrics file (evaluation.md §2.3): one line per shadow attempt with
+ * join fields — the sidecar cannot log its own death, so latency, spawn,
+ * timeout, and fail-open observability live client-side. Contains no text.
+ */
+function metricsPath(): string {
+  return (
+    process.env.NANO_CLAW_DECISION_METRICS ??
+    join(homedir(), '.nano-claw', 'decision-metrics.jsonl')
+  );
+}
+
+function hash(value: string): string {
+  return 'sha256:' + createHash('sha256').update(`nano-claw-m3:${value}`).digest('hex').slice(0, 16);
+}
+
+function writeMetric(record: Record<string, unknown>): void {
+  try {
+    const path = metricsPath();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, JSON.stringify({ ts: new Date().toISOString(), ...record }) + '\n');
+  } catch (error) {
+    logger.debug({ error }, 'decision-core metrics write failed');
+  }
+}
 
 /**
  * Called from AgentLoop with config.decisionCore. Fail-closed: shadow runs
@@ -71,10 +101,17 @@ async function ensureClient(): Promise<DecisionCoreClient | null> {
       .start()
       .then(() => {
         client = candidate;
-        logger.info('decision-core shadow sidecar started');
+        writeMetric({
+          event: 'spawn',
+          eligible: true,
+          bundle_id: candidate.bundleId,
+          sidecar_instance: candidate.instanceId,
+        });
+        logger.info({ bundleId: candidate.bundleId }, 'decision-core shadow sidecar started');
       })
       .catch((error: unknown) => {
         disabled = true; // one failed spawn disables shadow for this process
+        writeMetric({ event: 'protocol_error', eligible: true, detail: 'spawn_failed' });
         logger.warn({ error }, 'decision-core shadow disabled (sidecar failed to start)');
       });
   }
@@ -93,24 +130,47 @@ export function shadowDecide(sessionId: string, userMessage: string): void {
       const sidecar = await ensureClient();
       if (!sidecar) return;
       const carried = urgencyBySession.get(sessionId);
+      const turnSeq = (turnSeqBySession.get(sessionId) ?? 0) + 1;
+      turnSeqBySession.set(sessionId, turnSeq);
+      const requestId = `req_shadow_${++requestCounter}`;
       const startedAt = Date.now();
       const decision = await sidecar.decide({
-        request_id: `req_shadow_${++requestCounter}`,
+        request_id: requestId,
         conversation_id: sessionId,
         current_message: userMessage,
         available_actions: SHADOW_AVAILABLE_ACTIONS,
         previous_urgency: carried?.urgency ?? null,
         previous_urgency_seq: carried?.seq ?? null,
+        turn_seq: turnSeq,
+        // TODO: hash the channel user identity once channels surface it here;
+        // sessionId is the honest fallback and is flagged as such (§2.2).
+        caller_key: hash(sessionId),
       });
+      const latencyMs = Date.now() - startedAt;
       urgencyBySession.set(sessionId, {
         urgency: decision.dimensions.urgency,
         seq: decision.decision_seq,
+      });
+      const failOpen = decision.policy_id === 'default.fail_open';
+      writeMetric({
+        event: failOpen ? 'fail_open' : 'decision',
+        eligible: true,
+        request_id: requestId,
+        conversation_hash: hash(sessionId),
+        caller_key: hash(sessionId),
+        caller_key_fallback: true,
+        turn_seq: turnSeq,
+        decision_id: decision.decision_id,
+        bundle_id: sidecar.bundleId,
+        sidecar_instance: sidecar.instanceId,
+        e2e_latency_ms: latencyMs,
+        cache_hit: false,
       });
       logger.info(
         {
           decisionCoreShadow: {
             sessionId,
-            latencyMs: Date.now() - startedAt,
+            latencyMs,
             decisionId: decision.decision_id,
             policyId: decision.policy_id,
             modeLabel: decision.mode_label,
@@ -124,6 +184,7 @@ export function shadowDecide(sessionId: string, userMessage: string): void {
       );
     } catch (error) {
       // Shadow mode must never surface into the conversation path.
+      writeMetric({ event: 'protocol_error', eligible: true, detail: 'shadow_decide_threw' });
       logger.debug({ error }, 'decision-core shadow decide failed');
     }
   })();
@@ -137,4 +198,5 @@ export function stopDecisionShadow(): void {
   disabled = false;
   shadowConfig = null;
   urgencyBySession.clear();
+  turnSeqBySession.clear();
 }

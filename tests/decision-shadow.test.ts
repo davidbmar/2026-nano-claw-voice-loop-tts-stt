@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DecisionCoreClient } from '../src/agent/decision-core-client';
@@ -157,4 +157,63 @@ describe.skipIf(!engineAvailable)('DecisionCoreClient against the real sidecar',
       client.recordOutcome({ decision_id: `dec_test_${Date.now()}`, outcome: { abandoned: false } }),
     ).resolves.toBeUndefined();
   });
+
+  it('captures the sidecar bundle id and instance at initialize', () => {
+    expect(client.bundleId).toMatch(/^sha256:/);
+    expect(client.instanceId).toMatch(/^pid:\d+@/);
+  });
+
+  it('passes turn_seq and caller_key through the wire', async () => {
+    const decision = await client.decide({
+      request_id: 'req_join',
+      conversation_id: 'conv_join',
+      current_message: 'A pipe burst!',
+      available_actions: ['provide_safety_instructions'],
+      turn_seq: 7,
+      caller_key: 'sha256:testcaller',
+    });
+    expect(decision.policy_id).toBe('plumbing.emergency');
+  });
+});
+
+describe.skipIf(!engineAvailable)('client metrics file (evaluation.md §2.3)', () => {
+  it('shadowDecide writes joinable metrics records', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dc-metrics-'));
+    const metricsFile = join(dir, 'decision-metrics.jsonl');
+    process.env.NANO_CLAW_DECISION_METRICS = metricsFile;
+    const { shadowDecide, configureDecisionShadow, stopDecisionShadow } = await import(
+      '../src/agent/decision-shadow'
+    );
+    try {
+      configureDecisionShadow({ shadowEnabled: true, root: ENGINE_ROOT });
+      shadowDecide('metrics-session', 'A pipe burst in my basement!');
+      const deadline = Date.now() + 10000;
+      let lines: string[] = [];
+      while (Date.now() < deadline) {
+        try {
+          lines = readFileSync(metricsFile, 'utf-8').trim().split('\n');
+          if (lines.some((l) => l.includes('"decision"') || l.includes('"fail_open"'))) break;
+        } catch {
+          /* not yet written */
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const events = lines.map((l) => JSON.parse(l));
+      const spawn = events.find((e) => e.event === 'spawn');
+      const decision = events.find((e) => e.event === 'decision');
+      expect(spawn?.bundle_id).toMatch(/^sha256:/);
+      expect(decision).toBeTruthy();
+      expect(decision.request_id).toMatch(/^req_shadow_/);
+      expect(decision.decision_id).toMatch(/^dec_/);
+      expect(decision.bundle_id).toMatch(/^sha256:/);
+      expect(decision.sidecar_instance).toMatch(/^pid:/);
+      expect(decision.caller_key).toMatch(/^sha256:/);
+      expect(decision.turn_seq).toBe(1);
+      expect(typeof decision.e2e_latency_ms).toBe('number');
+    } finally {
+      stopDecisionShadow();
+      delete process.env.NANO_CLAW_DECISION_METRICS;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
 });
