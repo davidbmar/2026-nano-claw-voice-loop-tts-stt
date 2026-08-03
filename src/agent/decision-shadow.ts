@@ -64,8 +64,14 @@ function metricsPath(): string {
   );
 }
 
+/** Shared metrics-hash contract: 'decision-metrics-v1:' salt, sha256, first
+ * 16 hex chars. evaluate.py delete-conversation recomputes this exact scheme
+ * to purge metrics — change one side only and deletion silently breaks
+ * (contract vector: 'conv-contract-check' -> sha256:711ac6c181196fde). */
+const METRICS_HASH_SALT = 'decision-metrics-v1:';
+
 function hash(value: string): string {
-  return 'sha256:' + createHash('sha256').update(`nano-claw-m3:${value}`).digest('hex').slice(0, 16);
+  return 'sha256:' + createHash('sha256').update(`${METRICS_HASH_SALT}${value}`).digest('hex').slice(0, 16);
 }
 
 function writeMetric(record: Record<string, unknown>): void {
