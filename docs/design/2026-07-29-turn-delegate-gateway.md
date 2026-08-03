@@ -23,10 +23,17 @@ URL instead of a call to its own model. Everything acoustic stays here.
 POST <delegate_url>
 {"text": "<what the human said>", "who": "caller" | "owner" | "operator"}
 
-200 → {"reply": "<what to say back>", "focus": ["<app ids>"]}
+200 → {"reply": "<what to say back>", "focus": ["<app ids>"], "done": <bool>}
 ```
 
 - `focus` is app-defined and **the gateway ignores it** (a co-located UI uses it).
+- `done: true` (optional, added 2026-08-03) means this reply is the
+  conversation's **last**: the phone gateway speaks it, then ends the call leg
+  (`hangup_after_playback`). Parsed strictly — only the literal JSON `true`
+  counts, never on a failed turn — and apps must repeat it on every
+  post-terminal turn so a gateway that misses one still hangs up a turn later.
+  Before this field existed, "Goodbye" was plain text and real callers sat on
+  a live leg indefinitely (2026-08-03).
 - Any non-200 → speak a fixed apology, keep the channel open. "The delegate must
   not be trusted to fail politely."
 - Hard timeout 30 s; fill dead air past ~2 s.

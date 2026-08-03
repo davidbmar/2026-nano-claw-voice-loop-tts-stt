@@ -966,6 +966,7 @@ class PhoneCall:
         client: httpx.AsyncClient,
         *,
         margin_s: float = _HANGUP_MARGIN_S,
+        abort=None,
     ) -> bool:
         """End the call from OUR side, once the caller has heard the last word.
 
@@ -981,14 +982,33 @@ class PhoneCall:
         transit and the carrier's own jitter buffer. It errs long deliberately: a
         late hangup costs a moment of silence, an early one truncates the words we
         stayed on the line to say.
+
+        Every caller runs after `_speak_sentences` restored `_frame_pacer`, so
+        the live pacer is gone by the time we look; `_playback_surplus` is that
+        pacer's parting measurement, decayed by the wall-clock since it was
+        taken. Reading only the live pacer here meant every real hangup waited
+        just the margin.
+
+        `abort` (optional, callable → bool) is re-checked AFTER the drain wait,
+        immediately before the carrier command: the wait is exactly the window
+        a caller barges into the goodbye, and a hangup decided before the wait
+        would drop them mid-sentence. Aborted or failed sends return False —
+        the caller must not be marked closed on a leg that is still up.
         """
 
         pacer = getattr(self, "_frame_pacer", None)
         buffered = getattr(pacer, "buffered_s", 0.0) if pacer is not None else 0.0
+        if pacer is None:
+            surplus, taken_at = getattr(self, "_playback_surplus", (0.0, 0.0))
+            if surplus:
+                buffered = max(0.0, surplus - (time.monotonic() - taken_at))
         wait_s = max(0.0, buffered) + max(0.0, margin_s)
         log.info("[phone %s] hangup in %.2fs (%.2fs still buffered)",
                  self.call_id[:8], wait_s, buffered)
         await asyncio.sleep(wait_s)
+        if abort is not None and abort():
+            log.info("[phone %s] hangup aborted after drain wait", self.call_id[:8])
+            return False
         # The RAW id, not self.call_id: that one is sanitized for tap paths and
         # logs, and Telnyx would not recognize it as a call.
         # getattr for parity with the sites this replaces: a media-only call
@@ -1765,14 +1785,26 @@ class PhoneCall:
                     # words finish, then end the call from OUR side. Before
                     # this, "Goodbye" was only text and the caller sat on a
                     # live leg re-hearing "your session is complete" until
-                    # they gave up (real calls, 2026-08-03). An interrupted
-                    # goodbye skips the hangup on purpose: the delegate
-                    # repeats done on every post-terminal turn, so the next
-                    # turn ends the call instead of stranding it.
+                    # they gave up (real calls, 2026-08-03).
+                    #
+                    # An interrupted goodbye — checked here AND re-checked by
+                    # `abort` after the drain wait, since that wait is exactly
+                    # the barge-in window — skips the hangup on purpose: the
+                    # delegate repeats done on every post-terminal turn, so
+                    # the next turn ends the call instead of stranding it.
+                    # `closed` only on a confirmed send: marking a failed
+                    # hangup closed would silence media and the idle watchdog
+                    # on a leg the carrier still holds open.
                     log.info("[phone %s] delegate says done — hanging up",
                              self.call_id[:8])
-                    await self.hangup_after_playback(self._http)
-                    self.closed = True
+                    if await self.hangup_after_playback(
+                            self._http, abort=lambda: self.interrupted):
+                        self.closed = True
+                    else:
+                        log.warning(
+                            "[phone %s] hangup aborted or failed — leaving the "
+                            "call open for the next turn or the idle watchdog",
+                            self.call_id[:8])
                 return
 
             payload: dict = {
@@ -2268,6 +2300,15 @@ class PhoneCall:
                     if self.closed or not self.speaking:
                         return
         finally:
+            pacer = self._frame_pacer
+            if pacer is not None and pacer is not previous_pacer:
+                # The surplus the carrier is still owed as speech "ends" here.
+                # hangup_after_playback documents reading the live pacer, but
+                # every call site runs AFTER this restore — so without this
+                # stash it always saw None, waited only the 350ms margin, and
+                # clipped the very words it stayed on the line to say.
+                self._playback_surplus = (
+                    max(0.0, getattr(pacer, "buffered_s", 0.0)), time.monotonic())
             self._frame_pacer = previous_pacer
             self._sentence_pipelines.discard(pipeline)
 
