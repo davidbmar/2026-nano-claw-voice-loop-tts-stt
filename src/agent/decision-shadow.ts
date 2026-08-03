@@ -123,9 +123,8 @@ async function ensureClient(domain: string): Promise<DecisionCoreClient | null> 
   }
   if (!slot.starting) {
     const root = resolveRoot();
-    const extraEnv = domain
-      ? { DECISION_CORE_DOMAIN_DIR: join(root, 'policies', domain) }
-      : {};
+    const extraEnv: Record<string, string> = {};
+    if (domain) extraEnv.DECISION_CORE_DOMAIN_DIR = join(root, 'policies', domain);
     const candidate = new DecisionCoreClient(root, 250, extraEnv);
     const currentSlot = slot;
     currentSlot.starting = candidate
