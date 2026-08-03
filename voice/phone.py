@@ -64,6 +64,7 @@ from voice.flow_session import (
     FlowSession,
     active_scheduling_domain,
     flow_mode_greeting,
+    pinned_mode_for,
     get_flow_mode,
     get_flow_profile,
     set_flow_mode,
@@ -706,6 +707,12 @@ class PhoneCall:
         # call.initiated, strictly earlier, and a line that opted out of
         # recording must not be captured for the length of its own construction.
         self.delegate_route = route_for(telnyx_call_id)
+        # A pinned number answers in its declared mode no matter what the
+        # console dropdown says. Delegation outranks a pin; a scheduler flow
+        # (built from the global mode before the DID was known) outranks both.
+        self.pinned_mode = (
+            None if self.delegate_route else pinned_mode_for(did_for(telnyx_call_id))
+        )
         _profile = self.delegate_route.profile if self.delegate_route else None
         self.tap = (
             CallTap.create(safe_call_id, codec, rate, rate)
@@ -794,7 +801,9 @@ class PhoneCall:
         self._flow_domain_id = flow_domain_id
         self._flow_create_failed = False
         self.default_greeting = (
-            self.flow.greeting if self.flow else flow_mode_greeting()
+            self.flow.greeting
+            if self.flow
+            else flow_mode_greeting(self.pinned_mode)
         )
         self._call_end_emitted = False
         self._thinking_cue_task: asyncio.Task | None = None
@@ -814,7 +823,11 @@ class PhoneCall:
                 "sttSize": _cfg("NANO_CLAW_PHONE_STT_SIZE", "base"),
                 "speed": _cfg("NANO_CLAW_PHONE_SPEED", "1.0"),
                 "model": _cfg("NANO_CLAW_PHONE_MODEL") or None,
-                "mode": "scheduler" if self.flow else "persona",
+                "mode": (
+                    "scheduler"
+                    if self.flow
+                    else (f"pinned:{self.pinned_mode}" if self.pinned_mode else "persona")
+                ),
                 "flowDomain": flow_domain_id,
                 "sessionId": self.session_id,
             },
@@ -1755,7 +1768,7 @@ class PhoneCall:
                 # must pass its profile per turn so a switch to riff/nano-claw/
                 # intelligence takes effect on the phone too. Without this the
                 # agent falls back to the default persona (Space Channel).
-                "profile": get_flow_profile(),
+                "profile": get_flow_profile(getattr(self, "pinned_mode", None)),
             }
             # The same document space the console shows. A caller on the phone
             # and an operator watching the browser have to be answered from the
@@ -2441,6 +2454,28 @@ def conversation_key_for(call_control_id: str) -> str:
     return hashlib.sha256(call_control_id.encode()).hexdigest()[:32]
 
 
+# The called number for every live call, delegated or not. The webhook is the
+# only place the DID is visible; PhoneCall is constructed later from the media
+# stream, which carries only the call id — so the number is parked here for
+# the pin lookup. Same TTL discipline as _call_routing.
+_call_dids: dict[str, tuple[str, float]] = {}
+
+
+def _remember_did(call_control_id: str, did: str) -> None:
+    now = time.monotonic()
+    _call_dids[call_control_id] = (did, now)
+    for key, (_d, at) in list(_call_dids.items()):
+        if now - at > _ROUTING_TTL_S:
+            _call_dids.pop(key, None)
+
+
+def did_for(call_control_id: str) -> str | None:
+    """The number this call dialled, if the webhook saw it."""
+
+    entry = _call_dids.get(call_control_id)
+    return entry[0] if entry else None
+
+
 def route_for(call_control_id: str) -> "DelegateRoute | None":
     """The conversation minted for this call, if any."""
 
@@ -2542,6 +2577,7 @@ async def incoming_handler(request: web.Request) -> web.Response:
         metrics_db.record_call_start(
             _metrics_conn, safe_cid, caller, payload.get("to", "?"), _node()
         )
+        _remember_did(cid, str(payload.get("to", "") or ""))
         codec = phone_codec()
         profile = delegate_starts().get(str(payload.get("to", "")))
         start_url = profile.start_url if profile else None

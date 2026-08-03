@@ -293,6 +293,55 @@ def set_flow_mode(mode: str) -> bool:
     return True
 
 
+def phone_mode_pins() -> dict[str, str]:
+    """DID -> mode pins: numbers that always answer in one declared mode.
+
+    The console MODE selector is one shared dial, which is right for a demo
+    box and wrong for a phone number with an identity: switching the browser
+    to a codebase assistant must not change what a business line says to the
+    next caller (2026-08-02: the CA number briefly answered as the nano-claw
+    codebase assistant because an operator was exploring the dropdown).
+
+    Read per call, like delegate_starts, so a pin can be added or removed
+    without a restart. Unknown modes are dropped with a warning rather than
+    honoured blindly — a typo must not silence a line. Scheduler modes cannot
+    be pinned yet (their flow sessions are built from the global mode before
+    the DID is known); a scheduler pin is ignored with a warning.
+    """
+
+    raw = os.environ.get("NANO_CLAW_PHONE_MODE_PINS", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("NANO_CLAW_PHONE_MODE_PINS is not valid JSON — ignored")
+        return {}
+    if not isinstance(data, dict):
+        log.warning("NANO_CLAW_PHONE_MODE_PINS must be a JSON object — ignored")
+        return {}
+    pins: dict[str, str] = {}
+    for did, mode in data.items():
+        normalized = _normalize_flow_mode(str(mode))
+        if normalized is None:
+            log.warning("phone mode pin %s -> %r names no known mode — dropped", did, mode)
+            continue
+        if FLOW_MODES[normalized].get("scheduler"):
+            log.warning("phone mode pin %s -> %s is a scheduler mode — not yet "
+                        "supported for pinning, dropped", did, normalized)
+            continue
+        pins[str(did)] = normalized
+    return pins
+
+
+def pinned_mode_for(did: str | None) -> str | None:
+    """The pinned mode for a called number, or None to follow the global mode."""
+
+    if not did:
+        return None
+    return phone_mode_pins().get(str(did))
+
+
 def get_flow_profile(mode: str | None = None) -> str:
     """Return the agent profile paired with a runtime assistant mode."""
 

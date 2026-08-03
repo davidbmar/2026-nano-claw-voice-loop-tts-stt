@@ -1577,3 +1577,82 @@ def test_the_console_dropdown_matches_the_mode_registry():
     assert in_html == list(FLOW_MODES), (
         f"console dropdown {in_html} does not match FLOW_MODES "
         f"{list(FLOW_MODES)} — add the mode to both, in the same order")
+
+
+def test_phone_mode_pins_parse_and_validate(monkeypatch):
+    """A pin declares what a phone number answers as, independent of the
+    console dropdown. The parsing must fail toward "no pin" — a typo that
+    silenced a business line would be strictly worse than following the
+    global mode, which at least answers.
+    """
+    monkeypatch.setenv(
+        "NANO_CLAW_PHONE_MODE_PINS",
+        json.dumps({
+            "+15102160079": "replicantpm",
+            "+15551230000": "not-a-mode",
+            "+15551240000": "scheduler",
+        }),
+    )
+    pins = flow_session.phone_mode_pins()
+    # The valid pin survives; the typo and the scheduler mode are dropped,
+    # because scheduler flow sessions are built from the global mode before
+    # the dialled number is known.
+    assert pins == {"+15102160079": "replicantpm"}
+    assert flow_session.pinned_mode_for("+15102160079") == "replicantpm"
+    assert flow_session.pinned_mode_for("+15551230000") is None
+    assert flow_session.pinned_mode_for(None) is None
+
+
+def test_phone_mode_pins_ignore_garbage(monkeypatch):
+    for raw in ("", "not json", "[1,2]", '"just a string"'):
+        monkeypatch.setenv("NANO_CLAW_PHONE_MODE_PINS", raw)
+        assert flow_session.phone_mode_pins() == {}
+
+
+def test_pinned_number_ignores_the_console_dropdown(monkeypatch):
+    """The 2026-08-02 incident: an operator exploring the MODE dropdown
+    changed what the business line said to the next caller. A pinned number
+    must answer in its declared mode whatever the dropdown says.
+    """
+    monkeypatch.setenv(
+        "NANO_CLAW_PHONE_MODE_PINS", json.dumps({"+15102160079": "replicantpm"})
+    )
+    set_flow_mode("intelligence")
+    try:
+        pinned = flow_session.pinned_mode_for("+15102160079")
+        assert pinned == "replicantpm"
+        # The greeting and per-turn profile both honour the explicit mode.
+        assert flow_session.flow_mode_greeting(pinned) == \
+            flow_session._MODE_GREETINGS["replicantpm"]
+        assert flow_session.get_flow_profile(pinned) != \
+            flow_session.get_flow_profile()
+    finally:
+        set_flow_mode("spacechannel")
+
+
+def test_delegation_outranks_a_pin(monkeypatch):
+    """A delegated number belongs to another application entirely; a pin only
+    picks a persona within this one. When both claim a number, delegation
+    wins — this is the CA line, where riff's ticket desk must not be
+    shadowed by a local persona pin.
+    """
+    monkeypatch.setenv(
+        "NANO_CLAW_PHONE_MODE_PINS", json.dumps({"+15102160079": "replicantpm"})
+    )
+    phone._remember_did("call-x", "+15102160079")
+    phone._call_routing["call-x"] = (
+        phone.DelegateRoute("http://riff/turn", {}, "opening"),
+        __import__("time").monotonic(),
+    )
+    try:
+        # The PhoneCall constructor consults route_for first; with a route
+        # present the pin must not be resolved at all. We assert the same
+        # decision the constructor makes.
+        route = phone.route_for("call-x")
+        assert route is not None
+        pinned = None if route else flow_session.pinned_mode_for(
+            phone.did_for("call-x"))
+        assert pinned is None
+    finally:
+        phone._call_routing.pop("call-x", None)
+        phone._call_dids.pop("call-x", None)
