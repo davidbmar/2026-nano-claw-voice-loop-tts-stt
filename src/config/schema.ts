@@ -249,6 +249,26 @@ export const ChannelsConfigSchema = z.object({
 });
 
 /**
+ * Decision Core (constitution-engine) configuration schema.
+ * Shadow mode logs policy classifications for every user message without
+ * changing behavior. Fail-closed: requires a positive enable, same as tools.
+ */
+export const DecisionCoreConfigSchema = z.object({
+  /** Shadow mode: observe-and-log only. NANO_CLAW_DECISION_SHADOW=true at the
+   * process boundary also enables it. */
+  shadowEnabled: z.boolean().optional().default(false),
+  /** Path to the ai_constitution_engine checkout (spawned as an MCP stdio
+   * sidecar). Defaults to $DECISION_CORE_ROOT, then ~/src/ai_constitution_engine. */
+  root: z.string().optional(),
+  /** Per-line domain pins: sessionId prefix -> domain bundle name (a
+   * directory under <root>/policies/). Longest matching prefix wins; no match
+   * uses the engine's default domain. One sidecar is spawned per distinct
+   * domain. NANO_CLAW_DECISION_DOMAIN_PINS (JSON) overrides at the process
+   * boundary — same shape as NANO_CLAW_PHONE_MODE_PINS. */
+  domainPins: z.record(z.string()).optional().default({}),
+});
+
+/**
  * Main configuration schema
  */
 export const ConfigSchema = z.object({
@@ -256,6 +276,7 @@ export const ConfigSchema = z.object({
   agents: AgentsConfigSchema.optional().default({}),
   tools: ToolsConfigSchema.optional().default({}),
   channels: ChannelsConfigSchema.optional().default({}),
+  decisionCore: DecisionCoreConfigSchema.optional().default({}),
 });
 
 /**
@@ -269,3 +290,4 @@ export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 export type ToolsConfig = z.infer<typeof ToolsConfigSchema>;
 export type ChannelsConfig = z.infer<typeof ChannelsConfigSchema>;
+export type DecisionCoreConfig = z.infer<typeof DecisionCoreConfigSchema>;

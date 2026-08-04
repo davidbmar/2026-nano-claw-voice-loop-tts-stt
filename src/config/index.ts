@@ -275,6 +275,34 @@ export function mergeEnvConfig(config: Config): Config {
         }
       : existingProfiles;
 
+  // Decision Core shadow mode: positive enable, mirroring the tools gate.
+  const decisionShadowValue = process.env.NANO_CLAW_DECISION_SHADOW?.trim().toLowerCase();
+  const decisionShadowEnabled = decisionShadowValue
+    ? ['1', 'true', 'yes'].includes(decisionShadowValue)
+    : undefined;
+  const decisionCoreRoot = process.env.DECISION_CORE_ROOT?.trim() || undefined;
+  // Per-line domain pins, same env-map discipline as NANO_CLAW_PHONE_MODE_PINS:
+  // bad JSON is dropped with a warning — a typo must not take the config down.
+  let decisionDomainPins: Record<string, string> | undefined;
+  const rawDomainPins = process.env.NANO_CLAW_DECISION_DOMAIN_PINS?.trim();
+  if (rawDomainPins) {
+    try {
+      const parsed = JSON.parse(rawDomainPins) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        decisionDomainPins = Object.fromEntries(
+          Object.entries(parsed as Record<string, unknown>).filter(
+            ([, value]) => typeof value === 'string'
+          )
+        ) as Record<string, string>;
+      }
+    } catch {
+      logger.warn(
+        { raw: rawDomainPins },
+        'NANO_CLAW_DECISION_DOMAIN_PINS is not valid JSON; ignoring'
+      );
+    }
+  }
+
   const merged = ConfigSchema.parse({
     ...config,
     providers: mergedProviders,
@@ -290,6 +318,12 @@ export function mergeEnvConfig(config: Config): Config {
       ...config.tools,
       enabled: toolsEnabled,
     },
+    decisionCore: {
+      ...config.decisionCore,
+      ...(decisionShadowEnabled !== undefined && { shadowEnabled: decisionShadowEnabled }),
+      ...(decisionCoreRoot && { root: decisionCoreRoot }),
+      ...(decisionDomainPins && { domainPins: decisionDomainPins }),
+    },
   });
 
   logger.info(
@@ -299,6 +333,13 @@ export function mergeEnvConfig(config: Config): Config {
     },
     'Tool gate resolved'
   );
+
+  if (merged.decisionCore.shadowEnabled) {
+    logger.info(
+      { root: merged.decisionCore.root ?? '(default)' },
+      'Decision Core shadow mode enabled'
+    );
+  }
 
   return merged;
 }
