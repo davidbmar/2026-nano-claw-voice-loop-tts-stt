@@ -28,6 +28,7 @@ import {
   sweepEphemeralMemory,
 } from '../agent/memory';
 import { ContextBuilder, guardCoverageDisclaimer, isCoverageQuestion } from '../agent/context';
+import { configureDecisionShadow, shadowDecide } from '../agent/decision-shadow';
 import { resolveKnowledgeFiles } from '../agent/knowledge';
 import { SkillsLoader } from '../agent/skills';
 import { ToolRegistry } from '../agent/tools/registry';
@@ -1373,6 +1374,12 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
   memory.addMessage({ role: 'user', content: body.message });
 
+  // Decision Core shadow: fire-and-forget, no-op unless enabled. This is the
+  // server's real message entry — /api/chat drives stepLoop, NOT
+  // AgentLoop.processMessage, so the hook there never saw server traffic
+  // (found on the first in-container verification, 2026-08-04).
+  shadowDecide(sessionId, body.message);
+
   const profile = typeof body.profile === 'string' ? body.profile : undefined;
   const agentConfig = getAgentConfig(
     body.model,
@@ -1607,6 +1614,11 @@ export function createServer(): http.Server {
  * Start the API server (used by entrypoint and CLI).
  */
 export async function startServer(port: number): Promise<void> {
+  // The shadow is configured by AgentLoop's constructor on the loop path —
+  // which the API server never builds (it drives stepLoop). Without this,
+  // shadowDecide() in handleChat no-ops forever with shadow "enabled" in
+  // the boot log: config said on, nothing ever armed it.
+  configureDecisionShadow(getConfig().decisionCore);
   const server = createServer();
 
   await new Promise<void>((resolve) => {
