@@ -77,11 +77,21 @@ class DelegateReply:
     nothing to add.
 
     `failure` is for logs and metrics only and is NEVER spoken.
+
+    `terminal` means the app said this reply is the conversation's LAST
+    (riff-builder sends `done: true` once its flow rests in a terminal state):
+    speak it, then end the call from our side. Without this, "Goodbye" is just
+    text — the gateway speaks it and nobody hangs up, so the caller sits on a
+    live leg while every later utterance round-trips into the app's
+    "session is complete" short-circuit (real calls, 2026-08-03). It is the
+    one non-text signal we honor from the untrusted party, and the worst an
+    abusive delegate can do with it is end its own call politely.
     """
 
     text: str
     ok: bool
     failure: str | None = None
+    terminal: bool = False
 
     def as_agent_response(self) -> dict:
         """The shape `_process_api_response` already understands."""
@@ -224,8 +234,10 @@ async def call_delegate(
 
     # `focus` is app-defined and the gateway ignores it. Any `error` key is
     # deliberately NOT read: a 200 is a success by contract, and delegate-authored
-    # text must never reach TTS.
-    return DelegateReply(text.translate(_CONTROL_CHARS), ok=True)
+    # text must never reach TTS. `done` is the strict-boolean exception — see
+    # DelegateReply.terminal; anything but literal `true` reads as False.
+    return DelegateReply(text.translate(_CONTROL_CHARS), ok=True,
+                         terminal=body.get("done") is True)
 
 
 # ── conversation start (contract v0.1) ───────────────────────────────────────

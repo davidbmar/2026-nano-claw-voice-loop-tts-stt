@@ -1441,3 +1441,208 @@ def test_the_app_opening_can_stand_alone():
 
     assert call.greeting_line == (
         "Thanks for calling Property Maintenance Desk. Unit B?")
+
+
+# ── the end-of-call signal, wired ────────────────────────────────────────────
+#
+# riff sends done=true once its flow rests terminal (the reply is the
+# conversation's last). Before this wiring, "Goodbye" was only text: the
+# gateway spoke it and nobody hung up, so real callers (2026-08-03) sat on a
+# live leg re-hearing "your session is complete" for as long as they kept
+# talking — every utterance reset the idle watchdog, which only fires on ~60s
+# of total dead air.
+
+
+class _Resettable:
+    def reset(self):
+        pass
+
+
+def _delegated_call(monkeypatch, reply, interrupted=False):
+    """A minimal PhoneCall whose next turn is delegated and returns `reply`.
+
+    Complete enough that `_stream_reply` runs to the end WITHOUT raising —
+    the first draft of these tests lacked `endpointer`, blew up in the
+    function's `finally`, and swallowed the exception, proving nothing
+    (Codex, 2026-08-03). The strict asyncio.run below is the point.
+    """
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "call-done-1"
+    call.telnyx_call_id = "v3:done-1"
+    call.session_id = "phone-done-1"
+    call.tap = None
+    call._http = object()
+    call.speaking = False
+    call.interrupted = interrupted
+    call.closed = False
+    call._playback_flush_sent = False
+    call.endpointer = _Resettable()
+    call.last_activity = 0.0
+    call._reset_barge_in = lambda: None
+    call._stop_thinking_cue = lambda: None
+
+    async def consume(units):
+        async for _ in units:
+            pass
+
+    call._speak_sentences = consume
+
+    seen = {"hangups": 0}
+
+    async def fake_hangup(client, **kwargs):
+        seen["hangups"] += 1
+        return True
+
+    call.hangup_after_playback = fake_hangup
+
+    monkeypatch.setattr(phone, "routing_for", lambda cid: "http://127.0.0.1:8790/t")
+
+    async def fake_delegate(client, url, text, *, who):
+        return reply
+
+    monkeypatch.setattr(phone, "call_delegate", fake_delegate)
+    return call, seen
+
+
+def test_a_terminal_delegate_reply_hangs_up_after_speaking(monkeypatch):
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("Done — Goodbye.", ok=True, terminal=True))
+    asyncio.run(call._stream_reply("thanks, that's all"))
+
+    assert seen["hangups"] == 1
+    assert call.closed is True
+    assert call.speaking is False, "the finally must still run after a hangup"
+
+
+def test_a_mid_conversation_reply_never_hangs_up(monkeypatch):
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("What unit are you in?", ok=True))
+    asyncio.run(call._stream_reply("the door sticks"))
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
+
+
+def test_an_interrupted_goodbye_defers_the_hangup_to_the_next_turn(monkeypatch):
+    """Barging into the goodbye means the caller wants something. The delegate
+    repeats done on every post-terminal turn, so deferring costs one turn,
+    never the call."""
+    from voice.turn_delegate import DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply("Goodbye.", ok=True, terminal=True),
+        interrupted=True)
+    asyncio.run(call._stream_reply("wait actually"))
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
+
+
+def test_a_failed_delegate_turn_never_hangs_up(monkeypatch):
+    """The apology path must keep the caller, whatever a broken delegate sent."""
+    from voice.turn_delegate import DELEGATE_APOLOGY, DelegateReply
+
+    call, seen = _delegated_call(
+        monkeypatch, DelegateReply(DELEGATE_APOLOGY, ok=False, failure="status 502"))
+    asyncio.run(call._stream_reply("hello?"))
+
+    assert seen["hangups"] == 0
+    assert call.closed is False
+
+
+def test_a_failed_carrier_hangup_leaves_the_call_open(monkeypatch):
+    """`closed` only on a confirmed send: marking a failed hangup closed would
+    silence media and the idle watchdog on a leg the carrier still holds."""
+    from voice.turn_delegate import DelegateReply
+
+    call, _ = _delegated_call(
+        monkeypatch, DelegateReply("Goodbye.", ok=True, terminal=True))
+
+    async def failing_hangup(client, **kwargs):
+        return False
+
+    call.hangup_after_playback = failing_hangup
+    asyncio.run(call._stream_reply("bye"))
+
+    assert call.closed is False
+
+
+# ── hangup_after_playback itself (the drain wait, the abort, the surplus) ────
+
+
+def _drain_call():
+    call = phone.PhoneCall.__new__(phone.PhoneCall)
+    call.call_id = "call-drain-1"
+    call.telnyx_call_id = "v3:drain-1"
+    call.interrupted = False
+    return call
+
+
+def test_hangup_waits_out_the_stashed_playback_surplus(monkeypatch):
+    """_speak_sentences restores _frame_pacer before any caller can hang up,
+    so the live pacer is ALWAYS gone here. Without the stashed surplus every
+    real hangup waited only the 350ms margin and clipped the goodbye."""
+    import time as _time
+
+    call = _drain_call()
+    call._frame_pacer = None
+    call._playback_surplus = (1.0, _time.monotonic() - 0.4)
+
+    waits = []
+
+    async def fake_sleep(s):
+        waits.append(s)
+
+    async def fake_cmd(client, cid, command, payload):
+        return True
+
+    monkeypatch.setattr(phone.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_cmd)
+    assert asyncio.run(call.hangup_after_playback(object(), margin_s=0.1)) is True
+    assert len(waits) == 1
+    # ~0.6s of surplus remains after the 0.4s that already elapsed, + margin.
+    assert 0.5 < waits[0] < 0.8, waits
+
+
+def test_a_barge_in_during_the_drain_wait_aborts_the_hangup(monkeypatch):
+    """The drain wait is exactly the window a caller barges into the goodbye;
+    deciding before the wait and never re-checking would drop them mid-word."""
+    call = _drain_call()
+    call._frame_pacer = None
+    call._playback_surplus = (0.0, 0.0)
+
+    sent = []
+
+    async def fake_sleep(s):
+        call.interrupted = True  # the barge-in lands during the wait
+
+    async def fake_cmd(client, cid, command, payload):
+        sent.append(command)
+        return True
+
+    monkeypatch.setattr(phone.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_cmd)
+    result = asyncio.run(call.hangup_after_playback(
+        object(), abort=lambda: call.interrupted))
+
+    assert result is False
+    assert sent == [], "the carrier command must not go out after an abort"
+
+
+def test_a_failed_telnyx_send_reports_false(monkeypatch):
+    call = _drain_call()
+    call._frame_pacer = None
+
+    async def fake_sleep(s):
+        pass
+
+    async def fake_cmd(client, cid, command, payload):
+        return False
+
+    monkeypatch.setattr(phone.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(phone, "_telnyx_cmd", fake_cmd)
+    assert asyncio.run(call.hangup_after_playback(object())) is False
