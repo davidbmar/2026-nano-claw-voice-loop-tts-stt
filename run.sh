@@ -240,6 +240,29 @@ if [ -n "${NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON:-}" ]; then
     -v "${NANO_CLAW_GCAL_SERVICE_ACCOUNT_JSON}:/app/secrets/gcal-sa.json:ro"
   )
 fi
+# Decision Core shadow (observation only — no behavior change; the flag is
+# fail-closed so an unset host env leaves the container without it entirely).
+# The engine repo mounts read-only: it is stdlib-only Python and the final
+# image is python:3.12-slim, so the stdio sidecar runs in-container as-is.
+# Decision logs/metrics land on a HOST bind mount so the M3 evaluation chain
+# (extract-batch → raters → gates) reads them without docker plumbing.
+DECISION_DOCKER_ARGS=()
+if [ "${NANO_CLAW_DECISION_SHADOW:-}" = "true" ] && [ -d "${NANO_CLAW_DECISION_CORE_ROOT:-$HOME/src/ai_constitution_engine}" ]; then
+  _DC_ROOT="${NANO_CLAW_DECISION_CORE_ROOT:-$HOME/src/ai_constitution_engine}"
+  _DC_DATA="${NANO_CLAW_DECISION_DATA_DIR:-$HOME/riff-dev-data/decision-core}"
+  mkdir -p "$_DC_DATA"
+  DECISION_DOCKER_ARGS+=(
+    -e NANO_CLAW_DECISION_SHADOW=true
+    -e DECISION_CORE_ROOT=/opt/decision-core
+    -e DECISION_CORE_DECISION_LOG=/app/data/decision-core/decisions.jsonl
+    -e NANO_CLAW_DECISION_METRICS=/app/data/decision-core/metrics.jsonl
+    -v "$_DC_ROOT":/opt/decision-core:ro
+    -v "$_DC_DATA":/app/data/decision-core
+  )
+  if [ -n "${NANO_CLAW_DECISION_DOMAIN_PINS:-}" ]; then
+    DECISION_DOCKER_ARGS+=(-e NANO_CLAW_DECISION_DOMAIN_PINS="$NANO_CLAW_DECISION_DOMAIN_PINS")
+  fi
+fi
 # Pass every environment value explicitly. Docker's bare `-e VAR` form silently
 # omits an unset host variable, which is unsafe for fail-closed feature gates.
 # -it only when attached to a real terminal, so run.sh also works headless
@@ -326,6 +349,7 @@ docker run $TTY_FLAGS --rm \
   -e SCHED_EVAL_THINKING="$SCHED_EVAL_THINKING" \
   -e NANO_CLAW_FLOW_AVAILABILITY="$NANO_CLAW_FLOW_AVAILABILITY" \
   "${GCAL_DOCKER_ARGS[@]}" \
+  "${DECISION_DOCKER_ARGS[@]}" \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -e LUX_SERVICE_URL="$LUX_SERVICE_URL" \
