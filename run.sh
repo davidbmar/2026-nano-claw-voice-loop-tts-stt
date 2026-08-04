@@ -274,6 +274,7 @@ fi
 docker run $TTY_FLAGS --rm \
   --name nano-claw-voice \
   -p 127.0.0.1:9090:8080 \
+  -p 127.0.0.1:9091:3001 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \
   -e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
