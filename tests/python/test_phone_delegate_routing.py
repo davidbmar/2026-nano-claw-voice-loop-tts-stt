@@ -439,7 +439,7 @@ def _delegate_call(monkeypatch, reply_text, ok=True):
                         lambda conn, cid, kind, payload, **k:
                         state["logged"].append((kind, payload)))
 
-    async def fake_delegate(client, url, text, *, who):
+    async def fake_delegate(client, url, text, *, who, turn_id):
         return DelegateReply(reply_text, ok=ok)
 
     monkeypatch.setattr(phone, "call_delegate", fake_delegate)
@@ -541,7 +541,7 @@ def _bargeable_call(monkeypatch, reply_text, cut_after=None):
                         lambda conn, cid, kind, payload, **k:
                         logged.append((kind, payload)))
 
-    async def fake_delegate(client, url, text, *, who):
+    async def fake_delegate(client, url, text, *, who, turn_id):
         return DelegateReply(reply_text, ok=True)
 
     monkeypatch.setattr(phone, "call_delegate", fake_delegate)
@@ -726,7 +726,7 @@ def test_a_failed_turn_keeps_the_line_open(monkeypatch):
 
     call, logged = _bargeable_call(monkeypatch, "unused")
 
-    async def failing(client, url, text, *, who):
+    async def failing(client, url, text, *, who, turn_id):
         return DelegateReply(DELEGATE_APOLOGY, ok=False, failure="status 502")
 
     monkeypatch.setattr(phone, "call_delegate", failing)
@@ -842,9 +842,11 @@ def test_a_delegated_call_answers_a_second_turn(monkeypatch):
     """
     replies = ["First answer.", "Second answer."]
     call, logged = _bargeable_call(monkeypatch, "unused")
+    turn_ids = []
 
-    async def fake_delegate(client, url, text, *, who):
+    async def fake_delegate(client, url, text, *, who, turn_id):
         from voice.turn_delegate import DelegateReply
+        turn_ids.append(turn_id)
         return DelegateReply(replies.pop(0), ok=True)
 
     monkeypatch.setattr(phone, "call_delegate", fake_delegate)
@@ -860,6 +862,7 @@ def test_a_delegated_call_answers_a_second_turn(monkeypatch):
     assert turns[1]["text"] == "Second answer.", (
         "the second turn produced no reply — the call went dead after one "
         "exchange, which is what the speaking-flag bug did")
+    assert len(set(turn_ids)) == 2
     assert call.speaking is False
 
 
@@ -872,7 +875,7 @@ def test_a_delegated_call_survives_a_failed_turn_and_answers_the_next(monkeypatc
                 DelegateReply("Back now. How can I help?", ok=True)]
     call, logged = _bargeable_call(monkeypatch, "unused")
 
-    async def fake_delegate(client, url, text, *, who):
+    async def fake_delegate(client, url, text, *, who, turn_id):
         return outcomes.pop(0)
 
     monkeypatch.setattr(phone, "call_delegate", fake_delegate)
@@ -925,7 +928,7 @@ def test_a_cancelled_turn_still_releases_the_call(monkeypatch):
     same flag whose leak made every delegated call go dead after one turn."""
     call, logged = _bargeable_call(monkeypatch, "unused")
 
-    async def slow_delegate(client, url, text, *, who):
+    async def slow_delegate(client, url, text, *, who, turn_id):
         await asyncio.sleep(30)
 
     monkeypatch.setattr(phone, "call_delegate", slow_delegate)
@@ -1497,7 +1500,7 @@ def _delegated_call(monkeypatch, reply, interrupted=False):
 
     monkeypatch.setattr(phone, "routing_for", lambda cid: "http://127.0.0.1:8790/t")
 
-    async def fake_delegate(client, url, text, *, who):
+    async def fake_delegate(client, url, text, *, who, turn_id):
         return reply
 
     monkeypatch.setattr(phone, "call_delegate", fake_delegate)

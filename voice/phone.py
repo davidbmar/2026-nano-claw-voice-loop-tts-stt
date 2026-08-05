@@ -52,6 +52,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import numpy as np
@@ -678,6 +679,28 @@ def _contained_call_id(call_id: str) -> str:
     return tap_directory_for(root, call_id).name
 
 
+class _DelegateTurnIds:
+    """Call-local delegate IDs, stable when one caller turn is retried."""
+
+    def __init__(self, call_id: str) -> None:
+        self._call_id = call_id
+        self._next_turn_index = 1
+        self._by_turn: dict[int, str] = {}
+
+    def for_turn(self, turn_index: int) -> str:
+        turn_id = self._by_turn.get(turn_index)
+        if turn_id is None:
+            stem = f"{self._call_id[:12]}-{turn_index}"
+            turn_id = f"{stem[:55]}-{uuid4().hex[:8]}"
+            self._by_turn[turn_index] = turn_id
+        return turn_id
+
+    def begin_turn(self) -> str:
+        turn_index = self._next_turn_index
+        self._next_turn_index += 1
+        return self.for_turn(turn_index)
+
+
 class PhoneCall:
     """One live call: endpointing → STT → agent → TTS, half-duplex."""
 
@@ -700,6 +723,7 @@ class PhoneCall:
         # provider's remote resource identifier.
         self.call_id = safe_call_id
         self.telnyx_call_id = telnyx_call_id
+        self._delegate_turn_ids = _DelegateTurnIds(safe_call_id)
         _active_calls.add(safe_call_id)
         # The agent API validates session ids against ^[A-Za-z0-9_-]{1,64}$.
         # Telnyx call ids now carry a "v3:" prefix, and the colon (plus any
@@ -1790,12 +1814,26 @@ class PhoneCall:
             # _frame_pacer). A call with no carrier id has no routing entry.
             delegate_url = routing_for(getattr(self, "telnyx_call_id", ""))
             if delegate_url:
+                delegate_turn_ids = getattr(self, "_delegate_turn_ids", None)
+                if delegate_turn_ids is None:
+                    # A few embedding/tests construct PhoneCall without
+                    # __init__; keep that supported while production calls use
+                    # the allocator created above.
+                    delegate_turn_ids = _DelegateTurnIds(self.call_id)
+                    self._delegate_turn_ids = delegate_turn_ids
+                # Allocate once for this caller turn, before choosing a
+                # transport, so any request retry reuses the same identity.
+                delegate_turn_id = delegate_turn_ids.begin_turn()
                 if _cfg("NANO_CLAW_DELEGATE_STREAMING").lower() in (
                     "1", "true", "yes"
                 ):
                     turn_mode = "delegate-stream"
                     delegated = stream_delegate(
-                        self._http, delegate_url, text, who="caller"
+                        self._http,
+                        delegate_url,
+                        text,
+                        who="caller",
+                        turn_id=delegate_turn_id,
                     )
                     delegate_stream_result = delegated.result
                     delegate_chunker = TextChunker()
@@ -1902,7 +1940,12 @@ class PhoneCall:
                 # is its fixed apology, never the delegate's own words.
                 turn_mode = "delegate"
                 reply = await call_delegate(
-                    self._http, delegate_url, text, who="caller")
+                    self._http,
+                    delegate_url,
+                    text,
+                    who="caller",
+                    turn_id=delegate_turn_id,
+                )
                 record_agent_done()
                 log.info("[phone %s] delegate turn ok=%s (%.1fs)",
                          self.call_id[:8], reply.ok, time.monotonic() - t0)

@@ -137,6 +137,28 @@ def test_ack_deltas_and_final_are_parsed_and_terminal_result_is_available():
     assert request["follow_redirects"] is False
 
 
+def test_stream_request_carries_turn_id_when_provided():
+    response = FakeResponse(
+        [sse_event("final", {"reply": "Immediate.", "focus": [], "done": False})]
+    )
+    client = FakeClient(response)
+    stream = stream_delegate(
+        client,
+        "http://delegate/t",
+        "hi",
+        who="caller",
+        turn_id="call-8-2-acde5678",
+    )
+
+    assert run(collect(stream)) == ["Immediate."]
+    assert client.calls[0][2]["json"] == {
+        "text": "hi",
+        "who": "caller",
+        "speak": False,
+        "turn_id": "call-8-2-acde5678",
+    }
+
+
 def test_final_only_sse_yields_the_canonical_reply_once():
     response = FakeResponse(
         [sse_event("final", {"reply": "Immediate.", "focus": [], "done": False})]
@@ -525,6 +547,32 @@ def _streaming_phone_call(monkeypatch, response):
     return phone, call, spoken
 
 
+def test_phone_delegate_turn_ids_are_stable_within_a_turn_and_distinct_between_turns(
+    monkeypatch,
+):
+    from voice import phone
+
+    nonces = iter(("a" * 32, "b" * 32, "c" * 32))
+
+    class FakeUuid:
+        def __init__(self, value):
+            self.hex = value
+
+    monkeypatch.setattr(phone, "uuid4", lambda: FakeUuid(next(nonces)))
+    ids = phone._DelegateTurnIds("delegate-call-123456789")
+
+    first = ids.begin_turn()
+    assert ids.for_turn(1) == first
+    second = ids.begin_turn()
+
+    assert first == "delegate-cal-1-aaaaaaaa"
+    assert second == "delegate-cal-2-bbbbbbbb"
+    assert first != second
+    assert len(first) <= 64
+    assert len(second) <= 64
+    assert len(ids.for_turn(10**100)) == 64
+
+
 def test_phone_flag_on_streams_through_sentence_pipeline_and_honors_done(
     monkeypatch,
 ):
@@ -574,6 +622,9 @@ def test_phone_flag_on_streams_through_sentence_pipeline_and_honors_done(
     assert row["acceptedForSynthesis"] == "First. Second."
     assert row["deliveredToCarrier"]["framesSent"] == 2
     assert row["remoteTruncated"] is False
+    sent = call._http.calls[0][2]["json"]
+    assert sent["turn_id"].startswith("delegate-str-1-")
+    assert len(sent["turn_id"]) <= 64
 
 
 def test_phone_flag_off_never_touches_the_streaming_consumer(monkeypatch):
@@ -586,7 +637,10 @@ def test_phone_flag_off_never_touches_the_streaming_consumer(monkeypatch):
     def streaming_must_not_run(*args, **kwargs):
         raise AssertionError("default-off path called stream_delegate")
 
-    async def atomic(client, url, text, *, who):
+    seen = []
+
+    async def atomic(client, url, text, *, who, turn_id):
+        seen.append(turn_id)
         return DelegateReply("Atomic reply.", ok=True)
 
     monkeypatch.setattr(phone, "stream_delegate", streaming_must_not_run)
@@ -595,3 +649,5 @@ def test_phone_flag_off_never_touches_the_streaming_consumer(monkeypatch):
     run(call._stream_reply("caller words"))
 
     assert spoken == ["Atomic reply."]
+    assert seen[0].startswith("delegate-str-1-")
+    assert len(seen[0]) <= 64

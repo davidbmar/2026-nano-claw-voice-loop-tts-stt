@@ -193,12 +193,26 @@ def safe_url_for_log(url: str) -> str:
     return f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
 
 
+def _turn_payload(text: str, who: str, turn_id: str | None) -> dict[str, object]:
+    """Build a turn body without inventing identity at the transport seam.
+
+    ``turn_id`` follows the v0 extension rule: delegates that have never heard
+    of an optional field ignore it, so older backends keep working unchanged.
+    """
+
+    payload: dict[str, object] = {"text": text, "who": who, "speak": False}
+    if turn_id is not None:
+        payload["turn_id"] = turn_id
+    return payload
+
+
 async def call_delegate(
     client,
     url: str,
     text: str,
     *,
     who: str,
+    turn_id: str | None = None,
     timeout: float = DELEGATE_TIMEOUT_S,
 ) -> DelegateReply:
     """One turn through the delegate. Never raises; never speaks its words.
@@ -217,7 +231,7 @@ async def call_delegate(
             # A delegate that has never heard of the field ignores it, which is
             # the ordinary behaviour of every JSON body parser and is now stated
             # in the contract.
-            json={"text": text, "who": who, "speak": False},
+            json=_turn_payload(text, who, turn_id),
             timeout=timeout,
             follow_redirects=False,
         )
@@ -411,6 +425,7 @@ class DelegateStream(AsyncIterator[str]):
         text: str,
         *,
         who: str,
+        turn_id: str | None,
         connect_timeout: float,
         first_event_timeout: float,
         idle_timeout: float,
@@ -421,6 +436,7 @@ class DelegateStream(AsyncIterator[str]):
         self._url = url
         self._text = text
         self._who = who
+        self._turn_id = turn_id
         self._clock = clock
         self._started_at = clock()
         self._connect_deadline = self._started_at + connect_timeout
@@ -609,7 +625,7 @@ class DelegateStream(AsyncIterator[str]):
             manager = self._client.stream(
                 "POST",
                 self._url,
-                json={"text": self._text, "who": self._who, "speak": False},
+                json=_turn_payload(self._text, self._who, self._turn_id),
                 headers={
                     "Accept": "text/event-stream, application/json;q=0.9"
                 },
@@ -865,6 +881,7 @@ def stream_delegate(
     text: str,
     *,
     who: str,
+    turn_id: str | None = None,
     connect_timeout: float = DELEGATE_CONNECT_TIMEOUT_S,
     first_event_timeout: float = DELEGATE_TIMEOUT_S,
     idle_timeout: float = DELEGATE_IDLE_TIMEOUT_S,
@@ -890,6 +907,7 @@ def stream_delegate(
         url,
         text,
         who=who,
+        turn_id=turn_id,
         connect_timeout=connect_timeout,
         first_event_timeout=first_event_timeout,
         idle_timeout=idle_timeout,

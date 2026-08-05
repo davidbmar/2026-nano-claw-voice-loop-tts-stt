@@ -82,6 +82,28 @@ def test_the_request_carries_exactly_the_contract_fields():
 
     asyncio.run(exercise())
 
+
+def test_the_request_carries_turn_id_when_provided():
+    async def exercise():
+        client = FakeClient(FakeResponse(body={"reply": "ok"}))
+        await call_delegate(
+            client,
+            "http://127.0.0.1:8790/t",
+            "what I said",
+            who="caller",
+            turn_id="call-7-1-acde1234",
+        )
+
+        assert client.calls[0]["json"] == {
+            "text": "what I said",
+            "who": "caller",
+            "speak": False,
+            "turn_id": "call-7-1-acde1234",
+        }
+
+    asyncio.run(exercise())
+
+
 def test_an_empty_reply_is_permitted_and_speaks_nothing():
     """The contract allows an app to have nothing to say. That is NOT a failure,
     so it must not be turned into an apology."""
