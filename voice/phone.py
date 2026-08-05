@@ -58,7 +58,7 @@ import numpy as np
 from aiohttp import web
 
 from voice import call_log, document_routes, metrics_db, silero_vad, voice_catalog
-from voice.turn_delegate import call_delegate, start_conversation
+from voice.turn_delegate import call_delegate, start_conversation, stream_delegate
 from voice.flow_session import (
     FLOW_MODES,
     FlowSession,
@@ -205,6 +205,12 @@ class _SynthesizedSpeech:
     pcm48k: bytes
     tap: CallTap | None
     sentence_index: int | None
+
+
+@dataclass(frozen=True)
+class _CarrierDelivery:
+    frames_sent: int
+    frames_planned: int
 
 
 def idle_action(idle_s: float, prompted: bool, prompt_after_s: float) -> str:
@@ -1695,6 +1701,12 @@ class PhoneCall:
         # Streaming prepared speech: set when the final response diverged from
         # the streamed deltas (guard rewrite) — surfaced on the turn event.
         stream_flags = {"mismatch": False}
+        # v1 delegate accounting keeps protocol output, synthesis acceptance,
+        # carrier writes and interruption state distinct (F17).
+        delegate_stream_result = None
+        delegate_carrier_frames_sent = 0
+        delegate_carrier_frames_planned = 0
+        delegate_carrier_units: list[str] = []
 
         def record_turn_model(obj: dict) -> None:
             debug = obj.get("debug")
@@ -1705,9 +1717,9 @@ class PhoneCall:
                 )
 
         async def record_spoken(source):
-            # Accumulate exactly what is handed to synthesis so the call
-            # review timeline shows what the caller actually heard —
-            # including barge-in truncation.
+            # Compatibility name: this records what was ACCEPTED for synthesis.
+            # The pipeline prefetches, so this is deliberately not represented
+            # as carrier delivery in v1 delegate metrics (F17).
             async for unit in source:
                 if unit is not PROCESSING_CUE_SENTINEL:
                     unit_text = unit if isinstance(unit, str) else getattr(unit, "text", "")
@@ -1715,8 +1727,30 @@ class PhoneCall:
                         spoken_parts.append(unit_text.strip())
                 yield unit
 
+        def mark_delegate_first_playable() -> None:
+            nonlocal first_spoken_at
+            if first_spoken_at is None:
+                first_spoken_at = time.monotonic()
+                log.info(
+                    "[phone %s] first sentence playable at %.1fs",
+                    self.call_id[:8],
+                    first_spoken_at - t0,
+                )
+
+        def record_delegate_carrier_delivery(
+            unit, delivery: _CarrierDelivery
+        ) -> None:
+            nonlocal delegate_carrier_frames_sent, delegate_carrier_frames_planned
+            delegate_carrier_frames_sent += delivery.frames_sent
+            delegate_carrier_frames_planned += delivery.frames_planned
+            if delivery.frames_sent <= 0:
+                return
+            unit_text = unit if isinstance(unit, str) else getattr(unit, "text", "")
+            if unit_text and unit_text.strip():
+                delegate_carrier_units.append(unit_text.strip())
+
         async def speak_whole_reply(text: str) -> None:
-            """Speak a reply that arrived complete, recording what was HEARD.
+            """Speak a reply that arrived complete, recording accepted units.
 
             Both non-streaming paths — the delegate hop and the API fallback —
             independently got this wrong the same way: they appended the whole
@@ -1725,11 +1759,10 @@ class PhoneCall:
             recorded as having received the reply in full, and the row said
             `complete: True` beside `interrupted: True`.
 
-            Only the streaming branch did it correctly, via `record_spoken`. This
-            is that behaviour in one place, so there is no third copy to get
-            wrong: accumulate per unit as it is handed to synthesis, mark
-            first-audio latency once, and decide completeness from whether the
-            caller interrupted.
+            Only the streaming branch accumulated per unit, via `record_spoken`.
+            This is that behaviour in one place, so there is no third copy to get
+            wrong. The legacy timeline field remains accepted-for-synthesis;
+            v1's separate carrier accounting is what must be used for delivery.
             """
             nonlocal first_spoken_at, reply_complete
 
@@ -1757,6 +1790,111 @@ class PhoneCall:
             # _frame_pacer). A call with no carrier id has no routing entry.
             delegate_url = routing_for(getattr(self, "telnyx_call_id", ""))
             if delegate_url:
+                if _cfg("NANO_CLAW_DELEGATE_STREAMING").lower() in (
+                    "1", "true", "yes"
+                ):
+                    turn_mode = "delegate-stream"
+                    delegated = stream_delegate(
+                        self._http, delegate_url, text, who="caller"
+                    )
+                    delegate_stream_result = delegated.result
+                    delegate_chunker = TextChunker()
+                    delegate_mode = phone_speech_mode()
+                    delegate_prepared_parts: list[str] = []
+                    delegate_compiler: StreamingSpeechCompiler | None = None
+
+                    async def delegate_sentences():
+                        nonlocal delegate_compiler
+                        consumed_to_terminal = False
+                        try:
+                            async for chunk in delegated:
+                                if self.closed or not self.speaking:
+                                    return
+                                if delegate_mode == "batch":
+                                    delegate_prepared_parts.append(chunk)
+                                    continue
+                                if delegate_mode == "prepared":
+                                    if delegate_compiler is None:
+                                        words, duration = _speech_compile_params()
+                                        delegate_compiler = StreamingSpeechCompiler(
+                                            max_words_per_chunk=words,
+                                            max_chunk_duration_ms=duration,
+                                        )
+                                    for unit in delegate_compiler.feed(chunk):
+                                        yield unit
+                                    continue
+                                for sentence in delegate_chunker.push(chunk):
+                                    yield sentence
+                            consumed_to_terminal = True
+                        finally:
+                            if not consumed_to_terminal:
+                                # Barge-in/hangup is a local delivery outcome,
+                                # not EOF-without-final at the delegate seam.
+                                await delegated.aclose()
+
+                        record_agent_done()
+                        result = delegated.result
+                        stream_flags["mismatch"] = result.delta_mismatch
+                        # A remotely truncated partial tail is intentionally
+                        # dropped. The only fault tail we complete is our own
+                        # fixed apology from a no-chunk-yet failure.
+                        flush_tail = result.ok or result.apology_yielded
+                        if not flush_tail:
+                            return
+                        if delegate_mode == "batch":
+                            for unit in self._speech_units(
+                                "".join(delegate_prepared_parts)
+                            ):
+                                yield unit
+                        elif delegate_mode == "prepared":
+                            if delegate_compiler is not None:
+                                for unit in delegate_compiler.finish(None):
+                                    yield unit
+                        else:
+                            tail = delegate_chunker.flush()
+                            if tail:
+                                yield tail
+
+                    await self._speak_sentences(
+                        record_spoken(delegate_sentences()),
+                        stop_cue_on_start=False,
+                        on_first_playable=mark_delegate_first_playable,
+                        on_carrier_delivery=record_delegate_carrier_delivery,
+                    )
+                    # An empty successful reply, or a cancellation/fault with no
+                    # playable unit, still has to terminate the generic cue.
+                    self._stop_thinking_cue()
+                    result = delegated.result
+                    record_agent_done()
+                    reply_complete = (
+                        result.ok
+                        and result.finished
+                        and not result.locally_cancelled
+                        and not self.interrupted
+                    )
+                    log.info(
+                        "[phone %s] delegate stream ok=%s fault=%s (%.1fs)",
+                        self.call_id[:8],
+                        result.ok,
+                        result.fault or "none",
+                        time.monotonic() - t0,
+                    )
+                    if result.terminal and reply_complete:
+                        log.info(
+                            "[phone %s] delegate stream says done — hanging up",
+                            self.call_id[:8],
+                        )
+                        if await self.hangup_after_playback(
+                                self._http, abort=lambda: self.interrupted):
+                            self.closed = True
+                        else:
+                            log.warning(
+                                "[phone %s] hangup aborted or failed — leaving "
+                                "the call open for the next turn or the idle "
+                                "watchdog",
+                                self.call_id[:8],
+                            )
+                    return
                 # This call belongs to another app. Everything acoustic stayed
                 # here — mic, VAD, endpointing, STT, TTS, barge-in — and the
                 # words come from there. `call_delegate` has already validated
@@ -2016,7 +2154,35 @@ class PhoneCall:
                 record_agent_done()
         finally:
             self.speaking = False
-            if spoken_parts:
+            if spoken_parts or delegate_stream_result is not None:
+                delegate_fields = {}
+                if delegate_stream_result is not None:
+                    interrupted_stream = (
+                        self.interrupted
+                        or delegate_stream_result.locally_cancelled
+                        or delegate_stream_result.remote_truncated
+                    )
+                    delegate_fields = {
+                        "canonicalEmitted": delegate_stream_result.canonical_reply,
+                        "acceptedForSynthesis": " ".join(spoken_parts),
+                        "deliveredToCarrier": {
+                            "framesSent": delegate_carrier_frames_sent,
+                            "framesPlanned": delegate_carrier_frames_planned,
+                            "unitsWithAnyFrames": delegate_carrier_units,
+                        },
+                        "interruptionPoint": (
+                            {
+                                "acceptedUnits": len(spoken_parts),
+                                "carrierFramesSent": delegate_carrier_frames_sent,
+                            }
+                            if interrupted_stream
+                            else None
+                        ),
+                        "delegateFault": delegate_stream_result.fault,
+                        "remoteTruncated": delegate_stream_result.remote_truncated,
+                        "localCancellation": delegate_stream_result.locally_cancelled,
+                        "done": delegate_stream_result.done,
+                    }
                 call_log.emit(
                     _metrics_conn,
                     self.call_id,
@@ -2034,6 +2200,7 @@ class PhoneCall:
                             if stream_flags["mismatch"]
                             else {}
                         ),
+                        **delegate_fields,
                     },
                 )
             if not self.interrupted:
@@ -2189,11 +2356,13 @@ class PhoneCall:
         self,
         speech: _SynthesizedSpeech,
         pacer: FramePacer | None = None,
-    ) -> None:
+    ) -> _CarrierDelivery:
         """Pace one already-synthesized sentence to the phone transport."""
         pacer = pacer or getattr(self, "_frame_pacer", None) or _phone_frame_pacer()
         tap = speech.tap
         sentence_index = speech.sentence_index
+        frames_sent = 0
+        frames_planned = 0
         send_started: float | None = None
         send_times: list[float] | None = [] if tap else None
         audio_s_sent = 0.0
@@ -2215,6 +2384,7 @@ class PhoneCall:
                 if codec == "l16"
                 else pcm48k_to_ulaw_frames(gain.pcm16)
             )
+            frames_planned = len(frames)
             if frames and not pacer.running:
                 # The first sentence's synthesis must not consume prebuffer
                 # time. Anchor only once its transport frames are ready.
@@ -2233,6 +2403,7 @@ class PhoneCall:
                 await self.ws.send_json(
                     {"event": "media", "media": {"payload": base64.b64encode(frame).decode()}}
                 )
+                frames_sent += 1
                 self._feed_echo_reference(frame, codec)
                 if tap and send_times is not None:
                     sent_at = pacer.now()
@@ -2276,9 +2447,19 @@ class PhoneCall:
                 if self._active_tap_sentence_index == sentence_index:
                     self._active_tap_sentence_index = None
 
-    async def _speak_sentences(self, sentences) -> None:
+        return _CarrierDelivery(frames_sent, frames_planned)
+
+    async def _speak_sentences(
+        self,
+        sentences,
+        *,
+        stop_cue_on_start: bool = True,
+        on_first_playable: Callable[[], None] | None = None,
+        on_carrier_delivery: Callable[[object, _CarrierDelivery], None] | None = None,
+    ) -> None:
         """Synthesize and play a sync or async sentence source in order."""
-        self._stop_thinking_cue()  # real speech replaces the thinking cue
+        if stop_cue_on_start:
+            self._stop_thinking_cue()  # real speech replaces the thinking cue
         if self.closed or not self.speaking:
             return
         self._gain_normalizer.reset()
@@ -2291,12 +2472,26 @@ class PhoneCall:
             on_ahead=self._record_synth_ahead,
         )
         self._sentence_pipelines.add(pipeline)
+        cue_waiting_for_speech = not stop_cue_on_start
         try:
             async with pipeline:
                 async for synthesized in pipeline:
                     if self.closed or not self.speaking:
                         return
-                    await self._play_synthesized(synthesized.audio)
+                    playable = bool(
+                        getattr(synthesized.audio, "pcm48k", synthesized.audio)
+                    )
+                    if cue_waiting_for_speech and playable:
+                        self._stop_thinking_cue()
+                        cue_waiting_for_speech = False
+                        if on_first_playable is not None:
+                            on_first_playable()
+                    delivery = await self._play_synthesized(synthesized.audio)
+                    if (
+                        on_carrier_delivery is not None
+                        and isinstance(delivery, _CarrierDelivery)
+                    ):
+                        on_carrier_delivery(synthesized.text, delivery)
                     if self.closed or not self.speaking:
                         return
         finally:

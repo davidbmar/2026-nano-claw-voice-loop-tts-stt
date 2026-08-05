@@ -26,9 +26,16 @@ already-safe payload.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin, urlparse
+
+import httpx
 
 log = logging.getLogger("nano-claw.delegate")
 
@@ -41,11 +48,25 @@ DELEGATE_APOLOGY = "Sorry — I couldn't reach the assistant just then. Please t
 # has to be passed per request rather than inherited.
 DELEGATE_TIMEOUT_S = 30.0
 
+# A stream has more than one useful deadline. The connect ceiling matches the
+# already-established /start ceiling; the first complete event retains v0's
+# 30-second turn ceiling. Reads after that are bounded by event-to-event idle
+# time and by an independent wall clock, because HTTPX's timeout only measures
+# individual periods of I/O inactivity.
+DELEGATE_CONNECT_TIMEOUT_S = 10.0
+DELEGATE_IDLE_TIMEOUT_S = 10.0
+DELEGATE_WALL_TIMEOUT_S = 60.0
+
 # A reply is delegate-authored text that reaches TTS on every turn. The start
 # response is capped at 64 KB; leaving the far more frequent path unbounded was
 # an inconsistency in this module, not a decision. A reply past this is a fault
 # at the other end, not a long answer: 32 KB is roughly 40 minutes of speech.
 _MAX_REPLY_CHARS = 32 * 1024
+_MAX_SSE_LINE_BYTES = _MAX_REPLY_CHARS
+_MAX_SSE_EVENT_BYTES = _MAX_REPLY_CHARS
+_MAX_SSE_STREAM_BYTES = _MAX_REPLY_CHARS
+_SSE_READ_CHUNK_BYTES = 4096
+_STREAM_QUEUE_MAX = 2
 # A spoken greeting is a sentence or two. The reply cap is far too
 # generous for something a caller hears before they can say anything.
 _MAX_OPENING_CHARS = 1000
@@ -238,6 +259,643 @@ async def call_delegate(
     # DelegateReply.terminal; anything but literal `true` reads as False.
     return DelegateReply(text.translate(_CONTROL_CHARS), ok=True,
                          terminal=body.get("done") is True)
+
+
+# ── streaming turns (contract v1) ───────────────────────────────────────────
+
+@dataclass
+class DelegateStreamResult:
+    """Terminal state populated as a :class:`DelegateStream` is consumed.
+
+    The object is intentionally mutable and handed out before iteration.  A
+    caller keeps the same object and reads it after the iterator ends; terminal
+    metadata therefore never has to be smuggled through a speakable chunk.
+    """
+
+    canonical_reply: str = ""
+    focus: list[str] = field(default_factory=list)
+    done: bool = False
+    fault: str | None = None
+    failure_detail: str | None = None
+    ok: bool = False
+    finished: bool = False
+    remote_truncated: bool = False
+    locally_cancelled: bool = False
+    apology_yielded: bool = False
+    delta_mismatch: bool = False
+    ack_kind: str | None = None
+    chunks_yielded: int = 0
+    delegate_chunks_yielded: int = 0
+
+    @property
+    def reply(self) -> str:
+        """The v0 field name, retained as an alias for callers."""
+        return self.canonical_reply
+
+    @property
+    def terminal(self) -> bool:
+        """Compatibility with :class:`DelegateReply`."""
+        return self.done
+
+    @property
+    def failure(self) -> str | None:
+        """Compatibility alias for code that records a failure string."""
+        return self.fault
+
+    @property
+    def fault_classification(self) -> str | None:
+        return self.fault
+
+    @property
+    def local_cancelled(self) -> bool:
+        return self.locally_cancelled
+
+
+@dataclass(frozen=True)
+class _QueuedStreamChunk:
+    text: str
+    delegate_authored: bool
+
+
+@dataclass(frozen=True)
+class _ValidatedFinal:
+    reply: str
+    focus: list[str]
+    done: bool
+
+
+@dataclass(frozen=True)
+class _Deadline:
+    at: float
+    fault: str
+
+
+class _StreamFault(Exception):
+    def __init__(self, classification: str, detail: str | None = None) -> None:
+        super().__init__(classification)
+        self.classification = classification
+        self.detail = detail
+
+
+_STREAM_END = object()
+_ACK_KINDS = frozenset({"working", "tool", "lookup"})
+
+
+def _parsed_media_type(value: str) -> str:
+    """Return only the lower-cased HTTP media type, never a substring match."""
+    if not isinstance(value, str):
+        return ""
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _header(response: Any, name: str) -> str:
+    headers = getattr(response, "headers", {})
+    try:
+        value = headers.get(name, "")
+    except AttributeError:
+        return ""
+    if value:
+        return str(value)
+    try:
+        value = headers.get(name.lower(), "")
+    except AttributeError:
+        return ""
+    if value:
+        return str(value)
+    try:
+        for key, candidate in headers.items():
+            if str(key).lower() == name.lower():
+                return str(candidate)
+    except AttributeError:
+        pass
+    return ""
+
+
+def _validate_final_object(body: Any, *, strict_done: bool) -> _ValidatedFinal:
+    if not isinstance(body, dict) or not isinstance(body.get("reply"), str):
+        raise _StreamFault("wrong-field-type", "final.reply must be a string")
+
+    reply = body["reply"]
+    if len(reply) > _MAX_REPLY_CHARS:
+        raise _StreamFault("reply-too-long")
+
+    focus = body.get("focus", [])
+    if focus is None and not strict_done:
+        # v0 treated focus as app-defined and dropped it. Preserve that exact
+        # fallback posture while exposing well-shaped values to v1 callers.
+        focus = []
+    if not isinstance(focus, list) or not all(isinstance(item, str) for item in focus):
+        if strict_done:
+            raise _StreamFault("wrong-field-type", "final.focus must be a string list")
+        focus = []
+
+    raw_done = body.get("done", False)
+    if strict_done and not isinstance(raw_done, bool):
+        raise _StreamFault("wrong-field-type", "final.done must be a boolean")
+    done = raw_done is True
+    return _ValidatedFinal(reply.translate(_CONTROL_CHARS), list(focus), done)
+
+
+class DelegateStream(AsyncIterator[str]):
+    """Single-use, bounded streaming turn consumer.
+
+    ``stream.result`` is stable before iteration and populated afterward.  For
+    callers that prefer the design's "iterator plus result" wording literally,
+    ``chunks, result = stream_delegate(...)`` is also supported.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        url: str,
+        text: str,
+        *,
+        who: str,
+        connect_timeout: float,
+        first_event_timeout: float,
+        idle_timeout: float,
+        wall_timeout: float,
+        clock: Callable[[], float],
+    ) -> None:
+        self._client = client
+        self._url = url
+        self._text = text
+        self._who = who
+        self._clock = clock
+        self._started_at = clock()
+        self._connect_deadline = self._started_at + connect_timeout
+        self._first_event_deadline = self._started_at + first_event_timeout
+        self._absolute_deadline = self._started_at + wall_timeout
+        self._idle_timeout = idle_timeout
+        self._last_event_at: float | None = None
+        self._queue: asyncio.Queue[object] = asyncio.Queue(maxsize=_STREAM_QUEUE_MAX)
+        self._producer: asyncio.Task[None] | None = None
+        self._closed = False
+        self._iteration_ended = False
+        self._had_delegate_chunk = False
+        self._delta_parts: list[str] = []
+        self._delta_chars = 0
+        self.result = DelegateStreamResult()
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        async def consume() -> AsyncIterator[str]:
+            exhausted = False
+            try:
+                while True:
+                    try:
+                        yield await self.__anext__()
+                    except StopAsyncIteration:
+                        exhausted = True
+                        return
+            finally:
+                if not exhausted:
+                    await self.aclose()
+
+        return consume()
+
+    def __iter__(self) -> Iterator[DelegateStream | DelegateStreamResult]:
+        # This does not participate in ``async for`` (which calls __aiter__).
+        # It only makes ``chunks, result = stream_delegate(...)`` ergonomic.
+        yield self
+        yield self.result
+
+    async def __aenter__(self) -> DelegateStream:
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        await self.aclose()
+
+    async def __anext__(self) -> str:
+        if self._closed or self._iteration_ended:
+            raise StopAsyncIteration
+        self._ensure_started()
+        try:
+            item = await self._queue.get()
+        except asyncio.CancelledError:
+            await self.aclose()
+            raise
+
+        if item is _STREAM_END:
+            self._iteration_ended = True
+            self.result.finished = True
+            raise StopAsyncIteration
+
+        assert isinstance(item, _QueuedStreamChunk)
+        self.result.chunks_yielded += 1
+        if item.delegate_authored:
+            self.result.delegate_chunks_yielded += 1
+        return item.text
+
+    async def aclose(self) -> None:
+        """Stop local consumption without converting it into a remote fault."""
+        if self._closed:
+            return
+        self._closed = True
+        if not self._iteration_ended and self.result.fault is None:
+            self.result.locally_cancelled = True
+        producer = self._producer
+        if producer is not None and not producer.done():
+            producer.cancel()
+            try:
+                await producer
+            except asyncio.CancelledError:
+                pass
+        self._discard_queued()
+        self.result.finished = True
+
+    def _ensure_started(self) -> None:
+        if self._producer is None:
+            self._producer = asyncio.create_task(
+                self._produce(), name="delegate-stream-consumer"
+            )
+
+    def _discard_queued(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+    def _read_deadlines(self) -> tuple[_Deadline, ...]:
+        if self._last_event_at is None:
+            event_deadline = _Deadline(
+                self._first_event_deadline, "first-event-timeout"
+            )
+        else:
+            event_deadline = _Deadline(
+                self._last_event_at + self._idle_timeout, "idle-timeout"
+            )
+        return event_deadline, _Deadline(self._absolute_deadline, "absolute-timeout")
+
+    async def _await_before(
+        self,
+        make_awaitable: Callable[[], Any],
+        deadlines: tuple[_Deadline, ...],
+    ) -> Any:
+        deadline = min(deadlines, key=lambda candidate: candidate.at)
+        remaining = deadline.at - self._clock()
+        if remaining <= 0:
+            raise _StreamFault(deadline.fault)
+        try:
+            value = await asyncio.wait_for(make_awaitable(), timeout=remaining)
+        except StopAsyncIteration:
+            now = self._clock()
+            expired = [candidate for candidate in deadlines if now > candidate.at]
+            if expired:
+                raise _StreamFault(
+                    min(expired, key=lambda candidate: candidate.at).fault
+                )
+            raise
+        except TimeoutError as exc:
+            raise _StreamFault(deadline.fault) from exc
+
+        # A test clock can advance while an awaitable completes immediately;
+        # checking again also closes scheduler-boundary races in production.
+        now = self._clock()
+        expired = [candidate for candidate in deadlines if now > candidate.at]
+        if expired:
+            raise _StreamFault(min(expired, key=lambda candidate: candidate.at).fault)
+        return value
+
+    async def _put(self, item: object) -> None:
+        if self._clock() > self._absolute_deadline:
+            raise _StreamFault("absolute-timeout")
+        if not self._queue.full():
+            # Keep validation of events already present in the same transport
+            # chunk transactional. A later malformed event can discard these
+            # prefetched items before the waiting consumer is scheduled.
+            self._queue.put_nowait(item)
+            return
+        await self._await_before(
+            lambda: self._queue.put(item),
+            (_Deadline(self._absolute_deadline, "absolute-timeout"),),
+        )
+
+    async def _put_delegate_chunk(self, text: str) -> None:
+        safe = text.translate(_CONTROL_CHARS)
+        if not safe:
+            return
+        await self._put(_QueuedStreamChunk(safe, delegate_authored=True))
+        self._had_delegate_chunk = True
+
+    def _remote_fault(self, classification: str, detail: str | None = None) -> None:
+        if self.result.fault is not None or self.result.locally_cancelled:
+            return
+        self.result.fault = classification
+        self.result.failure_detail = detail
+        self.result.ok = False
+        # Anything validated but still prefetched has not reached the caller and
+        # must not leak out after the stream is known to be faulty.
+        self._discard_queued()
+        if self.result.delegate_chunks_yielded == 0:
+            self.result.apology_yielded = True
+            self._queue.put_nowait(
+                _QueuedStreamChunk(DELEGATE_APOLOGY, delegate_authored=False)
+            )
+        else:
+            self.result.remote_truncated = True
+        self._queue.put_nowait(_STREAM_END)
+        log.warning(
+            "delegate stream %s fault=%s%s",
+            safe_url_for_log(self._url),
+            classification,
+            f" ({detail})" if detail else "",
+        )
+
+    async def _produce(self) -> None:
+        manager = None
+        entered = False
+        try:
+            manager = self._client.stream(
+                "POST",
+                self._url,
+                json={"text": self._text, "who": self._who, "speak": False},
+                headers={
+                    "Accept": "text/event-stream, application/json;q=0.9"
+                },
+                timeout=httpx.Timeout(None),
+                follow_redirects=False,
+            )
+            response = await self._await_before(
+                manager.__aenter__,
+                (
+                    _Deadline(self._connect_deadline, "connect-timeout"),
+                    _Deadline(self._absolute_deadline, "absolute-timeout"),
+                ),
+            )
+            entered = True
+
+            status = getattr(response, "status_code", None)
+            if status != 200:
+                raise _StreamFault("http-status", str(status))
+
+            media_type = _parsed_media_type(_header(response, "content-type"))
+            if media_type == "application/json":
+                await self._consume_atomic_json(response)
+            elif media_type == "text/event-stream":
+                await self._consume_sse(response)
+            else:
+                raise _StreamFault(
+                    "unexpected-content-type", media_type or "missing"
+                )
+        except asyncio.CancelledError:
+            raise
+        except _StreamFault as exc:
+            self._remote_fault(exc.classification, exc.detail)
+        except Exception as exc:
+            self._remote_fault("transport-error", type(exc).__name__)
+        finally:
+            if entered and manager is not None:
+                try:
+                    await manager.__aexit__(None, None, None)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if not self.result.ok and self.result.fault is None:
+                        self._remote_fault("transport-error", type(exc).__name__)
+
+    def _response_byte_iterator(self, response: Any) -> AsyncIterator[bytes]:
+        method = getattr(response, "aiter_bytes", None)
+        if method is None:
+            method = getattr(response, "aiter_raw", None)
+        if method is None:
+            raise _StreamFault("transport-error", "response has no byte iterator")
+        try:
+            return method(chunk_size=_SSE_READ_CHUNK_BYTES)
+        except TypeError:
+            return method()
+
+    async def _next_body_chunk(self, iterator: AsyncIterator[bytes]) -> bytes:
+        return await self._await_before(iterator.__anext__, self._read_deadlines())
+
+    async def _consume_atomic_json(self, response: Any) -> None:
+        iterator = self._response_byte_iterator(response)
+        raw = bytearray()
+        while True:
+            try:
+                chunk = await self._next_body_chunk(iterator)
+            except StopAsyncIteration:
+                break
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise _StreamFault("transport-error", "non-byte response chunk")
+            if len(raw) + len(chunk) > _MAX_SSE_STREAM_BYTES:
+                raise _StreamFault("stream-too-large")
+            raw.extend(chunk)
+
+        try:
+            decoded = bytes(raw).decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise _StreamFault("malformed-utf8") from exc
+        try:
+            body = json.loads(decoded)
+        except (TypeError, ValueError) as exc:
+            raise _StreamFault("malformed-json") from exc
+
+        final = _validate_final_object(body, strict_done=False)
+        self.result.canonical_reply = final.reply
+        self.result.focus = final.focus
+        self.result.done = final.done
+        self.result.ok = True
+        if final.reply:
+            await self._put_delegate_chunk(final.reply)
+        await self._put(_STREAM_END)
+
+    async def _consume_sse(self, response: Any) -> None:
+        iterator = self._response_byte_iterator(response)
+        line_buffer = bytearray()
+        stream_bytes = 0
+        event_bytes = 0
+        event_name: str | None = None
+        data_lines: list[str] = []
+        event_field_seen = False
+        ack_seen = False
+        delta_seen = False
+        terminal_kind: str | None = None
+        terminal_final: _ValidatedFinal | None = None
+        post_terminal_content = False
+
+        async def dispatch() -> None:
+            nonlocal ack_seen, delta_seen, terminal_kind, terminal_final
+            nonlocal event_name, data_lines, event_field_seen, event_bytes
+
+            name = (event_name or "").strip()
+            if terminal_kind is not None:
+                if terminal_kind == "final" and name == "final":
+                    raise _StreamFault("duplicate-final")
+                raise _StreamFault(f"event-after-{terminal_kind}")
+
+            try:
+                body = json.loads("\n".join(data_lines))
+            except (TypeError, ValueError) as exc:
+                raise _StreamFault("malformed-json") from exc
+
+            if name == "ack":
+                if (
+                    not isinstance(body, dict)
+                    or not isinstance(body.get("kind"), str)
+                    or body["kind"] not in _ACK_KINDS
+                ):
+                    raise _StreamFault("wrong-field-type")
+                if ack_seen:
+                    raise _StreamFault("duplicate-ack")
+                if delta_seen:
+                    raise _StreamFault("ack-after-delta")
+                ack_seen = True
+                self.result.ack_kind = body["kind"]
+            elif name == "delta":
+                if not isinstance(body, dict) or not isinstance(body.get("text"), str):
+                    raise _StreamFault("wrong-field-type")
+                delta_seen = True
+                text = body["text"]
+                self._delta_chars += len(text)
+                if self._delta_chars > _MAX_REPLY_CHARS:
+                    raise _StreamFault("reply-too-long")
+                safe = text.translate(_CONTROL_CHARS)
+                self._delta_parts.append(safe)
+                await self._put_delegate_chunk(safe)
+            elif name == "final":
+                terminal_final = _validate_final_object(body, strict_done=True)
+                terminal_kind = "final"
+            elif name == "error":
+                if not isinstance(body, dict):
+                    raise _StreamFault("wrong-field-type")
+                terminal_kind = "error"
+            else:
+                raise _StreamFault("unknown-event", name or "(missing)")
+
+            self._last_event_at = self._clock()
+            event_name = None
+            data_lines = []
+            event_field_seen = False
+            event_bytes = 0
+
+        while True:
+            try:
+                chunk = await self._next_body_chunk(iterator)
+            except StopAsyncIteration:
+                break
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise _StreamFault("transport-error", "non-byte response chunk")
+            stream_bytes += len(chunk)
+            if stream_bytes > _MAX_SSE_STREAM_BYTES:
+                raise _StreamFault("stream-too-large")
+            line_buffer.extend(chunk)
+            if b"\n" not in line_buffer and len(line_buffer) > _MAX_SSE_LINE_BYTES:
+                raise _StreamFault("line-too-large")
+
+            while True:
+                newline = line_buffer.find(b"\n")
+                if newline < 0:
+                    break
+                raw_line = bytes(line_buffer[:newline])
+                del line_buffer[: newline + 1]
+                if raw_line.endswith(b"\r"):
+                    raw_line = raw_line[:-1]
+                if len(raw_line) > _MAX_SSE_LINE_BYTES:
+                    raise _StreamFault("line-too-large")
+
+                if raw_line == b"":
+                    if event_field_seen or data_lines or event_name is not None:
+                        await dispatch()
+                    else:
+                        event_bytes = 0
+                    continue
+
+                if terminal_kind is not None:
+                    post_terminal_content = True
+                event_bytes += len(raw_line) + 1
+                if event_bytes > _MAX_SSE_EVENT_BYTES:
+                    raise _StreamFault("event-too-large")
+                try:
+                    line = raw_line.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise _StreamFault("malformed-utf8") from exc
+                if line.startswith(":"):
+                    continue
+
+                field_name, separator, value = line.partition(":")
+                if separator and value.startswith(" "):
+                    value = value[1:]
+                if field_name == "event":
+                    if event_name is not None:
+                        raise _StreamFault("malformed-sse", "duplicate event field")
+                    event_name = value
+                    event_field_seen = True
+                elif field_name == "data":
+                    data_lines.append(value)
+                    event_field_seen = True
+                elif field_name in {"id", "retry"}:
+                    # Standard SSE fields that have no meaning on this seam.
+                    event_field_seen = True
+                else:
+                    # The SSE specification ignores unknown fields. Event *types*
+                    # remain strict and are rejected in dispatch().
+                    event_field_seen = True
+
+        if line_buffer or event_field_seen or data_lines or event_name is not None:
+            if terminal_kind is not None:
+                raise _StreamFault(f"event-after-{terminal_kind}")
+            raise _StreamFault("eof-without-final")
+        if post_terminal_content:
+            raise _StreamFault(f"event-after-{terminal_kind}")
+        if terminal_kind == "error":
+            raise _StreamFault("remote-error")
+        if terminal_kind != "final" or terminal_final is None:
+            raise _StreamFault("eof-without-final")
+
+        self.result.canonical_reply = terminal_final.reply
+        self.result.focus = terminal_final.focus
+        self.result.done = terminal_final.done
+        emitted = "".join(self._delta_parts)
+        if delta_seen and emitted != terminal_final.reply:
+            self.result.delta_mismatch = True
+            log.warning(
+                "delegate stream %s final reply diverged from deltas",
+                safe_url_for_log(self._url),
+            )
+        self.result.ok = True
+        if not self._had_delegate_chunk and terminal_final.reply:
+            await self._put_delegate_chunk(terminal_final.reply)
+        await self._put(_STREAM_END)
+
+
+def stream_delegate(
+    client: Any,
+    url: str,
+    text: str,
+    *,
+    who: str,
+    connect_timeout: float = DELEGATE_CONNECT_TIMEOUT_S,
+    first_event_timeout: float = DELEGATE_TIMEOUT_S,
+    idle_timeout: float = DELEGATE_IDLE_TIMEOUT_S,
+    wall_timeout: float = DELEGATE_WALL_TIMEOUT_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> DelegateStream:
+    """Start a v1 turn lazily and return its chunks plus terminal result.
+
+    No network work begins until the first ``__anext__``. The returned object is
+    both the async iterator and the owner of ``.result``; it can alternatively
+    be unpacked as ``chunks, result``.
+    """
+    for name, value in (
+        ("connect_timeout", connect_timeout),
+        ("first_event_timeout", first_event_timeout),
+        ("idle_timeout", idle_timeout),
+        ("wall_timeout", wall_timeout),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    return DelegateStream(
+        client,
+        url,
+        text,
+        who=who,
+        connect_timeout=connect_timeout,
+        first_event_timeout=first_event_timeout,
+        idle_timeout=idle_timeout,
+        wall_timeout=wall_timeout,
+        clock=clock,
+    )
 
 
 # ── conversation start (contract v0.1) ───────────────────────────────────────
