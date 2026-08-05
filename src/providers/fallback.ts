@@ -39,6 +39,22 @@ export interface CompleteAttempt<T> {
 }
 
 /**
+ * Run exactly one non-streaming model with a request deadline. This is kept
+ * separate from completeWithFallback so the long-wait, primary-only path can
+ * never accidentally advance to another attempt.
+ */
+export async function completeWithDeadline<T>(
+  attempt: CompleteAttempt<T>,
+  timeoutMs: number
+): Promise<T> {
+  const result = await raceTimeout(attempt.run(), timeoutMs);
+  if (result === TIMED_OUT) {
+    throw new Error(`Model ${attempt.label} timed out after ${timeoutMs}ms`);
+  }
+  return result;
+}
+
+/**
  * Non-streaming fallback. Try each attempt in order; move on when one throws
  * or (for all but the last) exceeds `timeoutMs`. The LAST attempt gets no
  * deadline — a slow answer beats no answer. Returns the first success; throws
@@ -82,6 +98,36 @@ export interface StreamAttempt {
 /** A first meaningful token — text or a tool call — commits us to a stream. */
 function isFirstToken(ev: StreamEvent): boolean {
   return ev.type === 'text' || ev.type === 'tool_calls';
+}
+
+/**
+ * Stream exactly one model, enforcing a deadline only until its first
+ * meaningful event. Once text or a tool call arrives, the stream is committed
+ * and may finish at its own pace. A timed-out generator is closed best-effort
+ * without awaiting return(): an async generator can have next() blocked on the
+ * provider, and awaiting return() would defeat the deadline.
+ */
+export async function* streamWithDeadline(
+  attempt: StreamAttempt,
+  timeoutMs: number
+): AsyncGenerator<StreamEvent> {
+  const gen = attempt.run();
+  let emittedFirst = false;
+  try {
+    while (true) {
+      const step = emittedFirst ? await gen.next() : await raceTimeout(gen.next(), timeoutMs);
+      if (step === TIMED_OUT) {
+        throw new Error(`Model ${attempt.label} produced no first token in ${timeoutMs}ms`);
+      }
+      if (step.done) return;
+      if (isFirstToken(step.value)) emittedFirst = true;
+      yield step.value;
+    }
+  } finally {
+    if (!emittedFirst) {
+      void gen.return(undefined as unknown as StreamEvent).catch(() => {});
+    }
+  }
 }
 
 /**

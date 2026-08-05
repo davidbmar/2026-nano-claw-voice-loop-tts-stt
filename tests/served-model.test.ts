@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ProviderManager } from '../src/providers';
 import type { Config } from '../src/config/schema';
 import type { LLMResponse, Message, StreamEvent } from '../src/types';
@@ -20,6 +20,7 @@ const config = {
 } as unknown as Config;
 
 const messages: Message[] = [{ role: 'user', content: 'hi' }];
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function fakeProvider(opts: { fail?: boolean; text: string }) {
   return {
@@ -113,5 +114,73 @@ describe('served-model attribution', () => {
     expect(
       events.filter((e) => e.type === 'text').map((e) => (e as { delta: string }).delta)
     ).toEqual(['hedge wins']);
+  });
+
+  it('pins a slow non-streaming primary and never calls the fast fallback', async () => {
+    const primaryComplete = vi.fn(async () => {
+      await delay(70); // slower than the configured 40ms fallback budget
+      return { content: 'slow local' };
+    });
+    const fallbackComplete = vi.fn(async () => ({ content: 'fast paid' }));
+    const pm = new ProviderManager(config);
+    const cache = (pm as unknown as { providerCache: Map<string, unknown> }).providerCache;
+    cache.set('ollama', { complete: primaryComplete });
+    cache.set('gemini', { complete: fallbackComplete });
+
+    const response = await pm.complete(
+      messages,
+      'ollama/gemma4:e2b',
+      undefined,
+      undefined,
+      undefined,
+      { fallbacks: false }
+    );
+
+    expect(response.content).toBe('slow local');
+    expect(response.model).toBe('ollama/gemma4:e2b');
+    expect(primaryComplete).toHaveBeenCalledOnce();
+    expect(primaryComplete.mock.calls[0][5]).toEqual({ timeoutMs: 120_000 });
+    expect(fallbackComplete).not.toHaveBeenCalled();
+  });
+
+  it('pins a slow streaming primary without starting the configured hedge', async () => {
+    const hedgedConfig = {
+      ...config,
+      agents: {
+        defaults: {
+          fallbackModels: ['gemini/gemini-flash-lite-latest'],
+          fallbackTimeoutMs: 40,
+          fallbackHedgeMs: 10,
+        },
+      },
+    } as unknown as Config;
+    const primaryStream = vi.fn(async function* (): AsyncGenerator<StreamEvent> {
+      await delay(70); // the paid hedge would win if it were allowed to start
+      yield { type: 'text', delta: 'slow local' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    const fallbackStream = vi.fn(async function* (): AsyncGenerator<StreamEvent> {
+      yield { type: 'text', delta: 'fast paid' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    const pm = new ProviderManager(hedgedConfig);
+    const cache = (pm as unknown as { providerCache: Map<string, unknown> }).providerCache;
+    cache.set('ollama', { completeStream: primaryStream });
+    cache.set('gemini', { completeStream: fallbackStream });
+
+    const events = await collect(
+      pm.completeStream(messages, 'ollama/gemma4:e2b', undefined, undefined, undefined, {
+        fallbacks: false,
+        firstTokenTimeoutMs: 250,
+      })
+    );
+
+    expect(events.filter((event) => event.type === 'text').map((event) => event.delta)).toEqual([
+      'slow local',
+    ]);
+    expect(primaryStream).toHaveBeenCalledOnce();
+    expect(primaryStream.mock.calls[0][5]).toEqual({ timeoutMs: 250 });
+    expect(fallbackStream).not.toHaveBeenCalled();
+    expect(events.find((event) => event.type === 'done')?.model).toBe('ollama/gemma4:e2b');
   });
 });

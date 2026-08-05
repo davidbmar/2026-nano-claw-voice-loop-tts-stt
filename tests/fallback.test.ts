@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  completeWithDeadline,
   completeWithFallback,
+  streamWithDeadline,
   streamWithFallback,
   streamWithHedge,
   raceTimeout,
@@ -29,6 +31,34 @@ describe('raceTimeout', () => {
   });
   it('returns TIMED_OUT when the promise is too slow', async () => {
     expect(await raceTimeout(delay(50).then(() => 42), 10)).toBe(TIMED_OUT);
+  });
+});
+
+describe('primary-only deadlines', () => {
+  it('caps a non-streaming primary without another attempt', async () => {
+    await expect(
+      completeWithDeadline(
+        {
+          label: 'local',
+          run: async () => {
+            await delay(40);
+            return 'late';
+          },
+        },
+        5,
+      ),
+    ).rejects.toThrow('Model local timed out after 5ms');
+  });
+
+  it('caps time to first token for a primary-only stream', async () => {
+    async function* stalled(): AsyncGenerator<StreamEvent> {
+      await delay(40);
+      yield { type: 'text', delta: 'late' };
+    }
+
+    await expect(
+      collect(streamWithDeadline({ label: 'local', run: () => stalled() }, 5)),
+    ).rejects.toThrow('Model local produced no first token in 5ms');
   });
 });
 

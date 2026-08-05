@@ -18,7 +18,7 @@ import {
   LLMResponse,
   RuntimeSettings,
 } from '../types';
-import { ProviderManager } from '../providers/index';
+import { ProviderManager, type ProviderRequestOptions } from '../providers/index';
 import {
   Memory,
   assertValidSessionId,
@@ -73,6 +73,8 @@ import type { AnalysisNavigationDecision } from '../agent/analysis-navigation';
 interface DebugInfo {
   iteration: number;
   messageCount: number;
+  /** Present only when this request explicitly pinned the primary model. */
+  fallbacksDisabled?: true;
   /** Model that actually served the turn (fallback-aware). */
   model: string;
   /** Present only when a fallback answered: the model originally asked for. */
@@ -136,6 +138,7 @@ interface PendingToolState {
   iteration: number;
   agentConfig: AgentConfig;
   evalTrace: boolean;
+  providerOptions?: ProviderRequestOptions;
 }
 
 type ApiResponse =
@@ -217,7 +220,10 @@ export function __setProviderManagerForTest(pm: unknown): void {
 }
 
 /** Fast-model completion used by the reflect-hydrate-affirm gate (task 063). */
-function hydrationCompleter(agentConfig: AgentConfig): HydrationComplete {
+function hydrationCompleter(
+  agentConfig: AgentConfig,
+  providerOptions?: ProviderRequestOptions
+): HydrationComplete {
   return async (systemPrompt, userPrompt) => {
     const response = await providerManager.complete(
       [
@@ -227,7 +233,8 @@ function hydrationCompleter(agentConfig: AgentConfig): HydrationComplete {
       agentConfig.model,
       0,
       400,
-      []
+      [],
+      providerOptions
     );
     return response.content;
   };
@@ -517,6 +524,12 @@ function evalTraceDebug(
     : undefined;
 }
 
+function providerPolicyDebug(
+  options?: ProviderRequestOptions
+): Pick<DebugInfo, 'fallbacksDisabled'> {
+  return options?.fallbacks === false ? { fallbacksDisabled: true } : {};
+}
+
 // ── Stepped agent loop ───────────────────────────────────────
 
 const MAX_ITERATIONS = 10;
@@ -555,7 +568,8 @@ async function stepLoop(
   memory: Memory,
   agentConfig: AgentConfig,
   iteration: number,
-  evalTrace = false
+  evalTrace = false,
+  providerOptions?: ProviderRequestOptions
 ): Promise<ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -581,6 +595,7 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
+          ...providerPolicyDebug(providerOptions),
           model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: `knowledge_scope_${preparedScope.action}`,
@@ -614,7 +629,7 @@ async function stepLoop(
             messages,
             routed,
             turnConfig.intelligence,
-            hydrationCompleter(turnConfig)
+            hydrationCompleter(turnConfig, providerOptions)
           )
         : routed.deep && !analysisTurn?.result
           ? { kind: 'run' as const, route: routed }
@@ -627,6 +642,7 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
+          ...providerPolicyDebug(providerOptions),
           model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: 'deep_affirmation_requested',
@@ -663,6 +679,7 @@ async function stepLoop(
         debug: {
           iteration,
           messageCount,
+          ...providerPolicyDebug(providerOptions),
           model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: deepResult.errorCode || deepResult.status,
@@ -710,7 +727,8 @@ async function stepLoop(
       turnConfig.model,
       turnConfig.temperature,
       turnConfig.maxTokens,
-      modelTools
+      modelTools,
+      providerOptions
     );
     const voiceGuard = guardAnalysisVoiceResponse(response.content, deepResult);
     const coverageGuard = turnConfig.intelligence?.enabled
@@ -722,6 +740,7 @@ async function stepLoop(
     const debug: DebugInfo = {
       iteration,
       messageCount,
+      ...providerPolicyDebug(providerOptions),
       model: response.model ?? turnConfig.model,
       ...(response.model &&
         response.model !== turnConfig.model && { requestedModel: turnConfig.model }),
@@ -806,6 +825,7 @@ async function stepLoop(
         iteration,
         agentConfig: turnConfig,
         evalTrace,
+        providerOptions,
       });
       pendingTimestamps.set(requestId, Date.now());
 
@@ -835,6 +855,7 @@ async function stepLoop(
     debug: {
       iteration: MAX_ITERATIONS,
       messageCount: memory.getMessages().length,
+      ...providerPolicyDebug(providerOptions),
       model: agentConfig.model,
       durationMs: 0,
       finishReason: 'max_iterations',
@@ -851,7 +872,8 @@ export async function* stepLoopStream(
   agentConfig: AgentConfig,
   iteration: number,
   signal?: AbortSignal,
-  evalTrace = false
+  evalTrace = false,
+  providerOptions?: ProviderRequestOptions
 ): AsyncGenerator<StreamEvent | ApiResponse> {
   initShared();
   const toolRegistry = createToolRegistry();
@@ -877,6 +899,7 @@ export async function* stepLoopStream(
         debug: {
           iteration,
           messageCount,
+          ...providerPolicyDebug(providerOptions),
           model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: `knowledge_scope_${preparedScope.action}`,
@@ -916,7 +939,7 @@ export async function* stepLoopStream(
             messages,
             routed,
             turnConfig.intelligence,
-            hydrationCompleter(turnConfig)
+            hydrationCompleter(turnConfig, providerOptions)
           )
         : routed.deep && !analysisTurn?.result
           ? { kind: 'run' as const, route: routed }
@@ -930,6 +953,7 @@ export async function* stepLoopStream(
         debug: {
           iteration,
           messageCount,
+          ...providerPolicyDebug(providerOptions),
           model: turnConfig.model,
           durationMs: Date.now() - startTime,
           finishReason: 'deep_affirmation_requested',
@@ -1009,6 +1033,7 @@ export async function* stepLoopStream(
           debug: {
             iteration,
             messageCount,
+            ...providerPolicyDebug(providerOptions),
             model: turnConfig.model,
             durationMs: Date.now() - startTime,
             finishReason: failed.errorCode || failed.status,
@@ -1060,7 +1085,8 @@ export async function* stepLoopStream(
       turnConfig.model,
       turnConfig.temperature,
       turnConfig.maxTokens,
-      modelTools
+      modelTools,
+      providerOptions
     )) {
       if (ev.type === 'text') {
         text += ev.delta;
@@ -1090,6 +1116,7 @@ export async function* stepLoopStream(
     const debug: DebugInfo = {
       iteration,
       messageCount,
+      ...providerPolicyDebug(providerOptions),
       model: servedModel ?? turnConfig.model,
       ...(servedModel &&
         servedModel !== turnConfig.model && { requestedModel: turnConfig.model }),
@@ -1155,6 +1182,7 @@ export async function* stepLoopStream(
         iteration,
         agentConfig: turnConfig,
         evalTrace,
+        providerOptions,
       });
       pendingTimestamps.set(requestId, Date.now());
       yield {
@@ -1180,6 +1208,7 @@ export async function* stepLoopStream(
     debug: {
       iteration: MAX_ITERATIONS,
       messageCount: memory.getMessages().length,
+      ...providerPolicyDebug(providerOptions),
       model: agentConfig.model,
       durationMs: 0,
       finishReason: 'max_iterations',
@@ -1333,6 +1362,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     evalTrace?: unknown;
     runtimeSettings?: unknown;
     documentScope?: unknown;
+    fallbacks?: unknown;
+    firstTokenTimeoutMs?: unknown;
   } | null;
   if (!body || typeof body.message !== 'string' || !body.message.trim()) {
     sendJson(res, 400, { error: 'Missing or empty "message" field' });
@@ -1362,6 +1393,19 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sendJson(res, 400, { error: 'Invalid "evalTrace" field' });
     return;
   }
+  if (body.fallbacks !== undefined && typeof body.fallbacks !== 'boolean') {
+    sendJson(res, 400, { error: 'Invalid "fallbacks" field' });
+    return;
+  }
+  if (
+    body.firstTokenTimeoutMs !== undefined &&
+    (typeof body.firstTokenTimeoutMs !== 'number' ||
+      !Number.isFinite(body.firstTokenTimeoutMs) ||
+      body.firstTokenTimeoutMs <= 0)
+  ) {
+    sendJson(res, 400, { error: 'Invalid "firstTokenTimeoutMs" field' });
+    return;
+  }
   if (body.evalTrace === true && !isEvalTraceEnabled()) {
     sendJson(res, 403, {
       error: 'Evaluation trace is disabled',
@@ -1389,16 +1433,32 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sanitizeRuntimeSettings(body.runtimeSettings),
     parseDocumentScope(body.documentScope)
   );
+  const providerOptions: ProviderRequestOptions | undefined =
+    body.fallbacks === false || body.firstTokenTimeoutMs !== undefined
+      ? {
+          ...(body.fallbacks === false && { fallbacks: false }),
+          ...(body.firstTokenTimeoutMs !== undefined && {
+            firstTokenTimeoutMs: body.firstTokenTimeoutMs,
+          }),
+        }
+      : undefined;
   if (wantsStream(req)) {
     const controller = new AbortController();
     res.once('close', () => controller.abort());
     await streamLoopToSSE(
       res,
-      stepLoopStream(memory, agentConfig, 0, controller.signal, body.evalTrace === true)
+      stepLoopStream(
+        memory,
+        agentConfig,
+        0,
+        controller.signal,
+        body.evalTrace === true,
+        providerOptions
+      )
     );
     return;
   }
-  const result = await stepLoop(memory, agentConfig, 0, body.evalTrace === true);
+  const result = await stepLoop(memory, agentConfig, 0, body.evalTrace === true, providerOptions);
   sendJson(res, 200, result);
 }
 
@@ -1461,7 +1521,8 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
         pending.agentConfig,
         pending.iteration,
         undefined,
-        pending.evalTrace
+        pending.evalTrace,
+        pending.providerOptions
       )
     );
     return;
@@ -1470,7 +1531,8 @@ async function handleApprove(req: http.IncomingMessage, res: http.ServerResponse
     pending.memory,
     pending.agentConfig,
     pending.iteration,
-    pending.evalTrace
+    pending.evalTrace,
+    pending.providerOptions
   );
   sendJson(res, 200, result);
 }
@@ -1516,7 +1578,8 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
         pending.agentConfig,
         pending.iteration,
         undefined,
-        pending.evalTrace
+        pending.evalTrace,
+        pending.providerOptions
       )
     );
     return;
@@ -1525,7 +1588,8 @@ async function handleReject(req: http.IncomingMessage, res: http.ServerResponse)
     pending.memory,
     pending.agentConfig,
     pending.iteration,
-    pending.evalTrace
+    pending.evalTrace,
+    pending.providerOptions
   );
   sendJson(res, 200, result);
 }

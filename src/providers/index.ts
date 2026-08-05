@@ -2,14 +2,36 @@ import { Config } from '../config/schema';
 import { Message, LLMResponse, ToolDefinition, ProviderConfig, StreamEvent } from '../types';
 import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
-import { BaseProvider, OpenRouterProvider, AnthropicProvider, OpenAIProvider, OllamaProvider } from './base';
+import {
+  BaseProvider,
+  OpenRouterProvider,
+  AnthropicProvider,
+  OpenAIProvider,
+  OllamaProvider,
+  type ProviderCallOptions,
+} from './base';
 import { findProviderByModel } from './registry';
-import { completeWithFallback, streamWithFallback, streamWithHedge } from './fallback';
+import {
+  completeWithDeadline,
+  completeWithFallback,
+  streamWithDeadline,
+  streamWithFallback,
+  streamWithHedge,
+} from './fallback';
 
 /** Gateway providers that can route an arbitrary model id (so a fallback model
  * is reachable even without its own direct provider key). */
 const GATEWAY_PROVIDERS = ['openrouter', 'aihubmix'];
 const DEFAULT_FALLBACK_TIMEOUT_MS = 4000;
+export const DEFAULT_PINNED_FIRST_TOKEN_TIMEOUT_MS = 120_000;
+
+/** Per-request model-routing controls. Omitted values preserve config policy. */
+export interface ProviderRequestOptions {
+  /** False pins the request to its resolved primary model. */
+  fallbacks?: boolean;
+  /** First-token deadline (whole-response deadline for non-streaming calls). */
+  firstTokenTimeoutMs?: number;
+}
 
 /**
  * Provider manager - handles provider selection and instantiation
@@ -188,6 +210,29 @@ export class ProviderManager {
     return this.config.agents?.defaults?.fallbackTimeoutMs ?? DEFAULT_FALLBACK_TIMEOUT_MS;
   }
 
+  private requestTimeoutMs(options?: ProviderRequestOptions): number {
+    if (options?.firstTokenTimeoutMs !== undefined) {
+      if (!Number.isFinite(options.firstTokenTimeoutMs) || options.firstTokenTimeoutMs <= 0) {
+        throw new ProviderError('firstTokenTimeoutMs must be a positive finite number');
+      }
+      return options.firstTokenTimeoutMs;
+    }
+    return options?.fallbacks === false
+      ? DEFAULT_PINNED_FIRST_TOKEN_TIMEOUT_MS
+      : this.fallbackTimeoutMs();
+  }
+
+  private providerCallOptions(
+    options: ProviderRequestOptions | undefined,
+    timeoutMs: number
+  ): ProviderCallOptions | undefined {
+    // Preserve the providers' existing transport timeout unless this request
+    // explicitly opts into a deadline policy (including the pinned default).
+    return options?.fallbacks === false || options?.firstTokenTimeoutMs !== undefined
+      ? { timeoutMs }
+      : undefined;
+  }
+
   /**
    * Complete a chat conversation, falling back through the configured model
    * chain on error or timeout. With no fallbacks configured the chain is just
@@ -198,30 +243,34 @@ export class ProviderManager {
     model: string,
     temperature?: number,
     maxTokens?: number,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderRequestOptions
   ): Promise<LLMResponse> {
-    const chain = this.resolveModelChain(model);
-    return completeWithFallback(
-      chain.map((m) => ({
-        label: m,
-        run: async () => {
-          const providerName = this.detectProvider(m);
-          logger.info(
-            { provider: providerName, model: m, messageCount: messages.length },
-            'Completing chat'
-          );
-          const response = await this.getProviderInstance(providerName).complete(
-            messages,
-            m,
-            temperature,
-            maxTokens,
-            tools
-          );
-          return { ...response, model: m };
-        },
-      })),
-      this.fallbackTimeoutMs()
-    );
+    const fallbacksEnabled = options?.fallbacks !== false;
+    const chain = fallbacksEnabled ? this.resolveModelChain(model) : [model];
+    const timeoutMs = this.requestTimeoutMs(options);
+    const callOptions = this.providerCallOptions(options, timeoutMs);
+    const attempts = chain.map((m) => ({
+      label: m,
+      run: async () => {
+        const providerName = this.detectProvider(m);
+        logger.info(
+          { provider: providerName, model: m, messageCount: messages.length },
+          'Completing chat'
+        );
+        const response = await this.getProviderInstance(providerName).complete(
+          messages,
+          m,
+          temperature,
+          maxTokens,
+          tools,
+          callOptions
+        );
+        return { ...response, model: m };
+      },
+    }));
+    if (!fallbacksEnabled) return completeWithDeadline(attempts[0], timeoutMs);
+    return completeWithFallback(attempts, timeoutMs);
   }
 
   /**
@@ -235,9 +284,13 @@ export class ProviderManager {
     model: string,
     temperature?: number,
     maxTokens?: number,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderRequestOptions
   ): AsyncGenerator<StreamEvent> {
-    const chain = this.resolveModelChain(model);
+    const fallbacksEnabled = options?.fallbacks !== false;
+    const chain = fallbacksEnabled ? this.resolveModelChain(model) : [model];
+    const timeoutMs = this.requestTimeoutMs(options);
+    const callOptions = this.providerCallOptions(options, timeoutMs);
     const attempts = chain.map((m) => ({
       label: m,
       run: () => {
@@ -252,17 +305,27 @@ export class ProviderManager {
             m,
             temperature,
             maxTokens,
-            tools
+            tools,
+            callOptions
           ),
           m
         );
       },
     }));
+    if (!fallbacksEnabled) {
+      yield* streamWithDeadline(attempts[0], timeoutMs);
+      return;
+    }
     const hedgeMs = this.config.agents?.defaults?.fallbackHedgeMs;
     if (hedgeMs != null && attempts.length > 1) {
-      yield* streamWithHedge(attempts, hedgeMs);
+      const hedged = streamWithHedge(attempts, hedgeMs);
+      if (options?.firstTokenTimeoutMs !== undefined) {
+        yield* streamWithDeadline({ label: model, run: () => hedged }, timeoutMs);
+      } else {
+        yield* hedged;
+      }
     } else {
-      yield* streamWithFallback(attempts, this.fallbackTimeoutMs());
+      yield* streamWithFallback(attempts, timeoutMs);
     }
   }
 }

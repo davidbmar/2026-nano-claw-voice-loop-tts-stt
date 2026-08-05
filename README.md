@@ -89,6 +89,29 @@ responds with a single application/json body instead of SSE, and the voice
 server speaks (and sends) the full reply at once.
 ```
 
+#### Per-request model pinning
+
+`POST /api/chat` accepts two optional routing fields for both JSON and SSE
+responses:
+
+```json
+{
+  "message": "Run the local canary",
+  "fallbacks": false,
+  "firstTokenTimeoutMs": 120000
+}
+```
+
+Setting `fallbacks` to `false` pins the entire agent turn to its resolved
+primary model: configured fallback models are neither tried nor hedged. The
+primary gets 120 seconds to produce its first token by default;
+`firstTokenTimeoutMs` overrides that positive millisecond deadline (and is a
+whole-response deadline on the non-streaming path). Omitting the fields, or
+setting `fallbacks` to `true`, preserves the configured fallback behavior.
+Unknown request fields remain ignored. A pinned response includes
+`debug.fallbacksDisabled: true`, while `debug.model` continues to report the
+model that actually answered.
+
 ### Voices
 
 The picker defaults to `af_heart` (Kokoro, American English, grade A). It's

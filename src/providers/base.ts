@@ -6,6 +6,11 @@ import { ProviderError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { PROVIDERS } from './registry';
 
+/** Per-call transport controls supplied by ProviderManager. */
+export interface ProviderCallOptions {
+  timeoutMs?: number;
+}
+
 /**
  * Read a Node Readable SSE body and yield {event, data} frames.
  * Frames are separated by a blank line; `event:` and `data:` lines accumulate.
@@ -228,7 +233,8 @@ export abstract class BaseProvider {
     model: string,
     temperature?: number,
     maxTokens?: number,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): Promise<LLMResponse>;
 
   /**
@@ -240,9 +246,10 @@ export abstract class BaseProvider {
     model: string,
     temperature?: number,
     maxTokens?: number,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): AsyncGenerator<StreamEvent> {
-    const res = await this.complete(messages, model, temperature, maxTokens, tools);
+    const res = await this.complete(messages, model, temperature, maxTokens, tools, options);
     if (res.content) yield { type: 'text', delta: res.content };
     if (res.toolCalls && res.toolCalls.length > 0) {
       yield { type: 'tool_calls', toolCalls: res.toolCalls };
@@ -296,7 +303,8 @@ export class OpenRouterProvider extends BaseProvider {
     model: string,
     temperature = 0.7,
     maxTokens = 4096,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): Promise<LLMResponse> {
     try {
       const requestData: Record<string, unknown> = {
@@ -316,7 +324,11 @@ export class OpenRouterProvider extends BaseProvider {
         requestData.tools = tools;
       }
 
-      const response = await this.client.post('/chat/completions', requestData);
+      const response = await this.client.post(
+        '/chat/completions',
+        requestData,
+        options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined
+      );
 
       const choice = response.data.choices[0];
       const message = choice.message;
@@ -440,7 +452,8 @@ export class AnthropicProvider extends BaseProvider {
     model: string,
     temperature = 0.7,
     maxTokens = 4096,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): Promise<LLMResponse> {
     try {
       // Extract system message
@@ -474,6 +487,7 @@ export class AnthropicProvider extends BaseProvider {
           'anthropic-version': '2023-06-01',
           'x-api-key': this.apiKey,
         },
+        ...(options?.timeoutMs !== undefined && { timeout: options.timeoutMs }),
       });
 
       // Extract text and tool_use blocks from response content
@@ -519,7 +533,8 @@ export class AnthropicProvider extends BaseProvider {
     model: string,
     temperature = 0.7,
     maxTokens = 4096,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): AsyncGenerator<StreamEvent> {
     const systemMessage = messages.find((m) => m.role === 'system')?.content || '';
     const nonSystemMessages = messages.filter((m) => m.role !== 'system');
@@ -546,6 +561,7 @@ export class AnthropicProvider extends BaseProvider {
       response = await this.client.post('/messages', requestData, {
         responseType: 'stream',
         headers: { 'anthropic-version': '2023-06-01', 'x-api-key': this.apiKey },
+        ...(options?.timeoutMs !== undefined && { timeout: options.timeoutMs }),
       });
     } catch (error) {
       logger.error({ error }, 'Anthropic API error');
@@ -592,7 +608,8 @@ export class OpenAIProvider extends BaseProvider {
     model: string,
     temperature = 0.7,
     maxTokens = 4096,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): Promise<LLMResponse> {
     try {
       const requestData: Record<string, unknown> = {
@@ -613,7 +630,11 @@ export class OpenAIProvider extends BaseProvider {
         requestData.tools = tools;
       }
 
-      const response = await this.client.post('/chat/completions', requestData);
+      const response = await this.client.post(
+        '/chat/completions',
+        requestData,
+        options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : undefined
+      );
 
       const choice = response.data.choices[0];
       const message = choice.message;
@@ -642,7 +663,12 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   async *completeStream(
-    messages: Message[], model: string, temperature = 0.7, maxTokens = 4096, tools?: ToolDefinition[]
+    messages: Message[],
+    model: string,
+    temperature = 0.7,
+    maxTokens = 4096,
+    tools?: ToolDefinition[],
+    options?: ProviderCallOptions
   ): AsyncGenerator<StreamEvent> {
     const requestData: Record<string, unknown> = {
       model: this.formatModelName(model),
@@ -659,7 +685,10 @@ export class OpenAIProvider extends BaseProvider {
     if (tools && tools.length > 0) requestData.tools = tools;
     let response;
     try {
-      response = await this.client.post('/chat/completions', requestData, { responseType: 'stream' });
+      response = await this.client.post('/chat/completions', requestData, {
+        responseType: 'stream',
+        ...(options?.timeoutMs !== undefined && { timeout: options.timeoutMs }),
+      });
     } catch (error) {
       logger.error({ error }, 'OpenAI API error');
       if (axios.isAxiosError(error)) {
