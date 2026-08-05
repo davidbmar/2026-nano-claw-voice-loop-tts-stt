@@ -24,12 +24,21 @@ export const MODEL_CATALOG: CatalogModel[] = [
   },
   { id: 'dashscope/qwen-plus', label: 'Qwen Plus (Alibaba)', provider: 'dashscope' },
   { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini', provider: 'openai' },
-  // Local Ollama on the Mac host (Metal), reached via host.docker.internal.
-  // gemma4 models are thinking-capable; OllamaProvider sends
+  // Local Ollama. gemma4 models are thinking-capable; OllamaProvider sends
   // reasoning_effort:"none" so they answer immediately on the voice path.
+  //
+  // WHICH of these resolve depends on providers.ollama.apiBase — the M3 host
+  // and the M5 box hold different model sets. gemma4:26b exists only on the
+  // M5; gemma3:1b/270m exist only on the M3. Pointing apiBase at the other
+  // host silently 404s the entries it doesn't have.
+  //
+  // Measured (3 runs each, riff eval, 11 scenarios): 26b scores 10.33 — level
+  // with Gemini Flash-Lite and DeepSeek, for free. e2b scores 5.00 and e4b
+  // 4.00, so the usable capability cliff sits between 8B and 26B.
+  { id: 'ollama/gemma4:26b', label: 'Gemma4 26B (local, M5)', provider: 'ollama' },
   { id: 'ollama/gemma4:e2b', label: 'Gemma4 E2B (local)', provider: 'ollama' },
-  { id: 'ollama/gemma3:1b', label: 'Gemma3 1B (local)', provider: 'ollama' },
-  { id: 'ollama/gemma3:270m', label: 'Gemma3 270M (local)', provider: 'ollama' },
+  { id: 'ollama/gemma3:1b', label: 'Gemma3 1B (local, M3 only)', provider: 'ollama' },
+  { id: 'ollama/gemma3:270m', label: 'Gemma3 270M (local, M3 only)', provider: 'ollama' },
 ];
 
 export const DEFAULT_MODEL = 'anthropic/claude-haiku-4-5';

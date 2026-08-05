@@ -128,7 +128,18 @@ function envInt(name: string): number | undefined {
  */
 export function mergeEnvConfig(config: Config): Config {
   // Check for provider API keys in environment variables
-  const envProviders: Record<string, { apiKey: string }> = {};
+  const envProviders: Record<string, { apiKey?: string; apiBase?: string }> = {};
+
+  // Ollama needs no key, but its endpoint IS deployment-specific: the local
+  // Docker host, or a bigger box on the LAN holding models this machine has no
+  // memory for. Keep it in env so moving the local model to another host is a
+  // restart with a changed variable, not a hand-edit of config.json inside a
+  // running container. Note the model catalog is host-dependent — a host that
+  // lacks a catalogued model 404s that entry (see src/agent/models.ts).
+  const ollamaBase = process.env.NANO_CLAW_OLLAMA_BASE?.trim();
+  if (ollamaBase) {
+    envProviders.ollama = { apiBase: ollamaBase };
+  }
 
   if (process.env.OPENROUTER_API_KEY) {
     envProviders.openrouter = { apiKey: process.env.OPENROUTER_API_KEY };
