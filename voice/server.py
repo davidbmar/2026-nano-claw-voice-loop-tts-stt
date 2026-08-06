@@ -722,6 +722,12 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
             elif msg_type == "mic_start":
                 if session:
+                    # Re-read the mode each turn so switching the dropdown takes
+                    # effect on the next thing said, without a reconnect.
+                    _call_compat(
+                        getattr(session, "set_continuous_capture", lambda *_: None),
+                        is_transcribe_mode(),
+                    )
                     session.start_recording()
 
             elif msg_type == "mic_stop":

@@ -23,6 +23,9 @@ from voice.text_chunker import clean_for_speech
 FRAME_SAMPLES = 960  # 20ms at 48kHz
 SAMPLE_RATE = 48000
 MIC_PREROLL_FRAMES = 30  # 600ms: preserves the first word while VAD opens
+# Backstop for continuous capture. Only reachable if VAD stops cutting turns
+# entirely; at 16kHz mono PCM16 this is ~3.8MB.
+MAX_CONTINUOUS_SECONDS = 120
 
 log = logging.getLogger("webrtc")
 
@@ -91,6 +94,10 @@ class Session:
 
         # Mic recording state
         self._recording = False
+        # Keep every frame, including between turns. Off by default: the normal
+        # turn-taking path WANTS the gap, because it is when the assistant is
+        # talking and the mic would otherwise record our own playback.
+        self._continuous = False
         self._mic_frames: list[bytes] = []
         self._mic_preroll: deque[bytes] = deque(maxlen=MIC_PREROLL_FRAMES)
         self._mic_track = None
@@ -163,8 +170,62 @@ class Session:
         log.info("SDP answer created")
         return self._pc.localDescription.sdp
 
+    def set_continuous_capture(self, enabled: bool) -> None:
+        """Keep every mic frame, including between turns.
+
+        For transcribe mode, where a gap in the record is the one unacceptable
+        outcome. Normal turn-taking leaves this off on purpose: there, the gap
+        between turns is the assistant speaking, and recording through it would
+        feed our own playback back into STT.
+
+        Turning it on does not change how turns are segmented — VAD still ends
+        them on a pause. It changes only what happens to audio arriving while a
+        turn is not open, which today is overwritten inside a 600ms ring.
+        """
+
+        if enabled and not self._continuous:
+            # Adopt whatever the pre-roll still holds so the switch itself does
+            # not start with a hole.
+            self._mic_frames.extend(self._mic_preroll)
+            self._mic_preroll.clear()
+        self._continuous = bool(enabled)
+
+    def _trim_continuous_backlog(self) -> None:
+        """Bound the buffer so a monologue cannot exhaust memory.
+
+        A backstop, not a policy: VAD normally flushes every few seconds, so
+        reaching this means turns stopped being cut at all. Dropping the OLDEST
+        audio keeps the most recent speech, and the warning exists because this
+        is real data loss — silently discarding here would recreate the exact
+        bug this whole change is fixing, just at a larger timescale.
+        """
+
+        cap = self._mic_sample_rate * 2 * MAX_CONTINUOUS_SECONDS
+        total = sum(len(f) for f in self._mic_frames)
+        if total <= cap:
+            return
+        dropped = 0
+        while self._mic_frames and total > cap:
+            total -= len(self._mic_frames.pop(0))
+            dropped += 1
+        log.warning(
+            "Continuous capture exceeded %ds; dropped %d oldest frames. "
+            "Speech is being lost — VAD is not segmenting turns.",
+            MAX_CONTINUOUS_SECONDS, dropped,
+        )
+
     def start_recording(self):
         """Start buffering mic audio, including the VAD trigger pre-roll."""
+        if self._continuous:
+            # The buffer is already accumulating and must not be reset — doing
+            # so would discard everything captured since the last turn ended,
+            # which is precisely the audio continuous mode exists to keep.
+            self._recording = True
+            log.info(
+                "Mic recording started (continuous; %d frames already buffered)",
+                len(self._mic_frames),
+            )
+            return
         self._mic_frames = list(self._mic_preroll)
         self._mic_preroll.clear()
         self._recording = True
@@ -192,6 +253,11 @@ class Session:
             log.warning("No mic frames captured")
             return "", 0.0, None
 
+        # Snapshot-and-clear with no await between them, so frames arriving
+        # during transcription land in the NEXT turn rather than being lost.
+        # In continuous mode `_continuous` keeps the frame handler appending
+        # even though `_recording` is now False — that is what closes the gap
+        # STT time would otherwise open.
         pcm_data = b"".join(self._mic_frames)
         self._mic_frames.clear()
         audio_duration_s = len(pcm_data) / (self._mic_sample_rate * 2)
@@ -783,9 +849,14 @@ class Session:
         if len(pcm) % 2:
             raise ValueError("mic PCM16 must contain complete samples")
         frame = bytes(pcm)
-        if self._recording:
+        if self._recording or self._continuous:
             self._mic_frames.append(frame)
+            self._trim_continuous_backlog()
         else:
+            # Between turns, only MIC_PREROLL_FRAMES (600ms) survives — this is
+            # a bounded ring, so anything longer is overwritten and gone. That
+            # is correct when the gap is the assistant speaking, and is exactly
+            # the data loss `_continuous` exists to prevent.
             self._mic_preroll.append(frame)
 
     async def close(self):
