@@ -150,7 +150,12 @@ async def send_to_gemma(text: str, *, client: httpx.AsyncClient | None = None) -
     return body
 
 
-def record_exchange(transcript: str, result: dict[str, Any] | None, error: str | None = None) -> None:
+def record_exchange(
+    transcript: str,
+    result: dict[str, Any] | None,
+    error: str | None = None,
+    seq: int | None = None,
+) -> None:
     """Append one utterance and its outcome to the capture file.
 
     Best-effort by design: a research capture must never be the reason a live
@@ -158,11 +163,19 @@ def record_exchange(transcript: str, result: dict[str, Any] | None, error: str |
 
     Failed exchanges are written too, with `error` set. A capture that only
     contained successes would silently misrepresent the run — the gaps are data.
+
+    `seq` is speech order, assigned when the utterance ended. Probes run
+    concurrently so a slow one finishes after a fast one that came later, which
+    means FILE ORDER IS ARRIVAL ORDER, NOT SPEECH ORDER. Sort by `seq` before
+    reading a capture as a sequence of utterances. It also makes a gap
+    detectable: a missing number is a lost turn, which line count alone can
+    never reveal.
     """
 
     result = result or {}
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "seq": seq,
         "transcript": transcript,
         "model": probe_model(),
         "host": probe_base_url(),

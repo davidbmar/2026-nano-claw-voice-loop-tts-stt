@@ -3251,6 +3251,21 @@ function handleMessage(msg, generation) {
       }
       break;
 
+    // Transcribe mode listens continuously, so the mic must re-arm here rather
+    // than when playback ends — this mode never plays anything. Without it
+    // `autoTurnPending` stays true after the first automatic turn and the page
+    // goes deaf while still looking live (observed 2026-08-06: a count to
+    // twenty was never heard).
+    //
+    // Arrives BEFORE the model has answered, on purpose. Waiting for the reply
+    // would make us deaf for the whole generation, and nothing about listening
+    // depends on what gemma says.
+    case 'transcribe_listening':
+      clearThinking();
+      setVisualPresence('idle');
+      rearmPhoneMode('Listening…');
+      break;
+
     case 'transcription':
       markTranscriptionLatency();
       deepStatusLine = null;

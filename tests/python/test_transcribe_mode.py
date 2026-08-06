@@ -165,6 +165,101 @@ def test_a_dead_probe_still_stays_silent(monkeypatch, in_transcribe_mode, captur
     assert "unreachable" in ws.sent[-1]["text"].lower()
 
 
+def test_the_mic_rearms_before_the_model_is_called(
+    monkeypatch, in_transcribe_mode, capture_to_tmp
+):
+    """Continuous listening: re-arm first, ask gemma second.
+
+    The browser arms its next turn only when playback ends, and this mode never
+    plays anything — so without an explicit signal `autoTurnPending` latches
+    true and the page goes deaf after one automatic turn while still looking
+    live. That is the 2026-08-06 bug where a count to twenty was never heard.
+
+    Sending it AFTER the model call would fix that bug and leave a quieter one:
+    deafness for the whole generation, ~3s at the observed rate and unbounded
+    for a slow model. So the ordering is the requirement, not the message.
+    """
+    seen_when_model_ran: list[list[str]] = []
+
+    async def fake_send(text, **kwargs):
+        seen_when_model_ran.append([m["type"] for m in ws.sent])
+        return {"response": "ok"}
+
+    monkeypatch.setattr(server, "send_to_gemma", fake_send)
+
+    ws, session = FakeWS(), _session()
+    asyncio.run(server._handle_transcribe_request(ws, session, "one two three"))
+
+    assert seen_when_model_ran, "the model was never called"
+    assert "transcribe_listening" in seen_when_model_ran[0], (
+        "the mic must be re-armed BEFORE waiting on the model, or the page is "
+        f"deaf for the whole generation; sent so far was {seen_when_model_ran[0]}"
+    )
+
+
+def test_a_dead_probe_still_rearms_the_mic(
+    monkeypatch, in_transcribe_mode, capture_to_tmp
+):
+    """An unreachable M5 must not leave the session permanently deaf.
+
+    The re-arm precedes the call, so this holds structurally — but it is the
+    consequence worth naming: a probe failure that also stopped the listening
+    would end the session rather than degrade it, and would look like the user
+    having stopped talking.
+    """
+
+    async def dead(text, **kwargs):
+        raise ConnectionError("M5 unreachable")
+
+    monkeypatch.setattr(server, "send_to_gemma", dead)
+    ws = FakeWS()
+    asyncio.run(server._handle_transcribe_request(ws, _session(), "still talking"))
+
+    assert "transcribe_listening" in [m["type"] for m in ws.sent]
+
+
+def test_the_browser_handles_the_rearm_message():
+    """The server's signal is useless if the page ignores it.
+
+    Two spellings of one fact — this file's recurring bug shape. A `case` that
+    never landed in app.js would leave the mode deaf with every python test
+    green, because none of them run the browser.
+    """
+    app_js = (ROOT / "voice" / "web" / "app.js").read_text()
+    assert "case 'transcribe_listening':" in app_js, (
+        "app.js has no handler for transcribe_listening — the mic will never "
+        "re-arm in the browser"
+    )
+    handler = app_js.split("case 'transcribe_listening':", 1)[1].split("break;", 1)[0]
+    assert "rearmPhoneMode" in handler, (
+        "the transcribe_listening handler must call rearmPhoneMode; clearing "
+        "the thinking indicator alone leaves autoTurnPending latched"
+    )
+
+
+def test_utterances_are_numbered_in_speech_order(
+    monkeypatch, in_transcribe_mode, capture_to_tmp
+):
+    """Probes run concurrently, so file order is arrival order — `seq` is truth.
+
+    Without it a capture cannot be read as a sequence, and a lost utterance is
+    undetectable: line count alone can never show a gap.
+    """
+
+    async def fake_send(text, **kwargs):
+        return {"response": f"re: {text}"}
+
+    monkeypatch.setattr(server, "send_to_gemma", fake_send)
+
+    session = _session()
+    for utterance in ("first", "second", "third"):
+        asyncio.run(server._handle_transcribe_request(FakeWS(), session, utterance))
+
+    rows = [json.loads(line) for line in capture_to_tmp.read_text().splitlines() if line]
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert [r["transcript"] for r in rows] == ["first", "second", "third"]
+
+
 def test_other_modes_are_left_alone(monkeypatch):
     """The handler must decline every mode but its own, or it eats the product."""
     monkeypatch.setattr(server, "is_transcribe_mode", lambda *a, **k: False)

@@ -560,6 +560,40 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         pending_settings.clear()
         return new_session
 
+    def _spawn_probe(coro):
+        """Run a transcribe-mode probe concurrently — no one-at-a-time gate.
+
+        `_spawn_agent` below allows one reply in flight and DROPS the rest. That
+        is right for a speaking assistant: its comment says the gate exists so
+        two tasks cannot race on the audio queue. Transcribe mode has no audio
+        queue, so the hazard does not exist here — and the gate's cost does.
+
+        With continuous listening the client keeps sending turns (its own gate
+        is `agentSpeaking`, which never becomes true in a mode that never
+        speaks). Every utterance arriving while gemma is still generating would
+        hit that guard and be discarded — after the transcript had already gone
+        to the browser. The panel would show it; the capture file would not.
+        Silent holes in a research record are worse than a slow one.
+
+        Concurrency is safe precisely because the probe is stateless: each
+        utterance is an independent stimulus, so overlapping them changes no
+        result. What it does change is completion ORDER, which is why every
+        entry carries `seq` — file order is arrival order, `seq` is speech
+        order, and only one of those is the experiment.
+
+        Tasks are held in a set because asyncio keeps only a weak reference; an
+        un-held task can be garbage-collected mid-flight, which would lose the
+        utterance in a way that looks exactly like the model returning nothing.
+        """
+        tasks = getattr(session, "_probe_tasks", None)
+        if tasks is None:
+            tasks = set()
+            session._probe_tasks = tasks
+        task = asyncio.create_task(coro)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        task.add_done_callback(_on_agent_task_done)
+
     def _spawn_agent(coro, turn_state=None):
         # One active agent reply at a time. If a reply is still in flight,
         # drop the duplicate (the browser also gates new turns behind
@@ -705,7 +739,14 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                               "stt_size": session.stt_size, "voice_id": session.voice_id,
                               "model": session.model}
                 await ws.send_json({"type": "transcription", "text": text})
-                _spawn_agent(_handle_agent_request(ws, session, http_client, text), turn_state)
+                # Transcribe mode listens continuously, so turns overlap by
+                # design; `_spawn_agent` would drop the overlapping ones.
+                if is_transcribe_mode():
+                    _spawn_probe(_handle_transcribe_request(ws, session, text))
+                else:
+                    _spawn_agent(
+                        _handle_agent_request(ws, session, http_client, text), turn_state
+                    )
 
             elif msg_type == "mic_cancel":
                 if session:
@@ -1653,10 +1694,32 @@ async def _handle_transcribe_request(
     if not is_transcribe_mode():
         return False
 
+    # Speech order, assigned before the first await so it follows the order
+    # utterances ENDED, not the order gemma happened to finish. With probes
+    # running concurrently those differ, and only one of them is the experiment.
+    seq = getattr(session, "_probe_seq", 0) + 1
+    session._probe_seq = seq
+
     # The "prints out everything it listens to" half of the mode. Logged at INFO
     # with a distinct prefix so `docker logs | grep TRANSCRIBE` is the whole
     # tooling story for watching a session live.
-    log.info("TRANSCRIBE heard: %s", text)
+    log.info("TRANSCRIBE heard [#%d]: %s", seq, text)
+
+    # Re-arm the microphone NOW, before waiting on gemma — this is what makes
+    # the mode continuous rather than turn-taking.
+    #
+    # The browser arms the next turn only when it sees playback finish
+    # (`rearmPhoneMode` is called from the end-of-audio handler). A mode that
+    # never plays audio never sends that, so `autoTurnPending` latched true and
+    # the mic stopped listening after the first automatic turn — silently, with
+    # the page still looking live. Observed 2026-08-06: a count to twenty was
+    # never heard.
+    #
+    # Sent before the await rather than after, because waiting for the model
+    # would make us deaf for the whole generation — 3s at the observed rate,
+    # and far longer for a slow model. Nothing here depends on the reply, so
+    # there is nothing to wait for.
+    await ws.send_json({"type": "transcribe_listening", "seq": seq})
 
     result: dict[str, Any] | None = None
     error: str | None = None
@@ -1671,15 +1734,15 @@ async def _handle_transcribe_request(
             probe_model(), probe_base_url(), error,
         )
 
-    record_exchange(text, result, error)
+    record_exchange(text, result, error, seq=seq)
 
     if error is not None:
         shown = f"[probe unreachable: {error}]"
     else:
         shown = (result or {}).get("response") or "[empty response]"
-        log.info("TRANSCRIBE %s replied: %s", probe_model(), shown)
+        log.info("TRANSCRIBE %s replied [#%d]: %s", probe_model(), seq, shown)
 
-    await ws.send_json({"type": "agent_reply", "text": shown})
+    await ws.send_json({"type": "agent_reply", "text": shown, "seq": seq})
     await _complete_agent_turn(ws, session, shown)
     return True
 
