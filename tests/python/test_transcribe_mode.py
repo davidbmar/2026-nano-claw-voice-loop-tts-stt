@@ -264,6 +264,58 @@ def test_the_prompt_is_the_bare_transcript():
     assert gemma_probe.build_prompt("just these words") == "just these words"
 
 
+def test_the_probe_is_stateless(monkeypatch):
+    """Each utterance is an independent stimulus — no history, ever.
+
+    Chosen deliberately on 2026-08-06 so that turns stay comparable to each
+    other and no representation is conditioned on what came before.
+
+    This is the decision most likely to be undone by accident, because adding
+    history looks like a straight improvement — the dialogue reads better and
+    nothing errors. What breaks is silent and total: every captured turn becomes
+    conditioned on its predecessors, so the file can no longer be compared
+    across turns, and the context grows until it truncates without a signal.
+
+    Asserted at the payload, not the prompt, because history could arrive either
+    as concatenated text OR as a `messages` list — this catches both.
+    """
+    sent: dict = {}
+
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {"response": "ok"}
+
+    class FakeClient:
+        async def post(self, url, json=None, timeout=None):
+            sent["url"] = url
+            sent["payload"] = json
+            return FakeResponse()
+
+    for utterance in ("first thing said", "second thing said"):
+        asyncio.run(gemma_probe.send_to_gemma(utterance, client=FakeClient()))
+
+    payload = sent["payload"]
+    assert payload["prompt"] == "second thing said", (
+        "the prompt must be this utterance alone; prior turns leaked in"
+    )
+    assert "messages" not in payload, (
+        "a messages list means conversation history — the probe must be stateless"
+    )
+    assert "context" not in payload, (
+        "ollama's `context` field replays prior state and would carry history "
+        "invisibly, without changing the prompt"
+    )
+    assert sent["url"].endswith("/api/generate"), (
+        "/api/chat is the conversational endpoint; the stateless probe uses "
+        "/api/generate"
+    )
+
+
 def test_thinking_is_off_unless_asked_for(monkeypatch):
     monkeypatch.delenv("NANO_CLAW_TRANSCRIBE_THINK", raising=False)
     assert gemma_probe.probe_thinking_enabled() is False

@@ -95,15 +95,28 @@ def capture_path() -> Path:
 
 
 def build_prompt(text: str) -> str:
-    """What gemma4 actually receives.
+    """What gemma4 actually receives: one utterance, and nothing else.
 
-    Deliberately the bare transcript. A probe measuring how the model represents
-    speech must not prepend an instruction, because the wrapper would then be
-    part of what is being measured — and the wrapper's tokens would sit at the
-    start of the context, exactly where a prefix's influence is strongest.
+    Two deliberate absences, both load-bearing.
 
-    If a task framing is ever wanted, it belongs here, in one visible place,
-    rather than distributed through the caller.
+    **No instruction or persona.** A probe measuring how the model represents
+    speech must not prepend a framing, because the wrapper would then be part of
+    what is measured — and its tokens sit at the start of the context, exactly
+    where a prefix's influence is strongest.
+
+    **No conversation history.** Every utterance is an independent stimulus, so
+    a response depends only on the utterance that produced it and turns stay
+    comparable to each other. Carrying history would condition each
+    representation on everything said before, and grow the context until it
+    truncated silently.
+
+    Chosen 2026-08-06 for j-space probing. The consequence to expect in a
+    capture file is that `prompt_eval_count` stays small and does NOT climb
+    across turns — if it ever starts climbing, history crept in and the turns
+    have stopped being independent. `test_the_probe_is_stateless` pins this.
+
+    If a framing is ever wanted, it belongs here, in one visible place, rather
+    than distributed through the caller.
     """
 
     return text
