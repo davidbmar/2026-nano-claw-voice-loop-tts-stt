@@ -35,10 +35,16 @@ export const MODEL_CATALOG: CatalogModel[] = [
   // Measured (3 runs each, riff eval, 11 scenarios): 26b scores 10.33 — level
   // with Gemini Flash-Lite and DeepSeek, for free. e2b scores 5.00 and e4b
   // 4.00, so the usable capability cliff sits between 8B and 26B.
-  { id: 'ollama/gemma4:26b', label: 'Gemma4 26B (local, M5)', provider: 'ollama' },
-  { id: 'ollama/gemma4:e2b', label: 'Gemma4 E2B (local)', provider: 'ollama' },
-  { id: 'ollama/gemma3:1b', label: 'Gemma3 1B (local, M3 only)', provider: 'ollama' },
-  { id: 'ollama/gemma3:270m', label: 'Gemma3 270M (local, M3 only)', provider: 'ollama' },
+  // Labels name the HOST, not just "local", because which host answers is set
+  // by NANO_CLAW_OLLAMA_BASE and a model missing from that host 404s rather
+  // than falling back. "(local)" was actively misleading once inference moved
+  // off this laptop: the label said local, the work happened on the M5.
+  //
+  // gemma4:* live on the M5 (48GB). gemma3:* live only on this Mac.
+  { id: 'ollama/gemma4:26b', label: 'Gemma4 26B — M5', provider: 'ollama' },
+  { id: 'ollama/gemma4:e2b', label: 'Gemma4 E2B — M5', provider: 'ollama' },
+  { id: 'ollama/gemma3:1b', label: 'Gemma3 1B — this Mac only', provider: 'ollama' },
+  { id: 'ollama/gemma3:270m', label: 'Gemma3 270M — this Mac only', provider: 'ollama' },
 ];
 
 export const DEFAULT_MODEL = 'anthropic/claude-haiku-4-5';
