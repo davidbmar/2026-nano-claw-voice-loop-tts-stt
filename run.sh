@@ -263,6 +263,20 @@ if [ "${NANO_CLAW_DECISION_SHADOW:-}" = "true" ] && [ -d "${NANO_CLAW_DECISION_C
     DECISION_DOCKER_ARGS+=(-e NANO_CLAW_DECISION_DOMAIN_PINS="$NANO_CLAW_DECISION_DOMAIN_PINS")
   fi
 fi
+# Transcribe mode (the j-space probe) appends one JSONL object per utterance.
+# Bind-mounted to the host for the same reason decision-core above is: the whole
+# point of the capture is to read it on this machine, and /app/data is a NAMED
+# VOLUME whose contents are only reachable through `docker exec`/`docker cp`.
+#
+# Mounted unconditionally, unlike decision-core. The mode is chosen at runtime
+# from the console dropdown with no restart, so gating this on a flag would
+# produce the worst outcome available: a session that captures perfectly, into a
+# location the researcher cannot get at, discovered after the speech is gone.
+_TRANSCRIBE_DATA="${NANO_CLAW_TRANSCRIBE_DIR:-$HOME/riff-dev-data/nano-claw-transcribe}"
+mkdir -p "$_TRANSCRIBE_DATA"
+NANO_CLAW_TRANSCRIBE_LOG="${NANO_CLAW_TRANSCRIBE_LOG:-/app/data/transcribe/jspace.jsonl}"
+TRANSCRIBE_DOCKER_ARGS=(-v "$_TRANSCRIBE_DATA":/app/data/transcribe)
+
 # Pass every environment value explicitly. Docker's bare `-e VAR` form silently
 # omits an unset host variable, which is unsafe for fail-closed feature gates.
 # -it only when attached to a real terminal, so run.sh also works headless
@@ -284,6 +298,10 @@ docker run $TTY_FLAGS --rm \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
   -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
   -e NANO_CLAW_OLLAMA_BASE="$NANO_CLAW_OLLAMA_BASE" \
+  -e NANO_CLAW_TRANSCRIBE_BASE="$NANO_CLAW_TRANSCRIBE_BASE" \
+  -e NANO_CLAW_TRANSCRIBE_MODEL="$NANO_CLAW_TRANSCRIBE_MODEL" \
+  -e NANO_CLAW_TRANSCRIBE_THINK="$NANO_CLAW_TRANSCRIBE_THINK" \
+  -e NANO_CLAW_TRANSCRIBE_LOG="$NANO_CLAW_TRANSCRIBE_LOG" \
   -e NANO_CLAW_BARGE_IN="$NANO_CLAW_BARGE_IN" \
   -e NANO_CLAW_MEMORY_DIR="$NANO_CLAW_MEMORY_DIR" \
   -e NANO_CLAW_SENTENCE_GAP_MS="$NANO_CLAW_SENTENCE_GAP_MS" \
@@ -353,6 +371,7 @@ docker run $TTY_FLAGS --rm \
   -e NANO_CLAW_FLOW_AVAILABILITY="$NANO_CLAW_FLOW_AVAILABILITY" \
   "${GCAL_DOCKER_ARGS[@]}" \
   "${DECISION_DOCKER_ARGS[@]}" \
+  "${TRANSCRIBE_DOCKER_ARGS[@]}" \
   -e STT_SERVICE_URL="$STT_SERVICE_URL" \
   -e TTS_SERVICE_URL="$TTS_SERVICE_URL" \
   -e LUX_SERVICE_URL="$LUX_SERVICE_URL" \

@@ -36,9 +36,16 @@ from voice.flow_session import (
     get_flow_profile,
     get_region_model,
     is_delegate_mode,
+    is_transcribe_mode,
     set_default_delegate_url,
     set_flow_mode,
     set_region_model,
+)
+from voice.gemma_probe import (
+    probe_base_url,
+    probe_model,
+    record_exchange,
+    send_to_gemma,
 )
 from voice.turn_delegate import (
     _CONTROL_CHARS,
@@ -1576,6 +1583,12 @@ async def _handle_agent_request(
     """Stream nano-claw's reply as SSE; synthesize + forward chunks as they arrive."""
     _begin_agent_turn(session)
     try:
+        # First, ahead of delegate and scheduler, because both of those speak.
+        # Transcribe mode's contract is that no audio is ever produced, and the
+        # only way to hold that structurally is to consume the turn before any
+        # synthesis path is reachable — rather than muting one on the way out.
+        if await _handle_transcribe_request(ws, session, text):
+            return
         if await _handle_delegate_request(ws, session, client, text):
             return
         await _refresh_agent_conversation_on_mode_switch(session, client)
@@ -1615,6 +1628,60 @@ async def _handle_agent_request(
         error_text = "Sorry, I couldn't reach the agent."
         await ws.send_json({"type": "agent_reply", "text": error_text})
         await _speak_with_events(ws, session, error_text)
+
+
+async def _handle_transcribe_request(
+    ws: web.WebSocketResponse,
+    session: Session,
+    text: str,
+) -> bool:
+    """Consume the turn: print the transcript, forward it to gemma4, say nothing.
+
+    True when handled, matching `_handle_delegate_request`'s contract.
+
+    This function must never call a `_speak_*` helper, and must never fall
+    through to a caller that does. That is the mode. `agent_reply` carries text
+    to the browser transcript panel only — synthesis is a separate server-side
+    call (see the error path at the foot of `_handle_agent_request`, which pairs
+    `agent_reply` with `_speak_with_events`), so emitting it here is silent.
+
+    A failed forward still completes the turn. The transcript is the product; if
+    the M5 is unreachable that is worth showing and recording, but it is not a
+    reason to drop what was heard.
+    """
+
+    if not is_transcribe_mode():
+        return False
+
+    # The "prints out everything it listens to" half of the mode. Logged at INFO
+    # with a distinct prefix so `docker logs | grep TRANSCRIBE` is the whole
+    # tooling story for watching a session live.
+    log.info("TRANSCRIBE heard: %s", text)
+
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    try:
+        result = await send_to_gemma(text)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "TRANSCRIBE forward to %s on %s failed: %s",
+            probe_model(), probe_base_url(), error,
+        )
+
+    record_exchange(text, result, error)
+
+    if error is not None:
+        shown = f"[probe unreachable: {error}]"
+    else:
+        shown = (result or {}).get("response") or "[empty response]"
+        log.info("TRANSCRIBE %s replied: %s", probe_model(), shown)
+
+    await ws.send_json({"type": "agent_reply", "text": shown})
+    await _complete_agent_turn(ws, session, shown)
+    return True
 
 
 def resolve_delegate_url(session: Session) -> str:

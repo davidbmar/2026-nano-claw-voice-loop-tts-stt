@@ -59,10 +59,23 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "default_delegate_url",
         "set_default_delegate_url",
         "delegate_allowed_hosts",
+        "is_transcribe_mode",       # transcribe mode's only gate
     ),
     "voice/server.py": (
         "resolve_delegate_url",
         "_handle_delegate_request",  # the browser hop
+        "_handle_transcribe_request",  # the j-space probe hop
+    ),
+    # Transcribe mode is the same shape of risk this file was written for: a
+    # capability that is easy to build, easy to test in isolation, and silently
+    # inert if the dispatch call is ever dropped. An unwired probe does not
+    # error — it just answers normally, in a mode whose whole promise is that
+    # it does not.
+    "voice/gemma_probe.py": (
+        "send_to_gemma",
+        "record_exchange",
+        "probe_base_url",
+        "probe_model",
     ),
 }
 

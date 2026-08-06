@@ -1032,7 +1032,14 @@ def test_flow_mode_registry_defaults_and_maps_legacy_off(monkeypatch):
         "scheduler",
         "lawyer",
         "delegate",
+        "transcribe",
     ]
+    # Transcribe mode produces no audio at all. Like delegate it carries no
+    # persona — but for a sharper reason: the transcript it forwards is a
+    # research stimulus, and a persona in the prompt would become part of what
+    # is being measured.
+    assert FLOW_MODES["transcribe"]["profile"] == "none"
+    assert FLOW_MODES["transcribe"]["scheduler"] is False
     # Delegate mode speaks another app's words, so it must carry no persona of
     # ours, no scheduler, and — checked below against the container config —
     # the literal "none" profile.
@@ -1180,6 +1187,7 @@ def test_flow_toggle_endpoints_use_env_then_runtime_override(monkeypatch, tmp_pa
                 # putting the delegate in this registry rather than behind an
                 # env var only.
                 ("delegate", "Turn Delegate"),
+                ("transcribe", "Transcribe Mode"),
             ]
             assert all(
                 isinstance(o.get("abstract"), str) and o["abstract"]

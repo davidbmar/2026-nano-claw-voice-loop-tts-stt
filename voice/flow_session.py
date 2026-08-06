@@ -166,6 +166,26 @@ FLOW_MODES: dict[str, FlowModeConfig] = {
             "nano-claw supplies only the voice."
         ),
     },
+    # A listening mode, not an assistant mode. Every utterance is transcribed,
+    # printed, and handed to gemma4 on the M5 — and nothing is ever spoken back.
+    # Built for j-space probing, where the point is to feed the local model real
+    # speech and inspect its internals on that host.
+    #
+    # It is the mirror of "delegate" above: delegate supplies only the voice and
+    # borrows the words, this supplies only the ears and returns no voice at all.
+    #
+    # `profile` is "none" for a sharper reason than delegate's. A probe measuring
+    # how a model represents speech must not have a persona shaping the prompt,
+    # or the persona becomes part of what is measured.
+    "transcribe": {
+        "label": "Transcribe Mode",
+        "profile": "none",
+        "scheduler": False,
+        "abstract": (
+            "Transcribes everything heard and forwards it to gemma4 on the M5. "
+            "Never speaks and never answers — a listening probe."
+        ),
+    },
 }
 DEFAULT_FLOW_MODE = "spacechannel"
 
@@ -203,6 +223,18 @@ _MODE_GREETINGS: dict[str, str] = {
     # that guessed would be the assistant claiming an identity it was never
     # given. The delegate introduces itself on the first reply.
     "delegate": "Hello — how can I help you today?",
+    # The one line this mode ever speaks, and it is a disclosure rather than an
+    # answer: the phone layer plays a greeting before any turn runs, so a
+    # transcribe-mode call would otherwise answer to total silence and read as a
+    # dead line. Saying plainly that nothing will reply is also the honest thing
+    # to do to someone whose speech is being captured for research.
+    #
+    # The "never speaks" contract belongs to the turn handler, which is where it
+    # is enforced. This greeting is outside that path by design.
+    "transcribe": (
+        "You've reached a transcription-only research line. Everything you say "
+        "is transcribed and recorded, and nothing will reply."
+    ),
 }
 _GENERIC_GREETING = (
     "Hello! You've reached the nano-claw voice assistant. How can I help?"
@@ -356,6 +388,18 @@ def is_delegate_mode(mode: str | None = None) -> bool:
 
     active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
     return active == "delegate"
+
+
+def is_transcribe_mode(mode: str | None = None) -> bool:
+    """True when turns are transcribed and forwarded, and nothing is spoken.
+
+    The one mode that produces no audio. Callers must treat this as a hard
+    property rather than a preference: the turn is consumed before any
+    synthesis path is reachable, not muted on the way out.
+    """
+
+    active = get_flow_mode() if mode is None else _normalize_flow_mode(mode)
+    return active == "transcribe"
 
 
 def delegate_allowed_hosts() -> frozenset[str]:
