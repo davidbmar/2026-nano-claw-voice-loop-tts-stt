@@ -209,3 +209,71 @@ def test_the_server_enables_it_for_transcribe_mode_only():
         "continuous capture must be enabled with is_transcribe_mode(), not "
         "unconditionally — every speaking mode would record its own playback"
     )
+
+
+# ------------------------------------------------- server-clocked segmentation
+
+
+def test_transcribe_mode_segments_on_a_server_clock():
+    """Browser VAD runs on requestAnimationFrame, which stops in a hidden tab.
+
+    That is why switching windows to play audio at the page captured nothing:
+    no turn ever opened, while the mic kept streaming from the audio thread.
+    A server-side timer has no opinion about which window is in front.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "server.py").read_text()
+    assert "TRANSCRIBE_FLUSH_SECONDS" in source
+    assert "_transcribe_flush_loop" in source
+    loop = source.split("async def _transcribe_flush_loop", 1)[1].split("\n    def ", 1)[0]
+    assert "is_transcribe_mode()" in loop, (
+        "the flush loop must no-op outside transcribe mode; unguarded it would "
+        "cut turns underneath every speaking mode's own VAD"
+    )
+    assert "stop_recording" in loop
+
+
+def test_the_browser_disables_vad_only_for_transcribe():
+    """Every other mode must keep VAD — it ends a turn when the human stops.
+
+    A fixed interval cannot know that, so applying the lock everywhere would
+    make normal conversation cut mid-sentence every 8 seconds.
+    """
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[2] / "voice" / "web" / "app.js").read_text()
+    start = app_js.split("async function startPhoneMode()", 1)[1].split("\n}", 1)[0]
+    assert "flowSelect.value === 'transcribe'" in start, (
+        "the mic lock must be gated on transcribe mode"
+    )
+    lock_branch = start.split("flowSelect.value === 'transcribe'", 1)[1].split("return;", 1)[0]
+    assert "requestAnimationFrame" not in lock_branch, (
+        "the transcribe branch must not start the rAF VAD loop — that loop is "
+        "exactly what stops firing in a hidden tab"
+    )
+    assert "requestAnimationFrame(monitorPhoneAudio)" in start, (
+        "the normal VAD path must still exist for every other mode"
+    )
+
+
+def test_stopping_the_mic_flushes_rather_than_discards():
+    """`mic_cancel` DISCARDS the buffer — up to 8s of untranscribed speech.
+
+    Stopping the microphone must not be the one action that loses audio.
+    """
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[2] / "voice" / "web" / "app.js").read_text()
+    stop = app_js.split("function stopPhoneMode(", 1)[1].split("\n}", 1)[0]
+    lock_path = stop.split("if (transcribeLock)", 1)
+    assert len(lock_path) == 2, "stopPhoneMode has no transcribe-lock branch"
+    branch = lock_path[1].split("} else", 1)[0]
+    # Match the CALL, not the word — the branch's comment names mic_cancel to
+    # explain why it is wrong, and a substring check would trip on the prose.
+    assert "sendMsg('mic_stop')" in branch, (
+        "the locked path must flush the buffer with mic_stop"
+    )
+    assert "sendMsg('mic_cancel')" not in branch, (
+        "the locked path must never discard the buffer with mic_cancel"
+    )

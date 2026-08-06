@@ -111,6 +111,11 @@ def _on_agent_task_done(task: asyncio.Task) -> None:
         log.error("Agent task failed", exc_info=exc)
 
 
+# How often transcribe mode cuts a segment when the browser is not doing it.
+# 8s balances two failures: too long and a crash loses more speech and STT gets
+# an unwieldy chunk; too short and words are split at every boundary, which is
+# the seam loss this mode already fights.
+TRANSCRIBE_FLUSH_SECONDS = 8.0
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
@@ -560,6 +565,52 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         pending_settings.clear()
         return new_session
 
+    async def _transcribe_flush_loop():
+        """Cut transcribe-mode segments on a clock, not on browser VAD.
+
+        The browser's voice detector runs on `requestAnimationFrame`, which
+        Chrome STOPS firing when the tab is hidden, minimized or occluded. So
+        the moment the operator switched windows to play audio at the page, no
+        turn ever opened and nothing was captured — while the microphone itself
+        kept streaming, because getUserMedia and the WebRTC track live on the
+        audio thread and are not throttled. The audio was arriving and being
+        thrown away for want of anyone saying a turn had started.
+
+        A server-side clock has no opinion about which window is in front.
+
+        Only transcribe mode does this. Every other mode keeps browser VAD,
+        where it is the right tool: it ends a turn when the human stops
+        speaking, which is what turn-taking needs and what a fixed interval
+        cannot know.
+        """
+
+        while True:
+            await asyncio.sleep(TRANSCRIBE_FLUSH_SECONDS)
+            if session is None or not is_transcribe_mode():
+                continue
+            try:
+                if _call_compat(getattr(session, "buffered_seconds", lambda: 0.0)) < 0.4:
+                    continue  # nothing but silence since the last flush
+                text, _duration, _stt_ms = await session.stop_recording()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Transcribe flush failed; continuing to listen")
+                continue
+            if not text:
+                continue
+            await ws.send_json({"type": "transcription", "text": text})
+            _spawn_probe(_handle_transcribe_request(ws, session, text))
+
+    def _ensure_transcribe_flush():
+        """Start the flush loop once per connection, and only for this mode."""
+        if not is_transcribe_mode():
+            return
+        existing = getattr(session, "_transcribe_flush_task", None)
+        if existing is not None and not existing.done():
+            return
+        session._transcribe_flush_task = asyncio.create_task(_transcribe_flush_loop())
+
     def _spawn_probe(coro):
         """Run a transcribe-mode probe concurrently — no one-at-a-time gate.
 
@@ -729,6 +780,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         is_transcribe_mode(),
                     )
                     session.start_recording()
+                    # In transcribe mode the browser sends this ONCE and then
+                    # locks the mic open — no further mic_start/mic_stop arrives,
+                    # so the server owns segmentation from here.
+                    _ensure_transcribe_flush()
 
             elif msg_type == "mic_stop":
                 if not session:

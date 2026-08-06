@@ -26,6 +26,18 @@ MIC_PREROLL_FRAMES = 30  # 600ms: preserves the first word while VAD opens
 # Backstop for continuous capture. Only reachable if VAD stops cutting turns
 # entirely; at 16kHz mono PCM16 this is ~3.8MB.
 MAX_CONTINUOUS_SECONDS = 120
+# Audio carried from the end of one chunk into the start of the next, so a word
+# straddling the cut appears WHOLE in at least one of them.
+#
+# VAD fires at an arbitrary instant, routinely mid-word. Whisper then receives a
+# chunk ending in half of "thirteen" and one starting with the other half, and
+# discards both fragments as noise — the word survives in neither, though no
+# audio was lost. Observed 2026-08-06: counting to twenty dropped exactly "13"
+# at one seam and "3, 4" at the next.
+#
+# 500ms comfortably spans a spoken word. The cost is that the overlap is
+# transcribed twice, which `strip_transcript_overlap` removes downstream.
+OVERLAP_FRAMES = 25  # 500ms at 20ms/frame
 
 log = logging.getLogger("webrtc")
 
@@ -189,6 +201,18 @@ class Session:
             self._mic_frames.extend(self._mic_preroll)
             self._mic_preroll.clear()
         self._continuous = bool(enabled)
+
+    def buffered_seconds(self) -> float:
+        """How much audio is waiting to be transcribed.
+
+        Lets the flush loop skip empty intervals instead of calling
+        `stop_recording`, which logs a warning when it finds nothing — at one
+        flush every few seconds that warning would bury every other line in the
+        log within minutes.
+        """
+
+        total = sum(len(f) for f in self._mic_frames)
+        return total / (self._mic_sample_rate * 2)
 
     def _trim_continuous_backlog(self) -> None:
         """Bound the buffer so a monologue cannot exhaust memory.

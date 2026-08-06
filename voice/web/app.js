@@ -1668,6 +1668,8 @@ let agentSpeaking = false;
 let deepProjectionPending = false;
 let phoneModeEnabled = false;
 let autoTurnPending = false;
+// Transcribe mode holds the mic open with VAD disabled; the server segments.
+let transcribeLock = false;
 let linkReady = false;
 let audioConnected = false;
 /** The wire format announced in hello_ack, kept so START MIC can retry
@@ -3927,6 +3929,34 @@ function rearmPhoneMode(message, immediate) {
 
 async function startPhoneMode() {
   if (!audioConnected || !micStream || phoneModeEnabled) return;
+
+  // Transcribe mode: lock the mic open and run no VAD at all.
+  //
+  // The VAD loop below is driven by requestAnimationFrame, which Chrome stops
+  // firing entirely for a hidden, minimized or occluded tab. Anyone switching
+  // windows to play audio at the page was, structurally, testing with the
+  // microphone paused — no turn ever opened, so nothing was captured, while the
+  // mic itself kept streaming from the audio thread.
+  //
+  // So this mode does not ask the browser when to listen. It opens the mic once
+  // and the server cuts segments on its own clock, which has no opinion about
+  // which window is in front.
+  //
+  // Every other mode keeps VAD unchanged: there, ending a turn when the human
+  // stops speaking is exactly right, and a fixed interval could not know it.
+  if (flowSelect.value === 'transcribe') {
+    phoneModeEnabled = true;
+    transcribeLock = true;
+    autoTurnPending = false;
+    isRecording = true;
+    talkBtn.classList.add('phone-active', 'recording');
+    talkBtn.setAttribute('aria-pressed', 'true');
+    setTalkButtonLabel('Stop mic');
+    statusText.textContent = 'Recording continuously — VAD off';
+    sendMsg('mic_start');
+    return;
+  }
+
   if (!(await ensureVadAnalyser())) {
     statusText.textContent = 'Automatic voice detection is unavailable';
     return;
@@ -3954,7 +3984,14 @@ function stopPhoneMode(options) {
     window.cancelAnimationFrame(vadFrameRequest);
     vadFrameRequest = null;
   }
-  if (isRecording && config.sendCancel !== false) sendMsg('mic_cancel');
+  if (transcribeLock) {
+    // Flush rather than cancel: mic_cancel DISCARDS the buffer, and in this mode
+    // that buffer is up to eight seconds of speech nobody has transcribed yet.
+    // Stopping the mic must not be the one action that loses audio.
+    transcribeLock = false;
+    if (isRecording) sendMsg('mic_stop');
+    isRecording = false;
+  } else if (isRecording && config.sendCancel !== false) sendMsg('mic_cancel');
   isRecording = false;
   autoTurnPending = false;
   if (vadGate) vadGate.reset();

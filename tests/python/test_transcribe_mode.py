@@ -281,16 +281,30 @@ def test_every_other_mode_still_takes_the_normal_turn_path():
     """
     source = (ROOT / "voice" / "server.py").read_text()
 
-    # The concurrent spawn is gated on the mode, not applied to every turn.
-    # Ungated, it would remove the one-reply-at-a-time protection that keeps two
-    # speaking turns from racing on the audio queue — for every mode at once.
-    spawn_site = source.split("_spawn_probe(_handle_transcribe_request", 1)
-    assert len(spawn_site) == 2, "the probe spawn site moved or was renamed"
-    preceding = spawn_site[0][-400:]
-    assert "if is_transcribe_mode():" in preceding, (
-        "_spawn_probe must be reached only inside a transcribe-mode branch; "
-        "ungated it would drop turn serialization for every mode"
-    )
+    # The concurrent spawn is gated on the mode.
+    # Every call site must sit inside a function that consults the mode.
+    # A fixed character window was too brittle: the flush loop's guard is at the
+    # top of its `while`, hundreds of characters above the call. AST asks the
+    # structural question instead — which function is this call in, and does
+    # that function check the mode at all?
+    tree = ast.parse(source)
+    gated = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = ast.dump(node)
+        if "_spawn_probe" not in body:
+            continue
+        # Skip the definition of _spawn_probe itself; it is the callee.
+        if node.name == "_spawn_probe":
+            continue
+        gated += 1
+        assert "is_transcribe_mode" in body, (
+            f"{node.name} calls _spawn_probe without consulting "
+            "is_transcribe_mode; ungated it would drop turn serialization for "
+            "every speaking mode"
+        )
+    assert gated >= 1, "no function calls _spawn_probe — it moved or was renamed"
     assert "_spawn_agent(" in source, (
         "the normal serialized turn path must still exist for other modes"
     )
