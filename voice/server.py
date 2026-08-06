@@ -1736,14 +1736,26 @@ async def _handle_transcribe_request(
 
     record_exchange(text, result, error, seq=seq)
 
+    # Nothing is sent back to the page. The screen shows ONLY what was heard.
+    #
+    # gemma's reply still happens, and is still recorded to the capture file —
+    # it is simply not part of the session. Displaying it made this look like a
+    # conversation with a silent assistant, which invited reading the replies as
+    # the output; the transcript is the output, and the reply is data.
+    #
+    # `_complete_agent_turn` is called with the transcript rather than the
+    # reply, so conversation history (when enabled) records what the human said
+    # and does not attribute words to an agent that never spoke.
     if error is not None:
-        shown = f"[probe unreachable: {error}]"
+        log.warning("TRANSCRIBE probe failed [#%d]: %s", seq, error)
     else:
-        shown = (result or {}).get("response") or "[empty response]"
-        log.info("TRANSCRIBE %s replied [#%d]: %s", probe_model(), seq, shown)
+        reply = (result or {}).get("response") or ""
+        log.info(
+            "TRANSCRIBE %s replied [#%d, not shown]: %s",
+            probe_model(), seq, reply[:200],
+        )
 
-    await ws.send_json({"type": "agent_reply", "text": shown, "seq": seq})
-    await _complete_agent_turn(ws, session, shown)
+    await _complete_agent_turn(ws, session, text)
     return True
 
 

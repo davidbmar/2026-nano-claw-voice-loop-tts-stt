@@ -100,7 +100,6 @@ def test_transcribe_mode_never_speaks(monkeypatch, in_transcribe_mode, capture_t
 
     assert handled is True, "the turn must be consumed, not passed on"
     types_sent = [m["type"] for m in ws.sent]
-    assert "agent_reply" in types_sent
     assert not any(t.startswith("agent_audio") for t in types_sent), (
         f"audio events were emitted in transcribe mode: {types_sent}"
     )
@@ -162,7 +161,10 @@ def test_a_dead_probe_still_stays_silent(monkeypatch, in_transcribe_mode, captur
     handled = asyncio.run(server._handle_transcribe_request(ws, session, "hello?"))
 
     assert handled is True, "a failed probe must still consume the turn"
-    assert "unreachable" in ws.sent[-1]["text"].lower()
+    assert not any(m["type"] == "agent_reply" for m in ws.sent), (
+        "a probe failure must not surface as a reply — the screen shows only "
+        "what was heard; failures belong in the log and the capture file"
+    )
 
 
 def test_the_mic_rearms_before_the_model_is_called(
@@ -267,6 +269,52 @@ def test_other_modes_are_left_alone(monkeypatch):
         server._handle_transcribe_request(FakeWS(), _session(), "book me a plumber")
     )
     assert handled is False
+
+
+def test_every_other_mode_still_takes_the_normal_turn_path():
+    """Transcribe mode must not have changed how anything else behaves.
+
+    Two shared things were touched to build it — the turn dispatcher and the
+    browser's mic re-arm — and both are used by every other mode. This asserts
+    the transcribe-specific behaviour is reached only behind the mode check,
+    rather than trusting that it is.
+    """
+    source = (ROOT / "voice" / "server.py").read_text()
+
+    # The concurrent spawn is gated on the mode, not applied to every turn.
+    # Ungated, it would remove the one-reply-at-a-time protection that keeps two
+    # speaking turns from racing on the audio queue — for every mode at once.
+    spawn_site = source.split("_spawn_probe(_handle_transcribe_request", 1)
+    assert len(spawn_site) == 2, "the probe spawn site moved or was renamed"
+    preceding = spawn_site[0][-400:]
+    assert "if is_transcribe_mode():" in preceding, (
+        "_spawn_probe must be reached only inside a transcribe-mode branch; "
+        "ungated it would drop turn serialization for every mode"
+    )
+    assert "_spawn_agent(" in source, (
+        "the normal serialized turn path must still exist for other modes"
+    )
+
+
+def test_the_browser_rearm_delay_is_unchanged_for_other_modes():
+    """`rearmPhoneMode` gained an `immediate` flag; the default must not shift.
+
+    Every speaking mode calls it with one argument. If the delay became
+    unconditional, they would all re-arm into the decaying tail of their own
+    audio and re-trigger the VAD on the assistant's own voice.
+    """
+    app_js = (ROOT / "voice" / "web" / "app.js").read_text()
+    body = app_js.split("function rearmPhoneMode(", 1)[1].split("\n}", 1)[0]
+    assert "immediate ? 0 : PHONE_REARM_MS" in body, (
+        "the re-arm delay must still default to PHONE_REARM_MS when `immediate` "
+        f"is not passed; body was:\n{body}"
+    )
+    # Every existing caller passes one argument, so `immediate` is undefined for
+    # them — this checks the speaking path was not switched over wholesale.
+    speaking_rearm = app_js.count("rearmPhoneMode('Waiting for the phone side...')")
+    assert speaking_rearm >= 1, (
+        "the end-of-playback re-arm for speaking modes is gone or changed shape"
+    )
 
 
 # ------------------------------------------------------------------ the capture

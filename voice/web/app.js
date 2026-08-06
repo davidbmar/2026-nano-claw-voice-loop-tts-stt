@@ -3261,9 +3261,11 @@ function handleMessage(msg, generation) {
     // would make us deaf for the whole generation, and nothing about listening
     // depends on what gemma says.
     case 'transcribe_listening':
+      // No reply is coming, so clear the thinking indicator rather than leaving
+      // the page waiting on an answer that never arrives.
       clearThinking();
       setVisualPresence('idle');
-      rearmPhoneMode('Listening…');
+      rearmPhoneMode('Listening…', true);
       break;
 
     case 'transcription':
@@ -3910,12 +3912,16 @@ function monitorPhoneAudio(timestamp) {
   vadFrameRequest = window.requestAnimationFrame(monitorPhoneAudio);
 }
 
-function rearmPhoneMode(message) {
+function rearmPhoneMode(message, immediate) {
   autoTurnPending = false;
   resetBargeInDetector();
   if (!phoneModeEnabled || !vadGate) return;
   vadGate.reset();
-  vadRearmAt = performance.now() + PHONE_REARM_MS;
+  // PHONE_REARM_MS keeps us from re-triggering on the tail of our own audio —
+  // the speaker is still decaying when playback "ends". Transcribe mode plays
+  // nothing, so there is no tail to ignore, and the delay is pure deafness in a
+  // mode whose entire job is to miss nothing.
+  vadRearmAt = performance.now() + (immediate ? 0 : PHONE_REARM_MS);
   setPhoneStatus(message || 'Waiting for the phone side...');
 }
 
