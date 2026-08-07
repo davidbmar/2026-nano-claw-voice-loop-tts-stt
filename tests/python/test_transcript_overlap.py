@@ -294,3 +294,38 @@ def test_the_tunables_reach_the_container():
         "NANO_CLAW_TRANSCRIBE_NO_SPEECH_MAX",
     ):
         assert f'-e {var}="${var}"' in run_sh, f"{var} is not forwarded by run.sh"
+
+
+def test_the_browser_is_sent_the_deduplicated_text():
+    """The screen must show what was said, not the last two seconds twice.
+
+    Reported 2026-08-07: the capture file was clean while the live transcript
+    panel showed duplicated phrases ("...whether there's a dissent." /
+    "Whether there's a dissent, we'll..."). The `transcription` message was sent
+    from the flush loop BEFORE the probe handler de-duplicated, so the browser
+    got the raw chunk and the file got the corrected one.
+
+    Also fixes a latent race. The dedup reads and writes `_last_transcript`; in
+    the probe handler that runs CONCURRENTLY, and was safe only because the
+    read/write pair happened to sit before the first await. The flush loop is
+    sequential, so speech order is guaranteed rather than coincidental.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "voice" / "server.py").read_text()
+    loop = source.split("async def _transcribe_flush_loop", 1)[1].split("\n    def ", 1)[0]
+
+    assert "strip_overlap" in loop, (
+        "de-duplication must happen in the flush loop, before the browser is told"
+    )
+    assert loop.index("strip_overlap") < loop.index('"type": "transcription"'), (
+        "strip_overlap must run BEFORE the transcription message is sent, or the "
+        "screen shows the overlap the capture file removed"
+    )
+
+    # And it must no longer happen inside the concurrent probe handler.
+    handler = source.split("async def _handle_transcribe_request", 1)[1].split("\nasync def ", 1)[0]
+    assert "strip_overlap(" not in handler, (
+        "the concurrent handler must not de-duplicate; two probes would race on "
+        "_last_transcript and the ordering would be accidental"
+    )

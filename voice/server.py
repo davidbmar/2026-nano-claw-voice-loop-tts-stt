@@ -678,8 +678,18 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     no_speech, TRANSCRIBE_NO_SPEECH_MAX, text[:90],
                 )
                 continue
+            # Strip the seam overlap BEFORE the browser is told, so the screen
+            # shows what was said rather than the last two seconds twice. This
+            # loop is sequential, so `_last_transcript` is read and written in
+            # speech order — which the concurrent probe tasks could not promise.
+            raw_text = text
+            text = strip_overlap(getattr(session, "_last_transcript", ""), text)
+            session._last_transcript = raw_text
+            if not text.strip():
+                log.info("TRANSCRIBE chunk was entirely overlap, skipped")
+                continue
             await ws.send_json({"type": "transcription", "text": text})
-            _spawn_probe(_handle_transcribe_request(ws, session, text))
+            _spawn_probe(_handle_transcribe_request(ws, session, text, raw_text))
 
     def _ensure_transcribe_flush():
         """Start the flush loop once per connection, and only for this mode."""
@@ -1854,6 +1864,7 @@ async def _handle_transcribe_request(
     ws: web.WebSocketResponse,
     session: Session,
     text: str,
+    raw: str | None = None,
 ) -> bool:
     """Consume the turn: print the transcript, forward it to gemma4, say nothing.
 
@@ -1879,17 +1890,15 @@ async def _handle_transcribe_request(
     seq = getattr(session, "_probe_seq", 0) + 1
     session._probe_seq = seq
 
-    # Chunks overlap by two seconds so the seam matcher has enough words for a
-    # fuzzy alignment; that audio is transcribed twice, so drop the repeated
-    # words here. The RAW text
-    # is recorded alongside, so this heuristic is never the only surviving copy.
-    raw_text = text
-    text = strip_overlap(getattr(session, "_last_transcript", ""), text)
-    session._last_transcript = raw_text
-    if not text.strip():
-        # The whole chunk was overlap — nothing new was said.
-        log.info("TRANSCRIBE [#%d] entirely overlap, skipped", seq)
-        return True
+    # Seam de-duplication already happened in the flush loop, which is
+    # SEQUENTIAL. It used to happen here, and here is concurrent: every probe
+    # both read and wrote session._last_transcript. That was safe only because
+    # the read/write pair sat before the first await — an accident of where the
+    # awaits fell, not a property anyone chose. Doing it upstream makes speech
+    # order the actual order, and lets the browser be sent the corrected text
+    # rather than the raw chunk (which is why the screen showed duplicated
+    # phrases while the capture file did not).
+    raw_text = raw or text
 
     # The "prints out everything it listens to" half of the mode. Logged at INFO
     # with a distinct prefix so `docker logs | grep TRANSCRIBE` is the whole
