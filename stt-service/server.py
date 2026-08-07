@@ -113,6 +113,90 @@ def _model_size(request: Request) -> str:
     return size if _valid_size(size) else DEFAULT_SIZE
 
 
+def _flag(request: Request, header: str) -> bool | None:
+    """Tri-state header: True, False, or None for "caller said nothing".
+
+    None matters. These options must default to faster-whisper's own defaults
+    rather than to False, so a caller that does not send the header gets exactly
+    today's behaviour — the phone line and call review must not change because a
+    different caller wanted stricter decoding.
+    """
+
+    raw = str(request.headers.get(header, "")).strip().lower()
+    if not raw:
+        return None
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _decode_options(request: Request) -> dict:
+    """Anti-hallucination decoding options, opt-in per request.
+
+    Whisper answers silence with invented text — it was trained on captioned
+    video, where silence is rarely truly empty, so a quiet room reliably yields
+    "thank you so much for watching". faster-whisper ships two defences and both
+    are off by default here:
+
+    ``vad_filter`` strips non-speech before decoding, using the silero model
+    BUNDLED with the package (faster_whisper/assets/silero_vad_v6.onnx) — no
+    download, no new dependency.
+
+    ``condition_on_previous_text`` defaults to True and feeds each result into
+    the next window, which is how one phantom seeds another. Six escalating
+    variations of the same outro were recorded in a single session on
+    2026-08-06.
+
+    NAMING TRAP: in faster-whisper 1.2.1 the parameter is ``log_prob_threshold``.
+    The ``logprob_threshold`` spelling used by openai-whisper does not exist here
+    and raises TypeError at the call site — every transcription would fail, not
+    just this option.
+    """
+
+    options: dict = {}
+    vad = _flag(request, "X-VAD-Filter")
+    if vad is not None:
+        options["vad_filter"] = vad
+    condition = _flag(request, "X-Condition-Previous")
+    if condition is not None:
+        options["condition_on_previous_text"] = condition
+    raw = str(request.headers.get("X-No-Speech-Threshold", "")).strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="invalid X-No-Speech-Threshold"
+            ) from exc
+        if not 0.0 <= value <= 1.0:
+            raise HTTPException(status_code=400, detail="invalid X-No-Speech-Threshold")
+        options["no_speech_threshold"] = value
+    return options
+
+
+def _quality(segments: list) -> dict:
+    """Worst no-speech probability and mean log-probability across segments.
+
+    faster-whisper computes both per segment and this service has always thrown
+    them away with ``_info``. They are the only signal that distinguishes
+    confident speech from a confident-sounding invention, and without them a
+    caller has nothing to filter on but the text itself.
+
+    The WORST no_speech_prob is reported, not the mean: one hallucinated segment
+    inside an otherwise real chunk is exactly the case worth catching, and a mean
+    would dilute it away.
+    """
+
+    if not segments:
+        return {}
+    no_speech = [
+        float(getattr(s, "no_speech_prob", 0.0) or 0.0) for s in segments
+    ]
+    logprobs = [float(getattr(s, "avg_logprob", 0.0) or 0.0) for s in segments]
+    return {
+        "no_speech_prob": round(max(no_speech), 4),
+        "avg_logprob": round(sum(logprobs) / len(logprobs), 4),
+    }
+
+
 def _pcm16(audio_bytes: bytes) -> np.ndarray:
     if len(audio_bytes) % 2:
         raise ValueError("PCM16 body must contain an even number of bytes")
@@ -594,8 +678,19 @@ async def transcribe(request: Request):
     with lock:
         first_use = _model_use_counts.get(size, 0) == 0
         segments, _info = model.transcribe(
-            samples, beam_size=5, language="en", word_timestamps=want_words
+            samples,
+            beam_size=5,
+            language="en",
+            word_timestamps=want_words,
+            # Empty unless the caller opted in, so every existing caller's
+            # decode is byte-identical to before.
+            **_decode_options(request),
         )
+        # Materialize once: `segments` is a generator, and both the text
+        # assembly below and the quality signals need to walk it. Consuming it
+        # twice would silently yield an empty second pass.
+        segments = list(segments)
+        quality = _quality(segments)
         if want_words:
             hypothesis = _hypothesis_from_segments(segments)
             words = [
@@ -623,6 +718,10 @@ async def transcribe(request: Request):
         "text": text,
         "duration_s": round(duration_s, 2),
         "processing_ms": int(elapsed * 1000),
+        # Additive: callers that ignore these are unaffected. Present so a
+        # caller can reject a confident-sounding invention, which is impossible
+        # to do from the text alone.
+        **quality,
         **({"words": words} if want_words else {}),
     }
 

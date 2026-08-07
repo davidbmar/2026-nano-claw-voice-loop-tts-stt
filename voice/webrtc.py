@@ -35,9 +35,10 @@ MAX_CONTINUOUS_SECONDS = 120
 # audio was lost. Observed 2026-08-06: counting to twenty dropped exactly "13"
 # at one seam and "3, 4" at the next.
 #
-# 500ms comfortably spans a spoken word. The cost is that the overlap is
-# transcribed twice, which `strip_transcript_overlap` removes downstream.
-OVERLAP_FRAMES = 25  # 500ms at 20ms/frame
+# One second comfortably spans any spoken word plus the pause around it. The
+# cost is that the overlapping second is transcribed twice; voice/
+# transcript_overlap.py removes the repeated words downstream.
+OVERLAP_FRAMES = 50  # 1s at 20ms/frame
 
 log = logging.getLogger("webrtc")
 
@@ -202,6 +203,41 @@ class Session:
             self._mic_preroll.clear()
         self._continuous = bool(enabled)
 
+    def buffered_rms(self) -> float:
+        """Loudness of the audio waiting to be transcribed.
+
+        The gate against Whisper hallucination. Given silence or room tone,
+        Whisper does not return nothing — it invents plausible text, most
+        infamously "Thank you." and "Thanks for watching!", because it was
+        trained on captioned video where silence is rarely truly empty.
+
+        A fixed-interval flush makes this acute: every 8 seconds of a quiet room
+        would be handed to the model as a transcription request. Measuring the
+        chunk first means silence is never asked about, which is a stronger
+        remedy than filtering the phantoms afterwards — a hallucination that
+        happens to look like speech is indistinguishable once it is text.
+        """
+
+        if not self._mic_frames:
+            return 0.0
+        samples = np.frombuffer(b"".join(self._mic_frames), dtype=np.int16)
+        if samples.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+
+    def discard_buffered_audio(self) -> None:
+        """Drop a silent chunk without transcribing it, keeping the overlap tail.
+
+        Keeping the tail matters: speech starting in the last half-second of an
+        otherwise-silent chunk would be cut off at the front otherwise, which is
+        the same seam loss the overlap exists to prevent.
+        """
+
+        if self._continuous and len(self._mic_frames) > OVERLAP_FRAMES:
+            self._mic_frames = self._mic_frames[-OVERLAP_FRAMES:]
+        else:
+            self._mic_frames.clear()
+
     def buffered_seconds(self) -> float:
         """How much audio is waiting to be transcribed.
 
@@ -283,26 +319,48 @@ class Session:
         # even though `_recording` is now False — that is what closes the gap
         # STT time would otherwise open.
         pcm_data = b"".join(self._mic_frames)
-        self._mic_frames.clear()
+        if self._continuous and len(self._mic_frames) > OVERLAP_FRAMES:
+            # Carry the last second forward so a word cut by this boundary is
+            # whole at the start of the next chunk. Reassignment rather than
+            # mutation, and no await in between, so frames arriving right now
+            # land in the new list instead of a buffer about to be discarded.
+            self._mic_frames = self._mic_frames[-OVERLAP_FRAMES:]
+        else:
+            self._mic_frames.clear()
         audio_duration_s = len(pcm_data) / (self._mic_sample_rate * 2)
 
         log.info("Mic recording stopped: %d bytes, %.2fs", len(pcm_data), audio_duration_s)
 
         stt_url = os.environ.get("STT_SERVICE_URL", "http://host.docker.internal:8200")
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "X-Sample-Rate": str(self._mic_sample_rate),
+            "X-Model-Size": self.stt_size,
+        }
+        if self._continuous:
+            # Transcribe mode only. Segments here are cut on a clock rather than
+            # by speech, so quiet stretches reach Whisper as transcription
+            # requests — and Whisper answers silence with invented captions.
+            #
+            # Gated on _continuous rather than sent always, because these change
+            # decoding: the live phone line and call review must keep exactly the
+            # behaviour they have today. Their requests stay byte-identical.
+            headers["X-VAD-Filter"] = "1"
+            headers["X-Condition-Previous"] = "0"
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     f"{stt_url}/transcribe",
                     content=pcm_data,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "X-Sample-Rate": str(self._mic_sample_rate),
-                        "X-Model-Size": self.stt_size,
-                    },
+                    headers=headers,
                 )
                 result = resp.json()
                 text = result.get("text", "")
                 stt_ms = result.get("processing_ms")
+                # Recorded on the session rather than returned, so the tuple
+                # contract this method has with four callers stays unchanged.
+                self.last_no_speech_prob = result.get("no_speech_prob")
+                self.last_avg_logprob = result.get("avg_logprob")
         except Exception:
             log.exception("STT service call failed (is stt-service running on %s?)", stt_url)
             return "", 0.0, None

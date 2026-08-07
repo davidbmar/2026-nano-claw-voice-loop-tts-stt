@@ -41,6 +41,8 @@ from voice.flow_session import (
     set_flow_mode,
     set_region_model,
 )
+from voice.phone_audio import NoiseFloorEstimator
+from voice.transcript_overlap import strip_overlap
 from voice.gemma_probe import (
     probe_base_url,
     probe_model,
@@ -116,6 +118,27 @@ def _on_agent_task_done(task: asyncio.Task) -> None:
 # an unwieldy chunk; too short and words are split at every boundary, which is
 # the seam loss this mode already fights.
 TRANSCRIBE_FLUSH_SECONDS = 8.0
+# Loudness a chunk must reach before it is worth transcribing. Below this it is
+# room tone, and Whisper answers room tone with invented captions.
+#
+# 60 sits under a quiet speaking voice and above a quiet room. The phone path
+# learned this the hard way in the other direction: its floor of 120 rejected
+# real callers at rms 136-176 and was cut to 70 (see NANO_CLAW_PHONE_RMS_MIN).
+# Erring low costs an occasional hallucination; erring high costs real speech.
+TRANSCRIBE_RMS_MIN = float(
+    (os.environ.get("NANO_CLAW_TRANSCRIBE_RMS_MIN") or "").strip() or 60.0
+)
+# The floor RISES to `noise_floor x ratio` in a noisy room, so a fixed minimum
+# alone would pass room tone anywhere loud. See NoiseFloorEstimator.
+TRANSCRIBE_RMS_RATIO = float(
+    (os.environ.get("NANO_CLAW_TRANSCRIBE_RMS_RATIO") or "").strip() or 3.0
+)
+# Above this, faster-whisper is itself saying the audio was probably not speech.
+# The last line of defence, after the energy gate and vad_filter: it catches a
+# chunk that HAS energy (a door, a cough, music) but no words in it.
+TRANSCRIBE_NO_SPEECH_MAX = float(
+    (os.environ.get("NANO_CLAW_TRANSCRIBE_NO_SPEECH_MAX") or "").strip() or 0.75
+)
 NANO_CLAW_URL = os.environ.get("NANO_CLAW_URL", "http://localhost:3001")
 STATIC_DIR = Path(__file__).resolve().parent / "web"
 BARGE_IN_ENABLED = os.environ.get("NANO_CLAW_BARGE_IN", "0") not in ("0", "false", "")
@@ -591,6 +614,39 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             try:
                 if _call_compat(getattr(session, "buffered_seconds", lambda: 0.0)) < 0.4:
                     continue  # nothing but silence since the last flush
+                # Never ask Whisper about silence. Given a quiet chunk it does
+                # not return nothing — it invents the text most likely to
+                # accompany silence in its training data, which is captioned
+                # video, which is why a quiet room produces "thank you so much
+                # for watching." Observed 2026-08-06: six such lines in one run.
+                #
+                # Gating here rather than filtering the output afterwards is the
+                # stronger fix. A phantom that happens to look like ordinary
+                # speech is indistinguishable once it is text, and a filter
+                # tuned to catch outros would still miss every other phantom.
+                rms = _call_compat(getattr(session, "buffered_rms", lambda: 1e9))
+                # Adaptive rather than fixed. The phone path already solved this
+                # (NoiseFloorEstimator): the threshold is max(minimum, learned
+                # floor x ratio), where the floor is an EMA over NON-speech
+                # frames only — speech freezes it, so a loud talker cannot raise
+                # the bar and swallow their own next soft word. A fixed 60 would
+                # pass room tone in a noisy room and reject a quiet voice in a
+                # silent one.
+                floor = _transcribe_noise_floor(session)
+                if not floor.classify(rms):
+                    _call_compat(
+                        getattr(session, "discard_buffered_audio", lambda: None)
+                    )
+                    record_exchange(
+                        "", None, None, seq=None,
+                        gated="silence", rms=rms,
+                        threshold=floor.effective_threshold,
+                    )
+                    log.debug(
+                        "Transcribe flush skipped: rms %.1f below %.1f",
+                        rms, floor.effective_threshold,
+                    )
+                    continue
                 text, _duration, _stt_ms = await session.stop_recording()
             except asyncio.CancelledError:
                 raise
@@ -598,6 +654,23 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 log.exception("Transcribe flush failed; continuing to listen")
                 continue
             if not text:
+                continue
+            # faster-whisper's own verdict, now that the service returns it.
+            # Energy alone cannot catch a phantom produced from a chunk that had
+            # sound in it but no words; this can.
+            no_speech = getattr(session, "last_no_speech_prob", None)
+            if isinstance(no_speech, (int, float)) and no_speech > TRANSCRIBE_NO_SPEECH_MAX:
+                # Recorded, not silently dropped. A gate that discards without
+                # trace is the same class of failure as the hallucination it
+                # prevents: the capture stops matching what happened.
+                record_exchange(
+                    text, None, None, seq=None,
+                    gated="no_speech", rms=rms, no_speech_prob=no_speech,
+                )
+                log.info(
+                    "TRANSCRIBE rejected (no_speech_prob %.2f > %.2f): %s",
+                    no_speech, TRANSCRIBE_NO_SPEECH_MAX, text[:90],
+                )
                 continue
             await ws.send_json({"type": "transcription", "text": text})
             _spawn_probe(_handle_transcribe_request(ws, session, text))
@@ -1732,6 +1805,29 @@ async def _handle_agent_request(
         await _speak_with_events(ws, session, error_text)
 
 
+def _transcribe_noise_floor(session: Any) -> NoiseFloorEstimator:
+    """This session's adaptive silence threshold, created on first use.
+
+    Reuses the phone path's estimator rather than a second implementation. Its
+    behaviour is the reason: the threshold is max(minimum, learned_floor x
+    ratio), and the floor is an EMA over frames classified NON-speech only.
+    Speech freezes the floor, so a loud passage cannot drag the bar up and mute
+    the quiet sentence that follows it — the failure a naive running average has.
+
+    Per session, because the room is per session. A shared estimator would let
+    one noisy connection raise the threshold for a quiet one.
+    """
+
+    floor = getattr(session, "_transcribe_floor", None)
+    if floor is None:
+        floor = NoiseFloorEstimator(
+            min_threshold=TRANSCRIBE_RMS_MIN,
+            ratio=TRANSCRIBE_RMS_RATIO,
+        )
+        session._transcribe_floor = floor
+    return floor
+
+
 async def _handle_transcribe_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1760,6 +1856,17 @@ async def _handle_transcribe_request(
     # running concurrently those differ, and only one of them is the experiment.
     seq = getattr(session, "_probe_seq", 0) + 1
     session._probe_seq = seq
+
+    # Chunks overlap by one second so no word is cut in half at a seam; that
+    # second is transcribed twice, so drop the repeated words here. The RAW text
+    # is recorded alongside, so this heuristic is never the only surviving copy.
+    raw_text = text
+    text = strip_overlap(getattr(session, "_last_transcript", ""), text)
+    session._last_transcript = raw_text
+    if not text.strip():
+        # The whole chunk was overlap — nothing new was said.
+        log.info("TRANSCRIBE [#%d] entirely overlap, skipped", seq)
+        return True
 
     # The "prints out everything it listens to" half of the mode. Logged at INFO
     # with a distinct prefix so `docker logs | grep TRANSCRIBE` is the whole
@@ -1795,7 +1902,7 @@ async def _handle_transcribe_request(
             probe_model(), probe_base_url(), error,
         )
 
-    record_exchange(text, result, error, seq=seq)
+    record_exchange(text, result, error, seq=seq, raw=raw_text)
 
     # Nothing is sent back to the page. The screen shows ONLY what was heard.
     #

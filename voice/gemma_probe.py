@@ -155,6 +155,11 @@ def record_exchange(
     result: dict[str, Any] | None,
     error: str | None = None,
     seq: int | None = None,
+    raw: str | None = None,
+    gated: str | None = None,
+    rms: float | None = None,
+    no_speech_prob: float | None = None,
+    threshold: float | None = None,
 ) -> None:
     """Append one utterance and its outcome to the capture file.
 
@@ -177,6 +182,10 @@ def record_exchange(
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "seq": seq,
         "transcript": transcript,
+        # What STT actually returned, before seam-overlap words were removed.
+        # Kept so the dedup heuristic is auditable and never destructive — if it
+        # ever strips real speech, the evidence is still in the file.
+        "transcript_raw": raw if raw is not None else transcript,
         "model": probe_model(),
         "host": probe_base_url(),
         "response": result.get("response"),
@@ -184,6 +193,18 @@ def record_exchange(
         # becomes part of the measured output.
         "thinking": result.get("thinking"),
         "error": error,
+        # Why a chunk was NOT sent to the model: "silence" (below the adaptive
+        # energy floor) or "no_speech" (Whisper's own verdict). None means it
+        # was forwarded normally.
+        #
+        # Rejections are written rather than dropped so the gates are auditable.
+        # A threshold set too high would otherwise be invisible — it would look
+        # exactly like a quiet room, which is the failure this file exists to
+        # make impossible.
+        "gated": gated,
+        "rms": round(rms, 1) if isinstance(rms, (int, float)) else None,
+        "rms_threshold": round(threshold, 1) if isinstance(threshold, (int, float)) else None,
+        "no_speech_prob": no_speech_prob,
         # The native API's counters. `prompt_eval_count` is the one to watch:
         # if it stops rising with longer transcripts, the context is truncating.
         "prompt_eval_count": result.get("prompt_eval_count"),
