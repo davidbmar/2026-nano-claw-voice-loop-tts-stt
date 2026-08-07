@@ -72,6 +72,30 @@ def test_an_empty_previous_transcript_is_safe():
     assert ov.strip_overlap("", "first thing said") == "first thing said"
 
 
+def test_one_differing_word_inside_a_five_word_overlap_is_joined():
+    """The vacuity case: the old exact matcher cannot pass this test.
+
+    Whisper rendered one boundary token as a numeral on the left and a word on
+    the right. The other four aligned words are enough evidence to remove the
+    whole repeated prefix.
+    """
+    previous = "we counted eleven twelve 13 fourteen fifteen"
+    current = "eleven twelve thirteen fourteen fifteen sixteen"
+    assert ov.find_overlap(previous, current) == 5
+    assert ov.strip_overlap(previous, current) == "sixteen"
+
+
+def test_a_fuzzy_join_still_needs_three_matching_words():
+    """Two matching words plus a disagreement are not enough to delete speech."""
+    previous = "before one 13 three"
+    current = "one thirteen three after"
+    assert ov.find_overlap(previous, current) == 0
+
+
+def test_continuous_capture_carries_two_seconds_for_fuzzy_alignment():
+    assert webrtc.OVERLAP_FRAMES == 100
+
+
 # --------------------------------------------------------- the hallucination gate
 
 

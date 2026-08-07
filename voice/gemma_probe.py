@@ -160,6 +160,8 @@ def record_exchange(
     rms: float | None = None,
     no_speech_prob: float | None = None,
     threshold: float | None = None,
+    *,
+    session_id: str,
 ) -> None:
     """Append one utterance and its outcome to the capture file.
 
@@ -168,6 +170,10 @@ def record_exchange(
 
     Failed exchanges are written too, with `error` set. A capture that only
     contained successes would silently misrepresent the run — the gaps are data.
+
+    `session_id` is generated once per websocket connection by the server. It
+    is the only reliable way to separate concurrent sessions in one append-only
+    file; `seq` alone cannot distinguish interleaved connections.
 
     `seq` is speech order, assigned when the utterance ended. Probes run
     concurrently so a slow one finishes after a fast one that came later, which
@@ -180,6 +186,7 @@ def record_exchange(
     result = result or {}
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session_id": session_id,
         "seq": seq,
         "transcript": transcript,
         # What STT actually returned, before seam-overlap words were removed.

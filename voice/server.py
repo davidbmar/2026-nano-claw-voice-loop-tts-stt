@@ -11,14 +11,13 @@ import logging
 import math
 import os
 import re
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
-
-import secrets
 
 import httpx
 from aiohttp import WSCloseCode, web
@@ -464,6 +463,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     # The browser never supplies this value. A fresh, unguessable id for each
     # socket keeps agent memory and pending tool approvals conversation-local.
     conversation_id = f"voice-{uuid.uuid4().hex}"
+    # Capture identity is separate from conversation identity and never comes
+    # from a browser frame. It stays fixed even if this socket renegotiates its
+    # audio transport and creates a replacement Session object.
+    probe_session_id = secrets.token_hex(8)
     ws = web.WebSocketResponse()
 
     # Every real route request has the adapter installed by create_app().  The
@@ -533,6 +536,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             Session() if audio_transport is None else Session(audio_transport)
         )
         new_session._agent_session_id = conversation_id
+        new_session._probe_session_id = probe_session_id
         # Identity is fixed at the HTTP upgrade. Browser messages can never
         # replace these values; login/logout takes effect on a new socket.
         new_session.user_sub = socket_identity.user_sub
@@ -639,6 +643,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     )
                     record_exchange(
                         "", None, None, seq=None,
+                        session_id=_transcribe_session_id(session),
                         gated="silence", rms=rms,
                         threshold=floor.effective_threshold,
                     )
@@ -665,6 +670,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 # prevents: the capture stops matching what happened.
                 record_exchange(
                     text, None, None, seq=None,
+                    session_id=_transcribe_session_id(session),
                     gated="no_speech", rms=rms, no_speech_prob=no_speech,
                 )
                 log.info(
@@ -1828,6 +1834,22 @@ def _transcribe_noise_floor(session: Any) -> NoiseFloorEstimator:
     return floor
 
 
+def _transcribe_session_id(session: Any) -> str:
+    """Return this connection's server-owned capture id.
+
+    Real websocket sessions receive the id in ``_create_session``. The lazy
+    fallback keeps direct unit-level handler calls honest too: even a narrow
+    Session fake produces a non-null id, and repeated calls on it remain in the
+    same capture session.
+    """
+
+    session_id = getattr(session, "_probe_session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        session_id = secrets.token_hex(8)
+        session._probe_session_id = session_id
+    return session_id
+
+
 async def _handle_transcribe_request(
     ws: web.WebSocketResponse,
     session: Session,
@@ -1857,8 +1879,9 @@ async def _handle_transcribe_request(
     seq = getattr(session, "_probe_seq", 0) + 1
     session._probe_seq = seq
 
-    # Chunks overlap by one second so no word is cut in half at a seam; that
-    # second is transcribed twice, so drop the repeated words here. The RAW text
+    # Chunks overlap by two seconds so the seam matcher has enough words for a
+    # fuzzy alignment; that audio is transcribed twice, so drop the repeated
+    # words here. The RAW text
     # is recorded alongside, so this heuristic is never the only surviving copy.
     raw_text = text
     text = strip_overlap(getattr(session, "_last_transcript", ""), text)
@@ -1902,7 +1925,14 @@ async def _handle_transcribe_request(
             probe_model(), probe_base_url(), error,
         )
 
-    record_exchange(text, result, error, seq=seq, raw=raw_text)
+    record_exchange(
+        text,
+        result,
+        error,
+        seq=seq,
+        raw=raw_text,
+        session_id=_transcribe_session_id(session),
+    )
 
     # Nothing is sent back to the page. The screen shows ONLY what was heard.
     #

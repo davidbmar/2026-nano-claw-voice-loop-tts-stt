@@ -262,6 +262,43 @@ def test_utterances_are_numbered_in_speech_order(
     assert [r["transcript"] for r in rows] == ["first", "second", "third"]
 
 
+def test_capture_entries_share_a_server_owned_session_id(
+    monkeypatch, in_transcribe_mode, capture_to_tmp
+):
+    """One connection is groupable even when its probes complete out of order."""
+
+    async def fake_send(text, **kwargs):
+        return {"response": f"re: {text}"}
+
+    monkeypatch.setattr(server, "send_to_gemma", fake_send)
+    monkeypatch.setattr(server.secrets, "token_hex", lambda _size: "c0ffee42")
+
+    session = _session()
+    for utterance in ("first", "second"):
+        asyncio.run(server._handle_transcribe_request(FakeWS(), session, utterance))
+
+    rows = [json.loads(line) for line in capture_to_tmp.read_text().splitlines()]
+    assert [row["session_id"] for row in rows] == ["c0ffee42", "c0ffee42"]
+
+
+def test_every_capture_call_threads_the_session_id():
+    """The silence/no-speech gates are entries too, not exceptions to identity."""
+    tree = ast.parse((ROOT / "voice" / "server.py").read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+        == "record_exchange"
+    ]
+    assert calls, "the capture recorder is no longer called"
+    for call in calls:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert "session_id" in keywords, (
+            f"record_exchange call at line {call.lineno} omits session_id"
+        )
+
+
 def test_other_modes_are_left_alone(monkeypatch):
     """The handler must decline every mode but its own, or it eats the product."""
     monkeypatch.setattr(server, "is_transcribe_mode", lambda *a, **k: False)

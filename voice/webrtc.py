@@ -35,10 +35,11 @@ MAX_CONTINUOUS_SECONDS = 120
 # audio was lost. Observed 2026-08-06: counting to twenty dropped exactly "13"
 # at one seam and "3, 4" at the next.
 #
-# One second comfortably spans any spoken word plus the pause around it. The
-# cost is that the overlapping second is transcribed twice; voice/
-# transcript_overlap.py removes the repeated words downstream.
-OVERLAP_FRAMES = 50  # 1s at 20ms/frame
+# Two seconds supplies roughly five words: enough for the join algorithm to
+# require a three-word match and still align across one boundary word that STT
+# renders differently. A third second adds transcription cost without making
+# that alignment meaningfully more reliable.
+OVERLAP_FRAMES = 100  # 2s at 20ms/frame
 
 log = logging.getLogger("webrtc")
 
@@ -320,10 +321,10 @@ class Session:
         # STT time would otherwise open.
         pcm_data = b"".join(self._mic_frames)
         if self._continuous and len(self._mic_frames) > OVERLAP_FRAMES:
-            # Carry the last second forward so a word cut by this boundary is
-            # whole at the start of the next chunk. Reassignment rather than
-            # mutation, and no await in between, so frames arriving right now
-            # land in the new list instead of a buffer about to be discarded.
+            # Carry the last two seconds forward so the fuzzy seam join has
+            # enough words to align. Reassignment rather than mutation, and no
+            # await in between, so frames arriving right now land in the new
+            # list instead of a buffer about to be discarded.
             self._mic_frames = self._mic_frames[-OVERLAP_FRAMES:]
         else:
             self._mic_frames.clear()

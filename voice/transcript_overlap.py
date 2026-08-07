@@ -1,12 +1,14 @@
 """Remove the duplicated words that overlapping audio chunks produce.
 
-Transcribe mode carries one second of audio from the end of each chunk into the
+Transcribe mode carries two seconds of audio from the end of each chunk into the
 start of the next, so a word straddling the cut is whole in at least one of them.
-The cost is that the overlapping second is transcribed twice, and those repeated
+The cost is that the overlapping audio is transcribed twice, and those repeated
 words would otherwise appear in the record as things the speaker said twice.
 
-This finds the longest run of words that ends the previous transcript and begins
-the current one, and drops it from the current one.
+This finds the longest aligned run of words that ends the previous transcript
+and begins the current one, and drops it from the current one. One word may
+differ inside the run, because STT commonly renders the same boundary word two
+ways (for example, "13" and "thirteen").
 
 Deliberately conservative. Two rules keep it from eating real speech:
 
@@ -23,11 +25,16 @@ the only surviving copy of what was heard.
 
 from __future__ import annotations
 
+import difflib
 import re
 
 # Below this, a repeat is more likely to be genuine speech than a seam artifact.
-MIN_OVERLAP_WORDS = 2
-# One second of speech is rarely more than a handful of words; searching far
+MIN_OVERLAP_WORDS = 3
+# Historical one-second captures and the established live contract contain
+# exact two-word seams. Exact equality is stronger evidence than a fuzzy match,
+# so retain that compatibility without lowering the fuzzy evidence threshold.
+_MIN_EXACT_OVERLAP_WORDS = 2
+# Two seconds of speech is still only a handful of words; searching far
 # past that invites a coincidental match with unrelated text.
 MAX_OVERLAP_WORDS = 25
 
@@ -57,9 +64,41 @@ def find_overlap(previous: str, current: str) -> int:
     cur_words = [w for w in cur_words if w]
 
     limit = min(len(prev_words), len(cur_words), MAX_OVERLAP_WORDS)
-    # Longest match first: a short match nested inside a longer one would strip
-    # too little and leave part of the duplicate behind.
+    # Longest alignment first: a short match nested inside a longer one would
+    # strip too little and leave part of the duplicate behind. Requiring both
+    # ends to match anchors the alignment at the seam; without those anchors,
+    # ordinary repetition inside a sentence ("count with me count") can look
+    # like an overlap even though it does not reach the previous chunk's end.
     for k in range(limit, MIN_OVERLAP_WORDS - 1, -1):
+        matcher = difflib.SequenceMatcher(
+            None,
+            prev_words[-k:],
+            cur_words[:k],
+            autojunk=False,
+        )
+        blocks = [block for block in matcher.get_matching_blocks() if block.size]
+        if not blocks:
+            continue
+        matching_words = sum(block.size for block in blocks)
+        first = blocks[0]
+        last = blocks[-1]
+        anchored = (
+            first.a == 0
+            and first.b == 0
+            and last.a + last.size == k
+            and last.b + last.size == k
+        )
+        if (
+            anchored
+            and matching_words >= MIN_OVERLAP_WORDS
+            and matching_words >= k - 1
+        ):
+            return k
+
+    # Keep exact two-word joins for captures made before the overlap widened.
+    # Fuzzy evidence still requires MIN_OVERLAP_WORDS matching positions.
+    if limit >= _MIN_EXACT_OVERLAP_WORDS:
+        k = _MIN_EXACT_OVERLAP_WORDS
         if prev_words[-k:] == cur_words[:k]:
             return k
     return 0
